@@ -4,10 +4,14 @@ A seed-driven simulator for generating synthetic Type 1 Diabetes blood glucose d
 
 Designed by a T1DM patient, informed by lived experience.
 
+Demo:
+
+https://github.com/user-attachments/assets/31a9d6ab-90ed-44e2-ad93-f37f147bb650
+
 Screenshot:
 
+<img width="4200" height="1700" alt="t1dm_seed60262_1775136760" src="https://github.com/user-attachments/assets/d156a4f2-db92-42b3-a9db-3347889b1b4a" />
 
-<img width="4200" height="1700" alt="t1dm_seed60262_1775136760" src="https://github.com/user-attachments/assets/d0aae887-44eb-47c3-b146-88caa6b08381" />
 
 ## Motivation
 
