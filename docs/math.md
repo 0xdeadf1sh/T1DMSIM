@@ -19,59 +19,102 @@ After sampling, apply sigmoid and clamp:
 
 ## Carbohydrate Absorption Curves
 
-Each meal produces a gamma-distributed absorption curve:
+Each meal becomes 2-5 overlapping gamma-distributed absorption curves:
 
-    C(t) = A * t^(k-1) * exp(-t/theta)
+    C_i(t) = A_i * t^(k_i - 1) * exp(-t / theta_i)
 
-Where A is chosen so that sum(C) = total_carb_grams (amount per step).
+Where A_i is chosen so that sum(C_i) = component_carb_grams (amount per step).
 
-Parameters by carb type:
-- Fast carbs: k = FAST_CARB_K, theta = FAST_CARB_THETA
-- Slow carbs: k = SLOW_CARB_K, theta = SLOW_CARB_THETA
-- Protein/fat: k = PROTEIN_FAT_GAMMA_K, theta = PROTEIN_FAT_GAMMA_THETA
+The number of components is `MIXED_MEAL_MIN_COMPONENTS + Poisson(MIXED_MEAL_EXTRA_COMPONENTS_LAMBDA)` capped at `MIXED_MEAL_MAX_COMPONENTS`. Carb fractions per component come from `Dirichlet(MIXED_MEAL_DIRICHLET_ALPHA)`. Each component is sampled as fast / medium / slow with weights driven by `slow_carb_preference`. Within each category, k and theta are uniformly sampled from category-specific ranges (e.g. `MIXED_MEAL_FAST_K_RANGE`).
 
-Noise is applied to k and theta per meal:
+Per-component noise is applied on top:
 
     k_actual = k * (1 + N(0, CARB_CURVE_K_NOISE))
     theta_actual = theta * (1 + N(0, CARB_CURVE_THETA_NOISE))
 
+A protein/fat tail (`PROTEIN_FAT_EQUIV_GRAMS` worth of very slow carbs) is always added to every meal regardless of composition.
+
+Hypo correction carbs use a separate fast pair (`HYPO_CARB_K`, `HYPO_CARB_THETA`) that peaks faster than meal carbs (glucose tablets / juice).
+
 
 ## Insulin Action Curves
 
-Bolus (rapid-acting): gamma curve with k = BOLUS_GAMMA_K, theta = BOLUS_GAMMA_THETA.
-Duration: BOLUS_DURATION_HOURS * 60 minutes.
+Bolus (rapid-acting): gamma curve. Both duration and theta scale with dose, centered on a 5U reference:
 
-Basal (long-acting): flat curve over BASAL_DURATION_HOURS.
-Rate per step = dose / (duration_hours) * (DT_MINUTES / 60).
+    sqrt_excess = sqrt(dose) - sqrt(5)
+    duration_h = clip(BOLUS_DIA_BASE_HOURS + BOLUS_DIA_DOSE_SCALE * sqrt_excess,
+                      BOLUS_DIA_MIN_HOURS, BOLUS_DIA_MAX_HOURS)
+    theta = BOLUS_GAMMA_THETA * (1 + BOLUS_THETA_DOSE_SLOPE * sqrt_excess)
+    k = BOLUS_GAMMA_K
+
+Larger doses act longer and peak slightly later, matching observed subcutaneous insulin PK. Helper: `bolus_pk_for_dose(dose) -> (k, theta, duration_minutes)`. The legacy `BOLUS_DURATION_HOURS` constant is kept for tests but not used by new code.
+
+Basal (long-acting): trapezoidal curve from `basal_curve()` with `BASAL_RAMP_UP_HOURS` ramp-in, `BASAL_RAMP_DOWN_HOURS` ramp-out, plateau in between, normalized so the area equals the dose.
+
+### Injection site quality (lipohypertrophy)
+
+Each insulin dose (basal, meal bolus, hyper correction, trend correction) is multiplied by a per-dose site_quality factor:
+
+    site_quality ~ N(1.0, SITE_QUALITY_SIGMA_BASE * (1.5 - s4))
+    site_quality = clip(site_quality, SITE_QUALITY_MIN, SITE_QUALITY_MAX)
+    delivered_dose = intended_dose * site_quality
+
+Patients with low `lifestyle_consistency` (s4) rotate sites poorly and develop lipohypertrophy → higher dose-to-dose variance. The PK shape (k, theta, duration) is determined by the *intended* dose; only the absorbed amount varies.
 
 
 ## Insulin Sensitivity
 
-Multi-peak diurnal pattern:
+Multi-peak diurnal pattern (`phase_shift` and `daily_drift` smooth-step-blend across midnight from yesterday to today over `IS_DRIFT_TRANSITION_HOURS`):
 
     morning = IS_MORNING_AMPLITUDE * exp(-0.5 * ((hour - IS_MORNING_PEAK_HOUR - phase_shift) / 2.0)^2)
     evening = IS_EVENING_AMPLITUDE * exp(-0.5 * ((hour - IS_EVENING_PEAK_HOUR) / 2.5)^2)
     night   = -IS_NIGHT_DIP_AMPLITUDE * exp(-0.5 * ((night_hour - IS_NIGHT_DIP_HOUR) / 2.0)^2)
     diurnal = 1.0 + morning + evening + night
 
-Combined:
+Combined, with all modifiers:
 
-    IS(t) = IS_base * diurnal * (1 + daily_drift) * illness_factor * (1 + fast_noise)
+    IS(t) = IS_base * diurnal * (1 + daily_drift) * illness_factor
+            * exercise_envelope * stress_envelope
+            * glucotox_factor * postprandial_bonus
+            * (1 + fast_noise)
 
 Where:
-- daily_drift ~ N(0, IS_DAILY_DRIFT_SIGMA), sampled once per day
-- phase_shift ~ N(0, IS_DAWN_PHASE_DAILY_SIGMA), sampled once per day
-- fast_noise ~ N(0, IS_FAST_NOISE_SIGMA), sampled every step
-- illness_factor ramps toward illness_is_target at rate ILLNESS_IS_RAMP_RATE per day
+- `daily_drift ~ N(0, IS_DAILY_DRIFT_SIGMA)`, sampled once per day, blended across midnight
+- `phase_shift ~ N(0, IS_DAWN_PHASE_DAILY_SIGMA)`, sampled once per day, blended across midnight
+- `fast_noise ~ N(0, IS_FAST_NOISE_SIGMA)`, sampled every step
+- `illness_factor` ramps toward `illness_is_target` at rate `ILLNESS_IS_RAMP_RATE` per day; always applied (rests at 1.0 when healthy)
+- `exercise_envelope`, `stress_envelope` use a trapezoidal `envelope_intensity()` that ramps in/out of the effect window, blending the raw factor against 1.0
+
+### Glucotoxicity
+
+A slow EMA of true BG (6h half-life) drives transient insulin resistance when chronically elevated:
+
+    glucotox_bg_ema += α * (BG - glucotox_bg_ema)   where α = 1 - 0.5^(dt / half_life)
+    if glucotox_bg_ema > GLUCOTOX_BG_THRESHOLD:
+        intensity = min(1, (ema - threshold) / (max_bg - threshold))
+        glucotox_factor = 1 + GLUCOTOX_MAX_IS_INCREASE * intensity
+    else:
+        glucotox_factor = 1.0
+
+Closes a positive feedback loop: high BG → more IR → harder to bring down.
+
+### Postprandial IS bonus
+
+Incretin / GLP-1 effect: while carbs are absorbing, peripheral tissues are transiently more insulin-sensitive. Saturating in active carb load:
+
+    bonus = POSTPRANDIAL_IS_BONUS_FACTOR * active_carb / (POSTPRANDIAL_IS_BONUS_HALF + active_carb)
+    postprandial_bonus = 1 - bonus
 
 
 ## BG Delta Computation
 
 At each step:
 
-    effective_carb_load = (total_carb + HGO - exercise) * IS(t)
-    insulin_carb_equiv = total_insulin * ICR
-    delta_BG = BG_SCALE_FACTOR * (effective_carb_load - insulin_carb_equiv)
+    glucose_in  = total_carb + HGO - exercise
+    glucose_out = total_insulin * ICR / IS(t)
+    delta_BG    = BG_SCALE_FACTOR * (glucose_in - glucose_out)
+
+`IS(t)` now divides the insulin side: insulin-resistant patients (IS > 1) clear less glucose per unit insulin; sensitive patients (IS < 1) clear more. HGO suppression by insulin is handled separately (see Hepatic Glucose Output) — IS only modulates peripheral insulin action.
 
 Physiological guardrails:
 
@@ -79,11 +122,17 @@ Physiological guardrails:
         delta_BG -= (BG - RENAL_THRESHOLD) * RENAL_CLEARANCE_RATE
 
     if BG < COUNTER_REGULATORY_THRESHOLD:
-        delta_BG += COUNTER_REGULATORY_RATE * (threshold - BG) / threshold
+        delta_BG += COUNTER_REGULATORY_RATE * (COUNTER_REGULATORY_THRESHOLD - BG) / COUNTER_REGULATORY_THRESHOLD
+
+    if BG < SEVERE_HYPO_THRESHOLD:
+        severity = (SEVERE_HYPO_THRESHOLD - BG) / SEVERE_HYPO_THRESHOLD
+        delta_BG += SEVERE_HYPO_GLUCAGON_RATE * severity
 
 Final:
 
     BG(t+1) = clamp(BG(t) + delta_BG, BG_CLAMP_MIN, BG_CLAMP_MAX)
+
+`BG_CLAMP_MIN` is intentionally low (20 mg/dL) so the dynamics, not the clamp, drive the lower tail. The combined counter-regulatory + glucagon-dump terms together with the soft-bound headroom cap are usually strong enough to lift BG before the clamp engages.
 
 
 ## CGM Observation Model
@@ -93,12 +142,52 @@ Final:
 
 This gives proportional noise: higher BG = more absolute noise, matching real CGM MARD characteristics.
 
+Interstitial lag is currently NOT modeled. The constant `CGM_LAG_MINUTES = 10` is reserved for a future implementation that would sample true BG from `CGM_LAG_MINUTES` ago instead of the current step. Real CGMs lag by 5-15 min; ML models trained on this simulator's CGM channel will not learn that lag.
+
 
 ## Hepatic Glucose Output
 
-Constant rate with noise:
+Insulin-suppressed via a Hill function on EMA-smoothed insulin (proxies plasma insulin lag behind subcutaneous absorption, ~12 min half-life at `HGO_INSULIN_SMOOTHING_ALPHA = 0.25`):
 
-    HGO(t) = HGO_BASE_GRAMS_PER_HOUR * (1 + N(0, HGO_NOISE_SIGMA)) * (DT_MINUTES / 60)
+    smoothed_ins  = α * insulin_per_step + (1-α) * smoothed_ins_prev
+    suppression   = 1 / (1 + smoothed_ins / HGO_INSULIN_HALF_MAX)
+    HGO_rate      = HGO_SUPPRESSED_FLOOR + (HGO_UNSUPPRESSED - HGO_SUPPRESSED_FLOOR) * suppression
+    HGO_baseline  = HGO_rate * (1 + N(0, HGO_NOISE_SIGMA)) * (DT_MINUTES / 60) * glycogen_gate * alcohol_factor
+    meal_rebound  = sum over active meal_hgo_effects of (magnitude * envelope_intensity) * (DT_MINUTES / 60)
+    HGO(t)        = HGO_baseline + meal_rebound
+
+`HGO_INSULIN_HALF_MAX` is tuned so a typical basal level (~0.07 U/step) yields ~9 g/hr (the legacy balanced rate, preserved so basal sizing — `ideal_basal = HGO_BASE_GRAMS_PER_HOUR * 24 / ICR` — still produces near-zero net delta). At zero insulin, HGO climbs toward `HGO_UNSUPPRESSED_GRAMS_PER_HOUR` (DKA-like). Alcohol additionally suppresses HGO via `alcohol_factor` (trapezoidal envelope around 1.0). The `glycogen_gate` ramps HGO down when the reservoir is depleted (see Glycogen reservoir). The `meal_rebound` term is additive (not multiplicative) — see Delayed-meal HGO rebound below.
+
+Helper: `compute_hgo_rate(insulin_per_step) -> g/hr`.
+
+### Delayed-meal HGO rebound
+
+Each meal whose carb amount exceeds `DELAYED_HGO_MEAL_THRESHOLD_GRAMS` schedules a positive HGO bump 3.5-5.5h later, lasting 4-8h:
+
+    excess     = carb_amount - DELAYED_HGO_MEAL_THRESHOLD_GRAMS
+    magnitude  = min(DELAYED_HGO_MAX_BUMP, DELAYED_HGO_PER_GRAM * excess)   (g/hr)
+    delay      ~ U(DELAYED_HGO_DELAY_HOURS_MIN, DELAYED_HGO_DELAY_HOURS_MAX)
+    duration   ~ U(DELAYED_HGO_DURATION_HOURS_MIN, DELAYED_HGO_DURATION_HOURS_MAX)
+
+The bump is shaped by the standard trapezoidal `envelope_intensity()` with `DELAYED_HGO_RAMP_HOURS` ramps. Models the delayed gluconeogenesis from amino acids and cortisol response that drive nocturnal hyperglycemia after a large dinner.
+
+### Glycogen reservoir
+
+Hepatic glycogen is a finite store that gates the glycogenolysis-sourced fraction of HGO:
+
+    if glycogen < GLYCOGEN_CAPACITY * GLYCOGEN_LOW_THRESHOLD_FRACTION:
+        availability = glycogen / (GLYCOGEN_CAPACITY * GLYCOGEN_LOW_THRESHOLD_FRACTION)
+        glycogen_gate = (1 - GLYCOGEN_DRAIN_FRACTION) + GLYCOGEN_DRAIN_FRACTION * availability
+    else:
+        glycogen_gate = 1.0
+
+After applying the gate, glycogen is updated each step:
+
+    glycogen += total_carb * GLYCOGEN_REFILL_FRACTION   (refill from absorbed carbs)
+    glycogen -= HGO(t) * GLYCOGEN_DRAIN_FRACTION        (drain from glycogenolysis)
+    glycogen  = clip(glycogen, 0, GLYCOGEN_CAPACITY)
+
+The refill is a "background" channel — it is not subtracted from BG-bound carbs, since ICR is empirically tuned to net BG response. The coupling back to BG dynamics is via the `glycogen_gate` reducing future HGO when the reservoir is depleted.
 
 
 ## Correction Behavior
@@ -137,9 +226,7 @@ Daily adjustment based on previous day's mean BG:
 All curve values are in "amount per step" units:
 - Carb curves: grams per step (sum of curve = total grams)
 - Insulin curves: units per step (sum of curve = total units)
-- HGO: grams per step
+- HGO: grams per step (rate g/hr converted via DT_MINUTES / 60)
 - Exercise: grams-equivalent per step
 
-The gamma_curve function normalizes so that sum(values) = total_amount.
-The flat_curve function computes rate_per_hour * (DT_MINUTES / 60).
-Both produce values in the same units (amount per step).
+Both `gamma_curve` and `basal_curve` normalize so that `sum(values) = total_amount`. There is no `flat_curve` — the trapezoidal `basal_curve` replaced it. Never pass a rate where total_amount is expected.

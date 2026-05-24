@@ -38,7 +38,19 @@ os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
 import pygame
 import pygame.freetype
 
-from simulator import T1DMSimulator, DT_MINUTES
+from simulator import T1DMSimulator, DT_MINUTES, SIMULATION_START_DAY_OF_WEEK
+
+DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+WARMUP_HOURS = 24  # Hours discarded before the displayed window starts
+WARMUP_DAYS = WARMUP_HOURS // 24
+DISPLAY_START_DOW = (SIMULATION_START_DAY_OF_WEEK + WARMUP_DAYS) % 7
+
+# Nocturnal hours shaded in the chart background (22:00-06:00)
+NIGHT_START_HOUR = 22
+NIGHT_END_HOUR = 6
+NIGHT_OVERLAY_RGBA = (10, 20, 50, 35)
+
+DEFAULT_ZOOM_HOURS = 6.0  # Initial visible window width
 
 # ============================================================================
 # VISUAL THEME
@@ -91,6 +103,8 @@ CURVES = [
     {'key': 'insulin_resistance','name': 'Insulin Resistance','color': COLOR_IS,'unit': '×',  'y_min': 0,   'y_max': 3,   'toggle_key': pygame.K_4},
     {'key': 'total_exercise','name': 'Exercise',         'color': COLOR_EXERCISE,'unit': 'g/step','y_min': 0,   'y_max': 10,   'toggle_key': pygame.K_5},
     {'key': 'bg_delta',    'name': 'BG Delta',           'color': COLOR_DELTA,   'unit': 'mg/dL', 'y_min': -20, 'y_max': 10,  'toggle_key': pygame.K_6},
+    {'key': 'hgo',          'name': 'Hepatic Output', 'color': (200, 200, 50), 'unit': 'g/step', 'y_min': 0, 'y_max': 1.5, 'toggle_key': pygame.K_7},
+    {'key': 'glucose_in', 'name': 'Glucose In', 'color': (255, 100, 100), 'unit': 'g/step', 'y_min': 0, 'y_max': 20, 'toggle_key': pygame.K_8},
 ]
 
 
@@ -158,11 +172,15 @@ class Visualizer:
 
         # View state
         self.scroll_x = 0           # Leftmost visible step index
-        self.pixels_per_step = 4.0   # Zoom level
-        self.curve_visible = [True, True, True, True, False, False]  # Which curves are shown
+        # Initial zoom: fit DEFAULT_ZOOM_HOURS into the available chart width
+        steps_per_hour = 60 // DT_MINUTES
+        self.pixels_per_step = self._chart_rect().width / (DEFAULT_ZOOM_HOURS * steps_per_hour)
+        self.curve_visible = [True, True, True, True, False, False, False, False]  # Which curves are shown
         self.hovered_step = None     # Step under mouse cursor
 
-        # Generate initial data
+        # Burn off the first day so display starts after dynamics settle, then
+        # generate the initial 24h of visible data.
+        self._warmup(WARMUP_HOURS)
         self._generate(24)
 
         # Clock
@@ -177,6 +195,10 @@ class Visualizer:
             self.data = {k: np.concatenate([self.data[k], new_data[k]]) for k in self.data}
         self.total_steps = len(self.data['bg'])
 
+    def _warmup(self, hours):
+        """Advance the simulator without recording — discards transient startup behavior."""
+        self.sim.generate_hours(hours)
+
     def _reseed(self, seed):
         """Reset with new seed."""
         self.seed = seed
@@ -184,6 +206,7 @@ class Visualizer:
         self.data = None
         self.total_steps = 0
         self.scroll_x = 0
+        self._warmup(WARMUP_HOURS)
         self._generate(24)
 
     def _chart_rect(self):
@@ -332,6 +355,38 @@ class Visualizer:
             draw_text(self.buffer, self.font_sm, line, x, y, TEXT_DIM)
             y += 14
 
+    def _draw_nocturnal_zones(self, chart):
+        """Shade chart background during nocturnal hours (NIGHT_START_HOUR to NIGHT_END_HOUR)."""
+        start, end, _ = self._visible_range()
+        if start >= end:
+            return
+        steps_per_hour = 60 // DT_MINUTES
+        # Walk forward across the visible range, marking [night_start, night_end) windows.
+        # Night windows wrap around midnight, so emit two segments per day.
+        first_day = start // STEPS_PER_DAY
+        last_day = end // STEPS_PER_DAY
+        for day in range(first_day - 1, last_day + 2):
+            day_start = day * STEPS_PER_DAY
+            # Two pieces of the night that straddle midnight:
+            # 1) NIGHT_START_HOUR through end of this calendar day
+            seg1_lo = day_start + NIGHT_START_HOUR * steps_per_hour
+            seg1_hi = day_start + STEPS_PER_DAY
+            # 2) Start of NEXT calendar day through NIGHT_END_HOUR
+            seg2_lo = day_start + STEPS_PER_DAY
+            seg2_hi = seg2_lo + NIGHT_END_HOUR * steps_per_hour
+            for lo, hi in ((seg1_lo, seg1_hi), (seg2_lo, seg2_hi)):
+                vis_lo = max(lo, start)
+                vis_hi = min(hi, end)
+                if vis_hi <= vis_lo:
+                    continue
+                px_lo = int(self._step_to_x(vis_lo, chart))
+                px_hi = int(self._step_to_x(vis_hi, chart))
+                if px_hi <= px_lo:
+                    continue
+                seg_surf = pygame.Surface((px_hi - px_lo, chart.height), pygame.SRCALPHA)
+                seg_surf.fill(NIGHT_OVERLAY_RGBA)
+                self.buffer.blit(seg_surf, (px_lo, chart.y))
+
     def _draw_bg_zones(self, chart):
         """Draw colored background zones for BG ranges."""
         if not self.curve_visible[0]:
@@ -392,7 +447,8 @@ class Visualizer:
             label = format_time(step)
             if is_day:
                 day_num = step // STEPS_PER_DAY + 1
-                label = f"Day {day_num}"
+                dow = (DISPLAY_START_DOW + (step // STEPS_PER_DAY)) % 7
+                label = f"{DAY_NAMES[dow]} (Day {day_num})"
             draw_text(self.buffer, self.font_sm, label,
                       int(px) + 3, chart.y + chart.height + 2, TEXT_DIM)
 
@@ -611,7 +667,7 @@ class Visualizer:
 
                     elif event.key in range(pygame.K_0, pygame.K_9 + 1):
                         digit = event.key - pygame.K_0
-                        if digit >= 1 and digit <= 6:
+                        if digit >= 1 and digit <= 8:
                             self.curve_visible[digit - 1] = not self.curve_visible[digit - 1]
                         elif digit == 0:
                             self._reseed(0)
@@ -656,6 +712,7 @@ class Visualizer:
 
                 chart = self._chart_rect()
 
+                self._draw_nocturnal_zones(chart)
                 self._draw_bg_zones(chart)
                 self._draw_grid(chart)
 
@@ -689,10 +746,21 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     viz = Visualizer()
-    if args.seed != 42:
-        viz._reseed(args.seed)
-    if args.bg is not None:
-        viz.sim.state.bg = args.bg
+    # Re-init with the requested seed/initial-BG so the displayed window starts
+    # in the requested state. We discard the auto-generated default-seed window
+    # and rebuild from scratch: simulator with seed → 24h warmup → optional BG
+    # override → generate the first displayed day.
+    if args.seed != 42 or args.bg is not None:
+        viz.seed = args.seed
+        viz.sim = T1DMSimulator(seed=args.seed)
+        viz.data = None
+        viz.total_steps = 0
+        viz.scroll_x = 0
+        viz._warmup(WARMUP_HOURS)
+        if args.bg is not None:
+            viz.sim.state.bg = args.bg
+            viz.sim.state.bg_observed = args.bg
+        viz._generate(24)
     if args.hours != 24:
         viz._generate(args.hours - 24)
 

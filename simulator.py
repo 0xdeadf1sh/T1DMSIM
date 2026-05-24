@@ -28,7 +28,7 @@ STEPS_PER_DAY = 24 * 60 // DT_MINUTES  # 288 steps per day
 # Skill correlation
 SKILL_CORRELATION = 0.7  # Off-diagonal correlation in skill covariance matrix
 SKILL_VARIANCE = 0.5  # Lower = more patients near average, fewer extremes
-SKILL_MIN = 0.55  # Lowest possible skill level (0 = no skill)
+SKILL_MIN = 0.25  # Lowest possible skill level (0 = no skill)
 SKILL_MAX = 0.95  # Highest possible skill level (1 = perfect)
 
 # Wake/sleep
@@ -54,16 +54,35 @@ PROTEIN_FAT_GAMMA_K = 6.0  # Very slow absorption
 PROTEIN_FAT_GAMMA_THETA = 30.0  # Peak at ~180 min
 
 # Carb curve (gamma distribution parameters)
-FAST_CARB_K = 2.0  # Gamma shape for fast carbs
-FAST_CARB_THETA = 15.0  # Gamma scale for fast carbs (minutes)
-SLOW_CARB_K = 4.0  # Gamma shape for slow carbs
-SLOW_CARB_THETA = 20.0  # Gamma scale for slow carbs (minutes)
+# Peak time = (k-1)*theta. Mean = k*theta.
+# FAST_CARB_K/THETA are reference values used by the test suite to construct
+# benchmark curves. Production meal generation samples k/theta from the
+# MIXED_MEAL_FAST_*_RANGE constants instead — these are NOT the live values.
+FAST_CARB_K = 3.0  # Gamma shape for fast carbs (peak ~40 min)
+FAST_CARB_THETA = 20.0  # Gamma scale for fast carbs (minutes)
 SLOW_CARB_PREFERENCE_BASE = 0.3  # Base probability of choosing slow carbs
 SLOW_CARB_PREFERENCE_SKILL_BONUS = 0.5  # Added probability from s1
+
+# Hypo correction carbs (glucose tablets / juice — kick in faster than meal carbs)
+HYPO_CARB_K = 2.0
+HYPO_CARB_THETA = 15.0  # Peak ~15 min
 
 # Carb curve noise
 CARB_CURVE_K_NOISE = 0.1  # Relative noise on gamma k
 CARB_CURVE_THETA_NOISE = 0.1  # Relative noise on gamma theta
+
+# Mixed-meal composition (each meal becomes 2-5 overlapping carb components)
+MIXED_MEAL_MIN_COMPONENTS = 2
+MIXED_MEAL_EXTRA_COMPONENTS_LAMBDA = 1.5  # Poisson, added to MIN
+MIXED_MEAL_MAX_COMPONENTS = 5
+MIXED_MEAL_DIRICHLET_ALPHA = 1.5  # Higher = more uniform fractions per component
+MIXED_MEAL_FAST_K_RANGE = (2.0, 3.5)
+MIXED_MEAL_FAST_THETA_RANGE = (15.0, 22.0)
+MIXED_MEAL_MED_K_RANGE = (3.0, 4.5)
+MIXED_MEAL_MED_THETA_RANGE = (22.0, 32.0)
+MIXED_MEAL_SLOW_K_RANGE = (4.0, 6.0)
+MIXED_MEAL_SLOW_THETA_RANGE = (28.0, 45.0)
+MIXED_MEAL_MED_WEIGHT_BASE = 0.4  # Base weight for medium-speed components
 
 # Insulin sensitivity
 IS_BASE_MEAN = 1.0
@@ -71,6 +90,7 @@ IS_BASE_SIGMA = 0.2
 IS_DAILY_DRIFT_SIGMA = 0.05  # Day-to-day drift
 IS_FAST_NOISE_SIGMA = 0.02  # Step-to-step noise
 IS_DAWN_PHASE_DAILY_SIGMA = 1.5  # Hours of day-to-day variation in dawn phenomenon timing
+IS_DRIFT_TRANSITION_HOURS = 4.0  # Smooth blend across midnight from prev to today's drift/phase
 
 # Insulin sensitivity diurnal components (multiple peaks)
 IS_MORNING_PEAK_HOUR = 7.0    # Morning resistance peak
@@ -83,7 +103,6 @@ IS_NIGHT_DIP_AMPLITUDE = 0.15 # How much more sensitive at night
 # Illness
 ILLNESS_PROBABILITY_BASE = 0.01  # Per-day probability of getting sick
 ILLNESS_HEALTH_WEIGHT = 0.3  # How much s4 reduces illness probability
-ILLNESS_DURATION_MIN_DAYS = 2
 ILLNESS_RECOVERY_PROB = 0.3  # Geometric distribution parameter
 ILLNESS_IS_FACTOR_MIN = 1.1
 ILLNESS_IS_FACTOR_MAX = 2.0
@@ -101,9 +120,17 @@ BASAL_RAMP_UP_HOURS = 3.0 # How long it will take before basal insulin peaks in 
 BASAL_RAMP_DOWN_HOURS = 4.0 # How long it will take before basal insulin decays completely (from peak)
 
 # Bolus insulin (rapid-acting)
+# Duration of action scales with dose: BASE + SCALE * (sqrt(dose) - sqrt(5)).
+# A 5U bolus uses BASE; a 1U bolus is shorter, a 20U bolus is longer.
+# Theta also drifts with dose so larger boluses peak slightly later.
 BOLUS_GAMMA_K = 3.0
-BOLUS_GAMMA_THETA = 25.0  # Peak around 60 min
-BOLUS_DURATION_HOURS = 5.0
+BOLUS_GAMMA_THETA = 25.0  # Peak around 60 min for typical 5U dose
+BOLUS_DURATION_HOURS = 4.0  # Legacy typical duration; new code uses bolus_pk_for_dose()
+BOLUS_DIA_BASE_HOURS = 4.0  # Duration at the 5U reference dose
+BOLUS_DIA_DOSE_SCALE = 0.6  # Hours added per unit of sqrt(dose) - sqrt(5)
+BOLUS_DIA_MIN_HOURS = 3.0
+BOLUS_DIA_MAX_HOURS = 7.5
+BOLUS_THETA_DOSE_SLOPE = 0.06  # Theta multiplier per unit of sqrt(dose) - sqrt(5)
 ICR_MEAN = 10.0  # Insulin-to-carb ratio (1 unit per X grams)
 ICR_SIGMA = 2.0
 BOLUS_TIMING_COMPETENT_MEAN = -20.0  # Minutes before meal (negative = before)
@@ -141,25 +168,97 @@ EXERCISE_CARB_EQUIV_PER_MIN = 0.5  # Negative carb equivalent per minute of exer
 EXERCISE_GAMMA_K = 3.0
 EXERCISE_GAMMA_THETA = 15.0
 
-# Hepatic glucose output
-HGO_BASE_GRAMS_PER_HOUR = 9.0  # ~1.5-2 mg/kg/min for 70kg person ≈ 9g/hr
-HGO_NOISE_SIGMA = 0.05  # Relative noise
+# Hepatic glucose output (insulin-suppressed via Hill function)
+# At zero insulin, HGO runs near UNSUPPRESSED. As plasma insulin rises, HGO
+# saturates toward the SUPPRESSED floor. HGO_INSULIN_HALF_MAX is tuned so that
+# a typical basal level (~0.07 U/step) lands at the legacy ~9 g/hr rate, which
+# preserves the basal-balances-HGO test invariant.
+HGO_BASE_GRAMS_PER_HOUR = 9.0  # Legacy "balanced" rate, used only for basal sizing
+HGO_UNSUPPRESSED_GRAMS_PER_HOUR = 18.0  # Rate with no insulin (DKA-like)
+HGO_SUPPRESSED_FLOOR_GRAMS_PER_HOUR = 6.0  # Maximum suppression
+HGO_INSULIN_HALF_MAX = 0.025  # Insulin per step at which HGO is half-suppressed (U/step)
+HGO_NOISE_SIGMA = 0.02  # Relative per-step noise (matched to IS_FAST_NOISE_SIGMA for visual consistency)
+HGO_INSULIN_SMOOTHING_ALPHA = 0.25  # EMA factor for the insulin level fed into the Hill function.
+# Models plasma-insulin lag behind SC absorption (~10-15 min), and prevents HGO
+# from stepping when a new bolus curve activates. Half-life ≈ 12 min at α=0.25.
+
+# Glycogen reservoir — finite hepatic glycogen store that drains under HGO and
+# refills from absorbed carbs. When depleted the liver loses its glycogenolysis
+# source and HGO scales down toward a gluconeogenesis-only floor. Without this
+# the unsuppressed-HGO state would be an infinite battery (no fasting limit).
+GLYCOGEN_CAPACITY_GRAMS = 100.0  # Maximum hepatic glycogen
+GLYCOGEN_INITIAL_FRACTION = 0.7  # Patients start moderately full
+GLYCOGEN_DRAIN_FRACTION = 0.5  # Fraction of HGO sourced from glycogenolysis (rest is gluconeogenesis)
+GLYCOGEN_REFILL_FRACTION = 0.20  # Fraction of absorbed carbs stored as glycogen
+GLYCOGEN_LOW_THRESHOLD_FRACTION = 0.15  # Below this fraction of capacity, HGO ramps down
+
+# Glucotoxicity — sustained hyperglycemia transiently increases insulin
+# resistance ("glucose toxicity"). Slow EMA of BG drives an additive IS factor.
+# Closes a positive feedback loop: high BG → more IR → harder to bring down.
+GLUCOTOX_BG_EMA_HALF_LIFE_HOURS = 6.0
+GLUCOTOX_BG_THRESHOLD = 200.0  # Above this EMA value, IS starts to climb
+GLUCOTOX_BG_FOR_MAX = 350.0  # EMA value at which the maximum IR multiplier is applied
+GLUCOTOX_MAX_IS_INCREASE = 0.30  # Up to 30% more resistant at saturating BG
+
+# Postprandial IS bonus — incretin / GLP-1 effect transiently boosts sensitivity
+# while carbs are absorbing. Saturating in active carb, peaks ~10% bonus.
+POSTPRANDIAL_IS_BONUS_FACTOR = 0.10
+POSTPRANDIAL_IS_BONUS_HALF = 1.5  # g/step active carb at half-max bonus
+
+# Injection site quality (lipohypertrophy) — per-dose multiplier on the
+# delivered insulin. Sigma scales inversely with lifestyle_consistency (poor
+# rotation discipline → more variance and occasional poor sites).
+SITE_QUALITY_SIGMA_BASE = 0.10  # Base relative sigma, scaled by (1.5 - s4)
+SITE_QUALITY_MIN = 0.5  # Minimum effective absorption multiplier
+SITE_QUALITY_MAX = 1.4  # Maximum (rare absorption surge)
+
+# Delayed-meal HGO rebound — large meals trigger a positive HGO bump 4-6h
+# later (delayed gluconeogenesis from amino acids + cortisol response). This
+# is the mechanism behind nocturnal hyperglycemia after a big dinner.
+DELAYED_HGO_MEAL_THRESHOLD_GRAMS = 60.0  # Meals above this trigger a rebound
+DELAYED_HGO_PER_GRAM = 0.04  # g/hr of HGO bump per gram of meal carbs above threshold
+DELAYED_HGO_MAX_BUMP = 8.0  # Cap on HGO bump magnitude (g/hr)
+DELAYED_HGO_DELAY_HOURS_MIN = 3.5  # Earliest onset after meal
+DELAYED_HGO_DELAY_HOURS_MAX = 5.5  # Latest onset
+DELAYED_HGO_DURATION_HOURS_MIN = 4.0
+DELAYED_HGO_DURATION_HOURS_MAX = 8.0
+DELAYED_HGO_RAMP_HOURS = 1.0  # Trapezoidal ramp up/down for the rebound envelope
+
+# Per-step absorption noise on the carb/insulin reads. Models gut absorption
+# variability (mixing, blood flow) and subcutaneous depot dissolution variance.
+# Multiplicative — only matters when the underlying curve is non-zero.
+CARB_ABSORPTION_NOISE_SIGMA = 0.02
+INSULIN_ABSORPTION_NOISE_SIGMA = 0.02
 
 # BG computation
 BG_SCALE_FACTOR = 4.0  # Alpha: converts abstract units to mg/dL per step
-BG_CLAMP_MIN = 40.0
+BG_CLAMP_MIN = 20.0  # Hard backstop — should rarely fire thanks to soft damping below
 BG_CLAMP_MAX = 500.0
 BG_INITIAL_MEAN = 120.0
 BG_INITIAL_SIGMA = 30.0
+
+# Soft BG bounds: in the approach zone, a single step can close at most
+# SOFT_APPROACH_FRACTION of the remaining headroom to the hard bound. This
+# gives geometric asymptotic decay toward the floor/ceiling — BG never
+# actually reaches the hard clamp under normal dynamics, regardless of how
+# large the raw delta is. The hard clamp is kept only as a backstop.
+BG_SOFT_FLOOR = 50.0           # Cap kicks in when BG drops below this
+BG_SOFT_CEILING = 400.0        # Cap kicks in when BG rises above this
+SOFT_APPROACH_FRACTION = 0.3   # Max gap-fraction a single negative/positive step can close
 
 # BG regulatory computation
 RENAL_THRESHOLD = 180.0  # Kidneys start excreting glucose above this
 RENAL_CLEARANCE_RATE = 0.005  # Fraction of excess BG cleared per step
 COUNTER_REGULATORY_THRESHOLD = 70.0  # Body releases glucagon below this
 COUNTER_REGULATORY_RATE = 2.0  # mg/dL added per step when below threshold
+SEVERE_HYPO_THRESHOLD = 55.0  # Below this, glucagon dump kicks in
+SEVERE_HYPO_GLUCAGON_RATE = 4.0  # Extra mg/dL per step at severity=1.0
 
 # CGM noise
-CGM_LAG_MINUTES = 10  # Interstitial delay
+# NOTE: CGM_LAG_MINUTES is reserved for a future interstitial-lag implementation
+# in `_compute_cgm_observation` (lookup of true BG from `CGM_LAG_MINUTES` ago).
+# It is currently DEFINED BUT UNUSED — the CGM reads instantaneous BG.
+CGM_LAG_MINUTES = 10
 CGM_NOISE_FRACTION = 0.01  # ~1% MARD
 
 # Rare events
@@ -197,6 +296,7 @@ PUBLIC_HOLIDAYS_PER_YEAR_MAX = 20      # Maximum number of public holidays per y
 
 EXERCISE_IS_REDUCTION = 0.10           # IS reduction fraction post-exercise (10% more sensitive)
 EXERCISE_IS_DURATION_HOURS = 18.0      # Duration of post-exercise IS boost (hours)
+EXERCISE_IS_RAMP_HOURS = 1.0           # Trapezoidal ramp up/down for the IS boost envelope
 
 # ============================================================================
 # TREND-BASED ANTICIPATORY CORRECTIONS
@@ -221,6 +321,7 @@ ALCOHOL_ONSET_DELAY_HOURS_MIN = 1.0    # Hours after drinking before HGO suppres
 ALCOHOL_ONSET_DELAY_HOURS_MAX = 2.0    # Hours from drinking to end of onset window
 ALCOHOL_DURATION_HOURS_MIN = 4.0       # Minimum hours of HGO suppression
 ALCOHOL_DURATION_HOURS_MAX = 8.0       # Maximum hours of HGO suppression
+ALCOHOL_HGO_RAMP_HOURS = 1.0           # Trapezoidal ramp up/down for HGO suppression envelope
 
 # ============================================================================
 # STRESS AND HORMONAL EFFECTS
@@ -232,6 +333,7 @@ STRESS_IS_FACTOR_MIN = 1.1             # Minimum IS multiplier during stress (mo
 STRESS_IS_FACTOR_MAX = 1.5             # Maximum IS multiplier during stress
 STRESS_DURATION_HOURS_MIN = 2.0        # Minimum duration of elevated IS from stress (hours)
 STRESS_DURATION_HOURS_MAX = 6.0        # Maximum duration of elevated IS from stress (hours)
+STRESS_IS_RAMP_HOURS = 0.5             # Trapezoidal ramp up/down for stress envelope
 
 # ============================================================================
 # ANOMALOUS EVENTS
@@ -267,7 +369,6 @@ class PatientProfile:
     icr: float = 10.0
     correction_factor: float = 40.0
     basal_dose: float = 20.0
-    hgo_rate: float = 9.0
 
     # Derived behavioral parameters
     wake_time_hours: float = 8.0
@@ -308,7 +409,6 @@ class SimulatorState:
     exercise_curve_history: list = field(default_factory=list)
     hgo_history: list = field(default_factory=list)
     delta_history: list = field(default_factory=list)
-    is_asleep: bool = True
     is_sick: bool = False
     illness_is_factor: float = 1.0
     last_correction_idx: int = -9999
@@ -322,7 +422,11 @@ class SimulatorState:
     # Time-limited physiological effects
     exercise_is_effects: list = field(default_factory=list)  # (start_idx, end_idx, reduction)
     alcohol_effects: list = field(default_factory=list)      # (start_idx, end_idx, hgo_factor)
-    stress_effects: list = field(default_factory=list)       # (end_idx, is_factor)
+    stress_effects: list = field(default_factory=list)       # (start_idx, end_idx, is_factor)
+    meal_hgo_effects: list = field(default_factory=list)     # (start_idx, end_idx, magnitude_g_per_hr)
+    # Slow physiological state
+    glycogen_grams: float = 70.0  # Current hepatic glycogen reserve (g)
+    glucotox_bg_ema: float = 120.0  # 6h EMA of true BG, drives glucotoxic IR
 
 
 # ============================================================================
@@ -369,6 +473,55 @@ def basal_curve(total_amount: float, duration_minutes: float,
     return curve * (total_amount / np.sum(curve))
 
 
+def bolus_pk_for_dose(dose_units: float) -> tuple:
+    """Return (k, theta, duration_minutes) for a bolus of the given dose.
+
+    Subcutaneous insulin DIA scales with dose: larger depots dissolve more
+    slowly, peak slightly later, and act for longer. Scaling is centered on a
+    5U reference dose so a typical meal bolus matches BOLUS_DIA_BASE_HOURS.
+    """
+    dose = max(0.5, dose_units)
+    sqrt_excess = float(np.sqrt(dose) - np.sqrt(5.0))
+    duration_h = float(np.clip(
+        BOLUS_DIA_BASE_HOURS + BOLUS_DIA_DOSE_SCALE * sqrt_excess,
+        BOLUS_DIA_MIN_HOURS, BOLUS_DIA_MAX_HOURS,
+    ))
+    theta = BOLUS_GAMMA_THETA * (1.0 + BOLUS_THETA_DOSE_SLOPE * sqrt_excess)
+    return BOLUS_GAMMA_K, theta, duration_h * 60.0
+
+
+def envelope_intensity(time_idx: int, start_idx: int, end_idx: int,
+                       ramp_up_steps: int, ramp_down_steps: int) -> float:
+    """Trapezoidal envelope for time-bounded effects.
+
+    Returns 0 outside [start_idx, end_idx). Inside, ramps linearly from 0 to 1
+    over ramp_up_steps, plateaus at 1, then ramps back to 0 over ramp_down_steps.
+    Used to soften on/off transitions of exercise/stress IS effects and alcohol
+    HGO suppression so the BG curves don't show step-function discontinuities.
+    """
+    if time_idx < start_idx or time_idx >= end_idx:
+        return 0.0
+    progress = time_idx - start_idx
+    remaining = end_idx - time_idx
+    intensity = 1.0
+    if ramp_up_steps > 0 and progress < ramp_up_steps:
+        intensity = min(intensity, progress / ramp_up_steps)
+    if ramp_down_steps > 0 and remaining < ramp_down_steps:
+        intensity = min(intensity, remaining / ramp_down_steps)
+    return max(0.0, intensity)
+
+
+def compute_hgo_rate(insulin_per_step: float) -> float:
+    """Hill-function HGO rate (g/hr) given current plasma insulin per step.
+
+    HGO = SUPPRESSED + (UNSUPPRESSED - SUPPRESSED) / (1 + insulin/HALF_MAX).
+    Tuned so a typical basal level (~0.07 U/step) yields ~9 g/hr.
+    """
+    span = HGO_UNSUPPRESSED_GRAMS_PER_HOUR - HGO_SUPPRESSED_FLOOR_GRAMS_PER_HOUR
+    suppression = 1.0 / (1.0 + max(0.0, insulin_per_step) / HGO_INSULIN_HALF_MAX)
+    return HGO_SUPPRESSED_FLOOR_GRAMS_PER_HOUR + span * suppression
+
+
 # ============================================================================
 # PATIENT GENERATOR
 # ============================================================================
@@ -406,8 +559,6 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     ideal_basal = (HGO_BASE_GRAMS_PER_HOUR * 24.0) / profile.icr
     noise_scale = BASAL_DOSE_SIGMA * (1.5 - s3)
     profile.basal_dose = float(np.clip(rng.normal(ideal_basal, noise_scale), 5.0, 40.0))
-
-    profile.hgo_rate = HGO_BASE_GRAMS_PER_HOUR
 
     # Behavioral parameters derived from skills
     wake_sigma = WAKE_TIME_SIGMA_BASE / (0.3 + 0.7 * s4)
@@ -465,6 +616,8 @@ class T1DMSimulator:
             )
 
         self.state.bg_observed = self.state.bg
+        self.state.glycogen_grams = GLYCOGEN_CAPACITY_GRAMS * GLYCOGEN_INITIAL_FRACTION
+        self.state.glucotox_bg_ema = float(self.state.bg)
 
         # Holiday tracking
         self._holiday_set: set = set()
@@ -480,6 +633,10 @@ class T1DMSimulator:
         self._basal_totals: np.ndarray = np.zeros(_init_len)
         self._bolus_totals: np.ndarray = np.zeros(_init_len)
         self._exercise_totals: np.ndarray = np.zeros(_init_len)
+
+        # EMA-smoothed insulin level used by the HGO Hill function. Models
+        # plasma-insulin lag behind subcutaneous absorption.
+        self._smoothed_insulin_for_hgo: float = 0.0
 
         # Pre-generate day plan
         self._plan_day()
@@ -505,6 +662,8 @@ class T1DMSimulator:
             )
 
         self.state.bg_observed = self.state.bg
+        self.state.glycogen_grams = GLYCOGEN_CAPACITY_GRAMS * GLYCOGEN_INITIAL_FRACTION
+        self.state.glucotox_bg_ema = float(self.state.bg)
 
         self._holiday_set = set()
         self._holidays_generated_years = set()
@@ -516,6 +675,7 @@ class T1DMSimulator:
         self._basal_totals = np.zeros(_init_len)
         self._bolus_totals = np.zeros(_init_len)
         self._exercise_totals = np.zeros(_init_len)
+        self._smoothed_insulin_for_hgo = 0.0
 
         self._pending_events = []
         self._plan_day()
@@ -626,7 +786,10 @@ class T1DMSimulator:
         diff = self.state.illness_is_target - self.state.illness_is_factor
         self.state.illness_is_factor += diff * ILLNESS_IS_RAMP_RATE
 
-        # Daily IS drift
+        # Daily IS drift — keep yesterday's values so the IS curve blends
+        # smoothly across the midnight transition rather than stepping.
+        self._prev_daily_is_drift = getattr(self, '_daily_is_drift', 0.0)
+        self._prev_daily_is_phase_shift = getattr(self, '_daily_is_phase_shift', 0.0)
         self._daily_is_drift = self.rng.normal(0, IS_DAILY_DRIFT_SIGMA)
         self._daily_is_phase_shift = self.rng.normal(0, IS_DAWN_PHASE_DAILY_SIGMA)
 
@@ -661,8 +824,14 @@ class T1DMSimulator:
             today_wake = min(14.0, today_wake + delay)
 
         wake_idx = day_start_idx + int(today_wake * 60 / DT_MINUTES)
-        sleep_hours = self.rng.normal(SLEEP_DURATION_MEAN_HOURS, SLEEP_DURATION_SIGMA_HOURS)
-        sleep_idx = day_start_idx + int((today_wake + max(12, sleep_hours + 8)) * 60 / DT_MINUTES)
+        sleep_hours = float(np.clip(
+            self.rng.normal(SLEEP_DURATION_MEAN_HOURS, SLEEP_DURATION_SIGMA_HOURS),
+            4.0, 12.0,
+        ))
+        # Bedtime = wake + (24 - sleep_hours) so sleep duration is honored.
+        # Floor on awake time prevents pathological "wakes up, immediately sleeps".
+        awake_hours = max(8.0, 24.0 - sleep_hours)
+        sleep_idx = day_start_idx + int((today_wake + awake_hours) * 60 / DT_MINUTES)
 
         # Store wake/sleep for the day
         self._today_wake_idx = wake_idx
@@ -688,9 +857,10 @@ class T1DMSimulator:
                 basal_adjustment = 1.0 - undershoot * (BASAL_CORRECTION_MAX_ADJUSTMENT * eff_s3)
 
         if self.rng.random() > p.basal_miss_prob:
-            # Administer basal
+            # Administer basal — multiplied by injection-site quality for the day
             dose_noise = 1.0 + self.rng.normal(0, BASAL_DOSE_COMPETENCE_NOISE * (1.2 - eff_s3))
-            actual_dose = max(1.0, p.basal_dose * dose_noise * basal_adjustment)
+            site_q = self._site_quality(eff_s4)
+            actual_dose = max(1.0, p.basal_dose * dose_noise * basal_adjustment * site_q)
             duration = BASAL_DURATION_HOURS * 60
             curve = basal_curve(float(actual_dose), duration, ramp_up_hours=BASAL_RAMP_UP_HOURS, ramp_down_hours=BASAL_RAMP_DOWN_HOURS)
             self._pending_events.append((basal_time_idx, 'basal', {
@@ -737,17 +907,25 @@ class T1DMSimulator:
             carb_amount = max(0.0, self.rng.normal(
                 carb_mean * discipline_factor * weekend_factor, discipline_carb_sigma))
 
-            # --- Mixed fast/slow carbs (1.3) ---
-            # fast_fraction: 0=all slow, 1=all fast.
-            # Poor dietary discipline → more fast carbs and more variance.
+            # --- Mixed-meal multi-component carbs ---
+            # Each meal is composed of 2-5 overlapping gamma absorption curves
+            # sampled from fast/medium/slow categories. Component-type weights
+            # tilt toward slow with high dietary discipline (s1).
             slow_pref = SLOW_CARB_PREFERENCE_BASE + SLOW_CARB_PREFERENCE_SKILL_BONUS * eff_s1
-            fast_fraction_noise = self.rng.normal(0, 0.15 * (1.2 - eff_s1))
-            fast_fraction = float(np.clip((1.0 - slow_pref) + fast_fraction_noise, 0.0, 1.0))
+            fast_w = max(0.05, (1.0 - slow_pref) + self.rng.normal(0, 0.1))
+            slow_w = max(0.05, slow_pref + self.rng.normal(0, 0.1))
+            med_w = max(0.05, MIXED_MEAL_MED_WEIGHT_BASE + self.rng.normal(0, 0.1))
+            type_weights = np.array([fast_w, med_w, slow_w])
+            type_weights = type_weights / type_weights.sum()
 
-            fast_amount = carb_amount * fast_fraction
-            slow_amount = carb_amount * (1.0 - fast_fraction)
+            n_extra = int(self.rng.poisson(MIXED_MEAL_EXTRA_COMPONENTS_LAMBDA))
+            n_components = min(MIXED_MEAL_MAX_COMPONENTS,
+                               MIXED_MEAL_MIN_COMPONENTS + n_extra)
+            fractions = self.rng.dirichlet(np.full(n_components, MIXED_MEAL_DIRICHLET_ALPHA))
+            component_types = self.rng.choice(['fast', 'med', 'slow'],
+                                               size=n_components, p=type_weights)
 
-            # Apply anomalous event shape modification to one curve this day
+            # Apply anomalous event shape modification to one component this day
             def _maybe_anomalous(k: float, theta: float) -> tuple:
                 nonlocal anomalous_applied
                 if anomalous_today and not anomalous_applied:
@@ -756,37 +934,49 @@ class T1DMSimulator:
                     theta *= float(self.rng.uniform(ANOMALOUS_THETA_MULT_MIN, ANOMALOUS_THETA_MULT_MAX))
                 return k, theta
 
-            # Fast carb curve
-            if fast_amount > 0.5:
-                k = FAST_CARB_K * (1 + self.rng.normal(0, CARB_CURVE_K_NOISE))
-                theta = FAST_CARB_THETA * (1 + self.rng.normal(0, CARB_CURVE_THETA_NOISE))
+            for ctype, frac in zip(component_types, fractions):
+                component_carbs = float(carb_amount * frac)
+                if component_carbs < 0.5:
+                    continue
+                if ctype == 'fast':
+                    k = float(self.rng.uniform(*MIXED_MEAL_FAST_K_RANGE))
+                    theta = float(self.rng.uniform(*MIXED_MEAL_FAST_THETA_RANGE))
+                elif ctype == 'med':
+                    k = float(self.rng.uniform(*MIXED_MEAL_MED_K_RANGE))
+                    theta = float(self.rng.uniform(*MIXED_MEAL_MED_THETA_RANGE))
+                else:
+                    k = float(self.rng.uniform(*MIXED_MEAL_SLOW_K_RANGE))
+                    theta = float(self.rng.uniform(*MIXED_MEAL_SLOW_THETA_RANGE))
+                k *= (1 + self.rng.normal(0, CARB_CURVE_K_NOISE))
+                theta *= (1 + self.rng.normal(0, CARB_CURVE_THETA_NOISE))
                 k, theta = _maybe_anomalous(k, theta)
                 k = max(1.1, k); theta = max(3.0, theta)
                 duration = max(k * theta * 4, 60)
                 self._pending_events.append((meal_idx, 'carb', {
-                    'curve': gamma_curve(fast_amount, k, theta, duration),
-                    'label': f'Meal {fast_amount:.0f}g fast'
+                    'curve': gamma_curve(component_carbs, k, theta, duration),
+                    'label': f'Meal {component_carbs:.0f}g {ctype}'
                 }))
 
-            # Slow carb curve
-            if slow_amount > 0.5:
-                k = SLOW_CARB_K * (1 + self.rng.normal(0, CARB_CURVE_K_NOISE))
-                theta = SLOW_CARB_THETA * (1 + self.rng.normal(0, CARB_CURVE_THETA_NOISE))
-                k, theta = _maybe_anomalous(k, theta)
-                k = max(1.1, k); theta = max(3.0, theta)
-                duration = max(k * theta * 4, 60)
-                self._pending_events.append((meal_idx, 'carb', {
-                    'curve': gamma_curve(slow_amount, k, theta, duration),
-                    'label': f'Meal {slow_amount:.0f}g slow'
-                }))
-
-            # Protein/fat slow curve (always present)
+            # Protein/fat slow tail (always present)
             pf_curve = gamma_curve(PROTEIN_FAT_EQUIV_GRAMS, PROTEIN_FAT_GAMMA_K,
                                    PROTEIN_FAT_GAMMA_THETA,
                                    PROTEIN_FAT_GAMMA_K * PROTEIN_FAT_GAMMA_THETA * 4)
             self._pending_events.append((meal_idx, 'carb', {
                 'curve': pf_curve, 'label': f'Protein/fat {PROTEIN_FAT_EQUIV_GRAMS:.0f}g equiv'
             }))
+
+            # Delayed-meal HGO rebound: large meals trigger a positive HGO bump
+            # 4-6h later from delayed gluconeogenesis (amino acids) and cortisol
+            # response. This is the mechanism behind nocturnal hyperglycemia
+            # after a big dinner.
+            if carb_amount > DELAYED_HGO_MEAL_THRESHOLD_GRAMS:
+                excess = carb_amount - DELAYED_HGO_MEAL_THRESHOLD_GRAMS
+                magnitude = min(DELAYED_HGO_MAX_BUMP, DELAYED_HGO_PER_GRAM * excess)
+                delay_h = self.rng.uniform(DELAYED_HGO_DELAY_HOURS_MIN, DELAYED_HGO_DELAY_HOURS_MAX)
+                duration_h = self.rng.uniform(DELAYED_HGO_DURATION_HOURS_MIN, DELAYED_HGO_DURATION_HOURS_MAX)
+                rebound_start = meal_idx + int(delay_h * 60 / DT_MINUTES)
+                rebound_end = rebound_start + int(duration_h * 60 / DT_MINUTES)
+                s.meal_hgo_effects.append((rebound_start, rebound_end, magnitude))
 
             # --- Bolus for this meal ---
             carb_estimate = max(0, carb_amount * (1 + self.rng.normal(0, p.carb_count_error_sigma)))
@@ -796,17 +986,20 @@ class T1DMSimulator:
                 bolus_skip_prob = 0.3 * (1 - eff_s3)
 
             if self.rng.random() > bolus_skip_prob and carb_estimate > 0:
-                bolus_dose = carb_estimate / p.icr
+                intended_dose = carb_estimate / p.icr
                 bolus_timing_offset = self.rng.normal(p.bolus_timing_mean, p.bolus_timing_sigma)
                 bolus_idx = max(self.state.current_idx, meal_idx + int(bolus_timing_offset / DT_MINUTES))
 
-                bolus_k = BOLUS_GAMMA_K * (1 + self.rng.normal(0, 0.05))
-                bolus_theta = BOLUS_GAMMA_THETA * (1 + self.rng.normal(0, 0.05))
-                bolus_duration = BOLUS_DURATION_HOURS * 60
-                bolus_curve = gamma_curve(bolus_dose, max(1.5, bolus_k),
+                # PK shape is determined by the intended dose; site quality
+                # only modulates the absorbed amount.
+                base_k, base_theta, bolus_duration = bolus_pk_for_dose(intended_dose)
+                bolus_k = base_k * (1 + self.rng.normal(0, 0.05))
+                bolus_theta = base_theta * (1 + self.rng.normal(0, 0.05))
+                delivered_dose = intended_dose * self._site_quality(eff_s4)
+                bolus_curve = gamma_curve(delivered_dose, max(1.5, bolus_k),
                                           max(5.0, bolus_theta), bolus_duration)
                 self._pending_events.append((bolus_idx, 'bolus', {
-                    'curve': bolus_curve, 'label': f'Bolus {bolus_dose:.1f}U'
+                    'curve': bolus_curve, 'label': f'Bolus {delivered_dose:.1f}U'
                 }))
 
         # --- Exercise ---
@@ -863,53 +1056,110 @@ class T1DMSimulator:
             is_factor = self.rng.uniform(STRESS_IS_FACTOR_MIN, STRESS_IS_FACTOR_MAX)
             duration_hours = self.rng.uniform(STRESS_DURATION_HOURS_MIN, STRESS_DURATION_HOURS_MAX)
             end_idx = stress_idx + int(duration_hours * 60 / DT_MINUTES)
-            s.stress_effects.append((end_idx, is_factor))
+            s.stress_effects.append((stress_idx, end_idx, is_factor))
 
         # Sort events by time
         self._pending_events.sort(key=lambda x: x[0])
 
-    def _compute_insulin_resistance(self, time_idx: int) -> float:
-        """Compute insulin resistance factor at a given time index, including diurnal pattern, drift, illness, noise."""
+    def _site_quality(self, s4: float) -> float:
+        """Per-dose injection site absorption multiplier.
+
+        Patients with low lifestyle_consistency (s4) rotate sites poorly and
+        develop lipohypertrophy, leading to higher dose-to-dose variance.
+        Returns a multiplier centered on 1.0; values <1 represent poorly
+        absorbing scarred sites, >1 the rare hyper-absorbing surge.
+        """
+        sigma = SITE_QUALITY_SIGMA_BASE * (1.5 - s4)
+        return float(np.clip(self.rng.normal(1.0, sigma),
+                             SITE_QUALITY_MIN, SITE_QUALITY_MAX))
+
+    def _compute_insulin_resistance(self, time_idx: int, active_carb: float = 0.0) -> float:
+        """Compute insulin resistance factor at a given time index.
+
+        Includes diurnal pattern, daily drift (smoothed across midnight), illness
+        factor, exercise/stress envelopes, glucotoxic IR, postprandial incretin
+        sensitivity bonus, and per-step noise.
+        """
         s = self.state
 
         # Time of day in hours
         hour = (time_idx * DT_MINUTES / 60.0) % 24.0
 
+        # Smooth blend of yesterday's drift/phase into today's over the first
+        # IS_DRIFT_TRANSITION_HOURS (smooth-step easing). This prevents the
+        # IS curve from stepping at midnight when the daily randoms change.
+        if hour < IS_DRIFT_TRANSITION_HOURS:
+            raw = hour / IS_DRIFT_TRANSITION_HOURS
+            blend = 0.5 - 0.5 * np.cos(raw * np.pi)
+            drift = self._prev_daily_is_drift * (1 - blend) + self._daily_is_drift * blend
+            phase_shift = self._prev_daily_is_phase_shift * (1 - blend) + self._daily_is_phase_shift * blend
+        else:
+            drift = self._daily_is_drift
+            phase_shift = self._daily_is_phase_shift
+
         # Multi-peak diurnal pattern
-        morning = IS_MORNING_AMPLITUDE * np.exp(-0.5 * ((hour - IS_MORNING_PEAK_HOUR - self._daily_is_phase_shift) / 2.0) ** 2)
+        morning = IS_MORNING_AMPLITUDE * np.exp(-0.5 * ((hour - IS_MORNING_PEAK_HOUR - phase_shift) / 2.0) ** 2)
         evening = IS_EVENING_AMPLITUDE * np.exp(-0.5 * ((hour - IS_EVENING_PEAK_HOUR) / 2.5) ** 2)
         night_hour = hour if hour < 12 else hour - 24
         night = -IS_NIGHT_DIP_AMPLITUDE * np.exp(-0.5 * ((night_hour - IS_NIGHT_DIP_HOUR) / 2.0) ** 2)
         diurnal = 1.0 + morning + evening + night
 
-        is_val = self.patient.is_base * diurnal * (1.0 + self._daily_is_drift)
+        is_val = self.patient.is_base * diurnal * (1.0 + drift)
 
-        # Illness
-        if s.is_sick:
-            is_val *= s.illness_is_factor
+        # Illness — always apply the factor. It rests at 1.0 when healthy and
+        # ramps smoothly toward 1.0 after recovery (and away from 1.0 at onset),
+        # so IS doesn't step at midnight when is_sick toggles.
+        is_val *= s.illness_is_factor
 
-        # Post-exercise IS reduction (aerobic exercise increases insulin sensitivity for hours)
+        # Post-exercise IS reduction (aerobic exercise increases insulin sensitivity for hours).
+        # Trapezoidal envelope softens the on/off edges so IS doesn't step.
+        ex_ramp_steps = int(EXERCISE_IS_RAMP_HOURS * 60 / DT_MINUTES)
         exercise_reduction = 0.0
         active_ex_effects = []
         for (start_idx, end_idx, reduction) in s.exercise_is_effects:
             if time_idx < end_idx:
                 active_ex_effects.append((start_idx, end_idx, reduction))
-                if time_idx >= start_idx:
-                    exercise_reduction += reduction
+                intensity = envelope_intensity(time_idx, start_idx, end_idx,
+                                                ex_ramp_steps, ex_ramp_steps)
+                if intensity > 0:
+                    exercise_reduction += reduction * intensity
         s.exercise_is_effects = active_ex_effects
         if exercise_reduction > 0:
             is_val *= (1.0 - min(0.30, exercise_reduction))
 
-        # Stress IS effect (transient insulin resistance from cortisol/adrenaline)
+        # Stress IS effect (transient insulin resistance from cortisol/adrenaline).
+        # Envelope blends the factor in/out around 1.0 (no effect).
+        stress_ramp_steps = int(STRESS_IS_RAMP_HOURS * 60 / DT_MINUTES)
         stress_factor = 1.0
         active_stress = []
-        for (end_idx, factor) in s.stress_effects:
+        for (start_idx, end_idx, factor) in s.stress_effects:
             if time_idx < end_idx:
-                active_stress.append((end_idx, factor))
-                stress_factor = max(stress_factor, factor)
+                active_stress.append((start_idx, end_idx, factor))
+                intensity = envelope_intensity(time_idx, start_idx, end_idx,
+                                                stress_ramp_steps, stress_ramp_steps)
+                if intensity > 0:
+                    eff_factor = 1.0 + (factor - 1.0) * intensity
+                    stress_factor = max(stress_factor, eff_factor)
         s.stress_effects = active_stress
         if stress_factor > 1.0:
             is_val *= stress_factor
+
+        # Glucotoxicity: sustained hyperglycemia transiently raises IR via the
+        # 6h BG EMA. Above GLUCOTOX_BG_THRESHOLD, IR climbs linearly toward
+        # GLUCOTOX_MAX_IS_INCREASE at GLUCOTOX_BG_FOR_MAX. Closes a positive
+        # feedback loop: high BG → harder to bring down.
+        if s.glucotox_bg_ema > GLUCOTOX_BG_THRESHOLD:
+            excess = s.glucotox_bg_ema - GLUCOTOX_BG_THRESHOLD
+            span = GLUCOTOX_BG_FOR_MAX - GLUCOTOX_BG_THRESHOLD
+            intensity = min(1.0, excess / span)
+            is_val *= (1.0 + GLUCOTOX_MAX_IS_INCREASE * intensity)
+
+        # Postprandial IS bonus (incretin / GLP-1 effect): while carbs are
+        # absorbing, peripheral tissues are transiently more insulin-sensitive.
+        # Saturates with active carb load, peaks at POSTPRANDIAL_IS_BONUS_FACTOR.
+        if active_carb > 0.0:
+            bonus = POSTPRANDIAL_IS_BONUS_FACTOR * active_carb / (POSTPRANDIAL_IS_BONUS_HALF + active_carb)
+            is_val *= (1.0 - bonus)
 
         # Fast noise
         is_val *= (1.0 + self.rng.normal(0, IS_FAST_NOISE_SIGMA))
@@ -917,7 +1167,12 @@ class T1DMSimulator:
         return max(0.2, is_val)
 
     def _compute_cgm_observation(self, true_bg: float) -> float:
-        """Compute CGM reading with lag and proportional noise."""
+        """Compute CGM reading with proportional noise.
+
+        NOTE: interstitial lag (CGM_LAG_MINUTES) is not currently applied —
+        the observation tracks instantaneous true BG plus noise. See the
+        constant's comment for the future implementation hook.
+        """
         noise_sigma = CGM_NOISE_FRACTION * true_bg
         observed = true_bg + self.rng.normal(0, noise_sigma)
         return np.clip(observed, BG_CLAMP_MIN, BG_CLAMP_MAX)
@@ -961,8 +1216,9 @@ class T1DMSimulator:
                 if self.rng.random() < rage_prob:
                     correction_grams = self.rng.uniform(RAGE_EAT_CARB_MIN, RAGE_EAT_CARB_MAX)
 
-            k = FAST_CARB_K
-            theta = FAST_CARB_THETA
+            # Hypo correction uses fast-acting carbs (glucose tablets / juice)
+            k = HYPO_CARB_K
+            theta = HYPO_CARB_THETA
             duration = max(k * theta * 4, 60)
             curve = gamma_curve(correction_grams, k, theta, duration)
             self.inject_curve(curve, time_idx, 'correction_carb',
@@ -989,10 +1245,11 @@ class T1DMSimulator:
                         rage_mult = self.rng.uniform(RAGE_BOLUS_MULTIPLIER_MIN, RAGE_BOLUS_MULTIPLIER_MAX)
                         correction_dose *= rage_mult
 
-                bolus_curve = gamma_curve(correction_dose, BOLUS_GAMMA_K,
-                                          BOLUS_GAMMA_THETA, BOLUS_DURATION_HOURS * 60)
+                base_k, base_theta, corr_duration = bolus_pk_for_dose(correction_dose)
+                delivered_dose = correction_dose * self._site_quality(p.lifestyle_consistency)
+                bolus_curve = gamma_curve(delivered_dose, base_k, base_theta, corr_duration)
                 self.inject_curve(bolus_curve, time_idx, 'bolus',
-                                  f'Correction {correction_dose:.1f}U')
+                                  f'Correction {delivered_dose:.1f}U')
                 s.last_correction_idx = time_idx
 
         # --- Trend-based anticipatory corrections ---
@@ -1009,10 +1266,11 @@ class T1DMSimulator:
                     if self.rng.random() < p.attentiveness:
                         projected_rise = trend * TREND_CORRECTION_WINDOW_STEPS * 2
                         correction_dose = max(0.5, projected_rise * p.attentiveness / p.correction_factor)
-                        bolus_curve = gamma_curve(correction_dose, BOLUS_GAMMA_K,
-                                                  BOLUS_GAMMA_THETA, BOLUS_DURATION_HOURS * 60)
+                        base_k, base_theta, corr_duration = bolus_pk_for_dose(correction_dose)
+                        delivered_dose = correction_dose * self._site_quality(p.lifestyle_consistency)
+                        bolus_curve = gamma_curve(delivered_dose, base_k, base_theta, corr_duration)
                         self.inject_curve(bolus_curve, time_idx, 'bolus',
-                                          f'Trend corr {correction_dose:.1f}U')
+                                          f'Trend corr {delivered_dose:.1f}U')
                         s.last_correction_idx = time_idx
 
                 elif (trend < TREND_LOW_RATE_THRESHOLD and
@@ -1021,8 +1279,9 @@ class T1DMSimulator:
                     if self.rng.random() < p.attentiveness:
                         correction_grams = float(np.clip(
                             abs(trend) * TREND_CORRECTION_WINDOW_STEPS * 2.0, 5.0, 20.0))
-                        k = FAST_CARB_K
-                        theta = FAST_CARB_THETA
+                        # Pre-emptive low correction uses fast-acting carbs
+                        k = HYPO_CARB_K
+                        theta = HYPO_CARB_THETA
                         duration = max(k * theta * 4, 60)
                         curve = gamma_curve(correction_grams, k, theta, duration)
                         self.inject_curve(curve, time_idx, 'correction_carb',
@@ -1065,37 +1324,93 @@ class T1DMSimulator:
                 reduction = min(0.30, EXERCISE_IS_REDUCTION * (ex_dur / EXERCISE_DURATION_MEAN_MIN))
                 s.exercise_is_effects.append((effect_start, effect_end, reduction))
 
-        # --- Compute HGO for this step ---
-        hgo_rate = p.hgo_rate * (1 + self.rng.normal(0, HGO_NOISE_SIGMA))
-        hgo_value = hgo_rate * (DT_MINUTES / 60.0)
-
-        # Apply alcohol HGO suppression
-        alcohol_hgo_factor = 1.0
-        active_alcohol = []
-        for (start_idx, end_idx, hgo_factor) in s.alcohol_effects:
-            if idx < end_idx:
-                active_alcohol.append((start_idx, end_idx, hgo_factor))
-                if idx >= start_idx:
-                    alcohol_hgo_factor = min(alcohol_hgo_factor, hgo_factor)
-        s.alcohol_effects = active_alcohol
-        hgo_value *= alcohol_hgo_factor
-
         # --- Read per-step contributions from pre-computed accumulation arrays (O(1)) ---
         total_carb = float(self._carb_totals[idx]) if idx < len(self._carb_totals) else 0.0
         total_insulin = (float(self._basal_totals[idx]) + float(self._bolus_totals[idx])) if idx < len(self._basal_totals) else 0.0
         total_exercise = float(self._exercise_totals[idx]) if idx < len(self._exercise_totals) else 0.0
 
+        # Per-step absorption noise (gut variability for carbs, SC depot variance
+        # for insulin). Multiplicative, so dormant when no curve is active.
+        if total_carb > 0.0:
+            total_carb = max(0.0, total_carb * (1.0 + self.rng.normal(0, CARB_ABSORPTION_NOISE_SIGMA)))
+        if total_insulin > 0.0:
+            total_insulin = max(0.0, total_insulin * (1.0 + self.rng.normal(0, INSULIN_ABSORPTION_NOISE_SIGMA)))
+
+        # --- HGO with insulin-mediated suppression (Hill function) ---
+        # Plasma insulin lags subcutaneous absorption, so feed an EMA-smoothed
+        # insulin level into the Hill function. This prevents HGO from stepping
+        # at the moment a new bolus curve activates (insulin's first non-zero
+        # step would otherwise instantly drop HGO).
+        self._smoothed_insulin_for_hgo = (
+            HGO_INSULIN_SMOOTHING_ALPHA * total_insulin
+            + (1.0 - HGO_INSULIN_SMOOTHING_ALPHA) * self._smoothed_insulin_for_hgo
+        )
+        hgo_rate = compute_hgo_rate(self._smoothed_insulin_for_hgo) * (1 + self.rng.normal(0, HGO_NOISE_SIGMA))
+        hgo_value = hgo_rate * (DT_MINUTES / 60.0)
+
+        # Glycogen reservoir gating: when the liver runs low, glycogenolysis can't
+        # sustain HGO and total output drops toward the gluconeogenesis-only floor.
+        glycogen_low_threshold = GLYCOGEN_CAPACITY_GRAMS * GLYCOGEN_LOW_THRESHOLD_FRACTION
+        if s.glycogen_grams < glycogen_low_threshold:
+            # Linear scaling on the glycogenolysis-sourced fraction of HGO
+            availability = max(0.0, s.glycogen_grams / glycogen_low_threshold)
+            hgo_value *= (1.0 - GLYCOGEN_DRAIN_FRACTION) + GLYCOGEN_DRAIN_FRACTION * availability
+
+        # Alcohol additionally suppresses HGO (gluconeogenesis blockade).
+        # Trapezoidal envelope around 1.0 (no effect) prevents the HGO curve
+        # from stepping at the start/end of an alcohol session.
+        alc_ramp_steps = int(ALCOHOL_HGO_RAMP_HOURS * 60 / DT_MINUTES)
+        alcohol_hgo_factor = 1.0
+        active_alcohol = []
+        for (start_idx, end_idx, hgo_factor) in s.alcohol_effects:
+            if idx < end_idx:
+                active_alcohol.append((start_idx, end_idx, hgo_factor))
+                intensity = envelope_intensity(idx, start_idx, end_idx,
+                                                alc_ramp_steps, alc_ramp_steps)
+                if intensity > 0:
+                    eff_factor = 1.0 + (hgo_factor - 1.0) * intensity
+                    alcohol_hgo_factor = min(alcohol_hgo_factor, eff_factor)
+        s.alcohol_effects = active_alcohol
+        hgo_value *= alcohol_hgo_factor
+
+        # Delayed-meal HGO rebound: large meals trigger a delayed positive HGO
+        # bump 3.5-5.5h later. Trapezoidal envelope around 0 (no effect).
+        meal_hgo_ramp_steps = int(DELAYED_HGO_RAMP_HOURS * 60 / DT_MINUTES)
+        meal_hgo_bump = 0.0
+        active_meal_hgo = []
+        for (start_idx, end_idx, magnitude) in s.meal_hgo_effects:
+            if idx < end_idx:
+                active_meal_hgo.append((start_idx, end_idx, magnitude))
+                intensity = envelope_intensity(idx, start_idx, end_idx,
+                                                meal_hgo_ramp_steps, meal_hgo_ramp_steps)
+                if intensity > 0:
+                    meal_hgo_bump += magnitude * intensity
+        s.meal_hgo_effects = active_meal_hgo
+        if meal_hgo_bump > 0:
+            hgo_value += meal_hgo_bump * (DT_MINUTES / 60.0)
+
+        # Glycogen drain (by the glycogenolysis-sourced fraction of HGO) and
+        # refill from absorbed carbs. Tracked as a background reservoir — does
+        # not subtract from BG-bound carbs (ICR is empirically tuned to net BG
+        # response, so adding a "leak to glycogen" would double-count). The
+        # gating above is what couples glycogen back to BG dynamics.
+        s.glycogen_grams -= hgo_value * GLYCOGEN_DRAIN_FRACTION
+        s.glycogen_grams += total_carb * GLYCOGEN_REFILL_FRACTION
+        s.glycogen_grams = float(np.clip(s.glycogen_grams, 0.0, GLYCOGEN_CAPACITY_GRAMS))
+
         # Remove expired entries from active_curves (memory management for external consumers)
         s.active_curves = [c for c in s.active_curves
                            if (idx - c.start_time_idx) < len(c.values)]
 
-        # --- Insulin sensitivity ---
-        insulin_resistance_factor = self._compute_insulin_resistance(idx)
+        # --- Insulin sensitivity (modulates insulin effectiveness, not carb load) ---
+        insulin_resistance_factor = self._compute_insulin_resistance(idx, active_carb=total_carb)
 
         # --- Compute BG delta ---
-        insulin_carb_equiv = total_insulin * p.icr
-        effective_carb_load = (total_carb + hgo_value - total_exercise) * insulin_resistance_factor
-        bg_delta = BG_SCALE_FACTOR * (effective_carb_load - insulin_carb_equiv)
+        # IS now divides insulin's effect: resistant patients (IR>1) clear less
+        # glucose per unit insulin; sensitive patients (IR<1) clear more.
+        glucose_in = total_carb + hgo_value - total_exercise
+        glucose_out = total_insulin * p.icr / insulin_resistance_factor
+        bg_delta = BG_SCALE_FACTOR * (glucose_in - glucose_out)
 
         # Physiological guardrails
         if s.bg > RENAL_THRESHOLD:
@@ -1104,8 +1419,36 @@ class T1DMSimulator:
         if s.bg < COUNTER_REGULATORY_THRESHOLD:
             bg_delta += COUNTER_REGULATORY_RATE * (COUNTER_REGULATORY_THRESHOLD - s.bg) / COUNTER_REGULATORY_THRESHOLD
 
-        # Update BG
-        s.bg = np.clip(s.bg + bg_delta, BG_CLAMP_MIN, BG_CLAMP_MAX)
+        # Severe-hypo glucagon dump — escalates the response below SEVERE_HYPO_THRESHOLD
+        if s.bg < SEVERE_HYPO_THRESHOLD:
+            severity = (SEVERE_HYPO_THRESHOLD - s.bg) / SEVERE_HYPO_THRESHOLD
+            bg_delta += SEVERE_HYPO_GLUCAGON_RATE * severity
+
+        # Soft-bound headroom cap: if a step would carry BG past the soft
+        # threshold toward the hard clamp, cap the move to a fraction of the
+        # remaining headroom from the *current* position. BG decays geometrically
+        # toward the bound (e.g. with fraction=0.3, gap halves every ~2 steps),
+        # so it asymptotes smoothly instead of slamming into a flat line.
+        # Checking the projected position (not current) catches large single-step
+        # deltas that would otherwise leap clear over the soft zone.
+        if bg_delta < 0:
+            projected = s.bg + bg_delta
+            if projected < BG_SOFT_FLOOR:
+                headroom = max(0.0, s.bg - BG_CLAMP_MIN)
+                bg_delta = max(bg_delta, -SOFT_APPROACH_FRACTION * headroom)
+        elif bg_delta > 0:
+            projected = s.bg + bg_delta
+            if projected > BG_SOFT_CEILING:
+                headroom = max(0.0, BG_CLAMP_MAX - s.bg)
+                bg_delta = min(bg_delta, SOFT_APPROACH_FRACTION * headroom)
+
+        # Hard clamp as absolute backstop (should rarely fire)
+        s.bg = float(np.clip(s.bg + bg_delta, BG_CLAMP_MIN, BG_CLAMP_MAX))
+
+        # Update glucotoxicity BG EMA (slow, ~6h half-life). Drives transient
+        # IR when chronically elevated.
+        glucotox_alpha = 1.0 - 0.5 ** (DT_MINUTES / (GLUCOTOX_BG_EMA_HALF_LIFE_HOURS * 60.0))
+        s.glucotox_bg_ema = glucotox_alpha * s.bg + (1.0 - glucotox_alpha) * s.glucotox_bg_ema
 
         # CGM observation
         s.bg_observed = self._compute_cgm_observation(s.bg)
@@ -1143,7 +1486,8 @@ class T1DMSimulator:
             'total_exercise': total_exercise,
             'insulin_resistance': insulin_resistance_factor,
             'hgo': hgo_value,
-            'effective_carb_load': effective_carb_load,
+            'glucose_in': glucose_in,
+            'glucose_out': glucose_out,
             'is_sick': s.is_sick,
             'is_rare_day': s.is_rare_event_day,
             'is_weekend': s.day_of_week >= 5,
@@ -1158,7 +1502,7 @@ class T1DMSimulator:
             'index': [], 'time_hours': [], 'day': [], 'hour_of_day': [],
             'bg': [], 'bg_observed': [], 'bg_delta': [],
             'total_carb': [], 'total_insulin': [], 'total_exercise': [],
-            'insulin_resistance': [], 'hgo': [], 'effective_carb_load': [],
+            'insulin_resistance': [], 'hgo': [], 'glucose_in': [], 'glucose_out': [],
             'is_sick': [], 'is_rare_day': [], 'is_weekend': [], 'is_holiday': [],
             'alcohol_hgo_factor': [],
         }
