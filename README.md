@@ -4,10 +4,6 @@ A seed-driven simulator for generating synthetic Type 1 Diabetes blood glucose d
 
 Designed by a T1DM patient, informed by lived experience.
 
-Demo:
-
-https://github.com/user-attachments/assets/31a9d6ab-90ed-44e2-ad93-f37f147bb650
-
 Screenshot:
 
 <img width="4200" height="1700" alt="t1dm_seed60262_1775136760" src="https://github.com/user-attachments/assets/d156a4f2-db92-42b3-a9db-3347889b1b4a" />
@@ -32,7 +28,7 @@ The simulator is built on several core ideas:
 
 3. Patient behavior is driven by a latent skill profile. Four correlated skill dimensions (dietary discipline, attentiveness, dosing competence, lifestyle consistency) determine everything about how a patient lives: what they eat, when they eat, how accurately they dose, how quickly they correct, whether they exercise.
 
-4. The liver is a constant feeding session. Hepatic glucose output (HGO) is modeled as a steady stream of "food" entering the bloodstream. Basal insulin exists to counteract this stream, and the ideal basal dose is derived directly from `(HGO_rate × 24h) / ICR`.
+4. The liver is an insulin-suppressed feeding session. Hepatic glucose output (HGO) is a steady stream of "food" entering the bloodstream, throttled down by a Hill function of EMA-smoothed plasma insulin. A finite hepatic glycogen reservoir gates the glycogenolysis fraction, and large meals schedule a delayed HGO rebound 3.5-5.5h later (the mechanism behind nocturnal hyperglycemia after a big dinner). Basal insulin exists to counteract baseline HGO; the ideal basal dose is anchored to `(HGO_base × 24h) / ICR`.
 
 5. Exercise is negative food. Walking, for example, pulls glucose out of the bloodstream into muscle cells. Modeling this as a negative carb-equivalent curve is a pragmatic simplification that works well for aerobic exercise. Additionally, exercise increases insulin sensitivity for 12–24 hours afterward, modeled as a time-limited IS reduction.
 
@@ -43,11 +39,11 @@ The simulator is built on several core ideas:
 
 The simulator consists of two files:
 
-`simulator.py` contains the core engine. All tunable parameters are defined as uppercase constants at the top of the file (approximately 100 parameters). The `T1DMSimulator` class exposes a `generate()` method that advances the simulation by one 5-minute time step and returns all factor values and the resulting BG. This is analogous to `rand()` in C: seed it once, then call repeatedly to produce a stream of data.
+`simulator.py` contains the core engine. All tunable parameters are defined as uppercase constants at the top of the file (approximately 200 parameters). The `T1DMSimulator` class exposes a `generate()` method that advances the simulation by one 5-minute time step and returns all factor values and the resulting BG. This is analogous to `rand()` in C: seed it once, then call repeatedly to produce a stream of data.
 
 `visualizer.py` is an interactive Pygame-based renderer that displays the generated curves in real time. It shows the patient's skill profile, derived parameters, and live statistics (time in range, mean BG, etc.) in a sidebar, with the main chart area rendering whichever curves are toggled on. Mouse hover shows exact values at any time point.
 
-**Performance:** Curve contributions are pre-accumulated into numpy arrays (`_carb_totals`, `_insulin_totals`, `_exercise_totals`) so each time step reads values in O(1). Insulin-on-board (IOB) is computed as a single `np.sum` over the future insulin array. This makes `generate_hours()` fast enough for bulk training-data generation.
+**Performance:** Curve contributions are pre-accumulated into numpy arrays (`_carb_totals`, `_basal_totals`, `_bolus_totals`, `_exercise_totals`) so each time step reads values in O(1). Insulin-on-board (IOB) is computed as a single `np.sum` over the future insulin array. This makes `generate_hours()` fast enough for bulk training-data generation.
 
 
 ## Blood Sugar Computation
@@ -55,19 +51,22 @@ The simulator consists of two files:
 At each 5-minute time step, the BG delta is computed as:
 
 ```
-effective_carb_load = (carbs + hepatic_output - exercise) * insulin_sensitivity
-insulin_carb_equiv = insulin_units * ICR
-delta_BG = alpha * (effective_carb_load - insulin_carb_equiv)
+glucose_in  = carbs + hepatic_output - exercise
+glucose_out = insulin_units * ICR / insulin_sensitivity
+delta_BG    = alpha * (glucose_in - glucose_out)
 ```
 
-Where `alpha` is `BG_SCALE_FACTOR`, the master scaling constant that converts abstract units to mg/dL. After computing the delta, two physiological guardrails are applied:
+Where `alpha` is `BG_SCALE_FACTOR`, the master scaling constant that converts abstract units to mg/dL. Insulin sensitivity divides the insulin-clearance term: resistant patients (IS > 1) clear less glucose per unit insulin, sensitive patients (IS < 1) clear more. HGO suppression by insulin is handled separately (via a Hill function on smoothed plasma insulin), so IS modulates only peripheral insulin action.
+
+After computing the delta, three physiological guardrails are applied:
 
 - Renal clearance: above 180 mg/dL, the kidneys excrete glucose proportionally to the excess.
 - Counter-regulatory response: below 70 mg/dL, glucagon and cortisol force the liver to dump extra sugar.
+- Severe-hypo glucagon dump: below `SEVERE_HYPO_THRESHOLD`, an additional emergency release adds glucose proportionally to severity.
 
-The resulting BG is clamped to 40-500 mg/dL.
+Soft delta-damping near the floor and ceiling shapes the tails; a hard clamp at 20-500 mg/dL acts as a backstop.
 
-Alcohol modifies this formula by suppressing `hepatic_output` by 30–70% for 4–8 hours starting 1–2 hours after drinking. Stress events temporarily multiply `insulin_sensitivity` by 1.1–1.5.
+Alcohol additionally suppresses HGO (on top of insulin's own suppression) by 30–70% for 4–8 hours starting 1–2 hours after drinking. Stress events temporarily multiply `insulin_sensitivity` by 1.1–1.5.
 
 
 ## Patient Model
@@ -96,21 +95,24 @@ Insulin sensitivity follows a multi-peak diurnal pattern modeled as a sum of Gau
 
 The morning peak's timing shifts randomly day-to-day (configurable sigma). A daily drift and per-step noise add further variability. During illness, the IS factor ramps gradually toward a target (rather than jumping instantly) and ramps back down during recovery.
 
-Two additional IS modifiers apply on top of the diurnal pattern:
+Additional IS modifiers apply on top of the diurnal pattern:
 
 - **Post-exercise sensitivity boost**: After aerobic exercise, IS is reduced by `EXERCISE_IS_REDUCTION` (10%) for `EXERCISE_IS_DURATION_HOURS` (18h), modelling the well-known glucose-lowering effect of exercise that causes nocturnal hypos in active patients.
 - **Stress resistance**: Stress events (2–6h duration, 1.1–1.5× IS multiplier) model the transient insulin resistance from cortisol and adrenaline.
+- **Glucotoxicity**: A slow 6h EMA of true BG drives transient insulin resistance when chronically elevated, closing a positive feedback loop on hyperglycemia (high BG → more IR → harder to bring down).
+- **Postprandial IS bonus**: While carbs are absorbing, IS is multiplied by `(1 − bonus)` where `bonus` saturates with active carb load. Models the incretin / GLP-1 effect — peripheral tissues are transiently more insulin-sensitive after eating.
+- **Injection site quality (lipohypertrophy)**: Every insulin dose (basal, meal bolus, corrections) is multiplied by a per-dose `site_quality` factor sampled from `N(1.0, σ)` where σ scales with `1/s4`. Patients with poor lifestyle consistency rotate sites poorly and develop higher dose-to-dose variance.
 
 
 ## Behavioral Events
 
 The simulator generates the following events:
 
-- **Meals**: Number, timing, and carb amount are all skill-dependent. Each meal generates two overlapping gamma curves — a fast-carb fraction and a slow-carb fraction — whose ratio (`fast_fraction`) is sampled per meal and influenced by dietary discipline. A protein/fat slow-carb equivalent is added to every meal.
+- **Meals**: Number, timing, and carb amount are all skill-dependent. Each meal is decomposed into 2-5 overlapping gamma absorption components (a "mixed meal" model): the component count is `MIXED_MEAL_MIN_COMPONENTS + Poisson(λ)` capped at the max, and carb fractions are drawn from a Dirichlet distribution. Each component is classified as fast / medium / slow with weights driven by the patient's `slow_carb_preference`, and its `(k, θ)` is uniformly sampled from category-specific ranges. A protein/fat tail (`PROTEIN_FAT_EQUIV_GRAMS` worth of very slow carbs) is always added. Hypo-correction carbs use a separate fast pair that peaks faster than meal carbs (glucose tablets / juice).
 
-- **Basal insulin**: Administered once daily. The ideal dose is computed as `(HGO_rate × 24h) / ICR`; unskilled patients deviate from this ideal more. A daily adjustment mechanism lets the patient nudge their dose based on the previous day's mean BG. Absorption is modeled using a trapezoidal `basal_curve` (ramp-up then ramp-down) with a total duration of `BASAL_DURATION_HOURS` (26h), which ensures constant coverage throughout the day and overnight.
+- **Basal insulin**: Administered once daily. The ideal dose is anchored to `(HGO_base × 24h) / ICR`; unskilled patients deviate from this ideal more. A daily adjustment mechanism lets the patient nudge their dose based on the previous day's mean BG. Absorption is modeled using a trapezoidal `basal_curve` (ramp-up, plateau, ramp-down) with a total duration of `BASAL_DURATION_HOURS` (28h), which ensures continuous coverage throughout the day and overnight.
 
-- **Bolus insulin**: Dosed per meal based on an estimated carb count (with skill-dependent counting error). Timing is skill-dependent: competent patients pre-bolus, incompetent ones bolus after eating. Snack boluses may be skipped.
+- **Bolus insulin**: Dosed per meal based on an estimated carb count (with skill-dependent counting error). Timing is skill-dependent: competent patients pre-bolus, incompetent ones bolus after eating. Snack boluses may be skipped. Bolus PK is dose-dependent: both duration of action and θ scale with `√dose` (centered on a 5U reference), so larger doses act longer and peak slightly later, matching observed subcutaneous insulin behavior. Use the `bolus_pk_for_dose(dose)` helper to retrieve `(k, θ, duration_minutes)`.
 
 - **Corrections**: The patient checks their CGM at skill-dependent intervals. High-competence patients account for insulin-on-board (IOB) before correcting to avoid stacking. Attentive patients also react to BG *trends*: a rising trend above 140 mg/dL or a falling trend below 100 mg/dL triggers a preemptive correction before crossing the absolute threshold. At extreme values (above 300 or below 55), rage bolusing or rage eating may occur.
 
