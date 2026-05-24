@@ -6,6 +6,7 @@ dist/
 build/
 .eggs/
 *.png
+!screenshots/*.png
 *.npz
 .venv/
 venv/

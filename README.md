@@ -6,7 +6,7 @@ Designed by a T1DM patient, informed by lived experience.
 
 Screenshot:
 
-<img width="4200" height="1700" alt="t1dm_seed60262_1775136760" src="https://github.com/user-attachments/assets/d156a4f2-db92-42b3-a9db-3347889b1b4a" />
+![Software Screenshot](screenshots/t1dm_seed42_1779650963.png)
 
 
 ## Motivation
