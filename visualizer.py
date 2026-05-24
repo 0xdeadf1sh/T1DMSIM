@@ -12,6 +12,7 @@ Controls:
   +/-         — Zoom in/out on time axis
   1-6         — Toggle individual curve visibility
   A           — Toggle all curves on/off
+  F           — Cycle text size (small / medium / large)
   S           — Screenshot (saves PNG)
   Q / ESC     — Quit
 
@@ -81,13 +82,29 @@ COLOR_IN_RANGE   = (40, 120, 40, 15)
 COLOR_HIGH       = (180, 140, 20, 20)
 COLOR_VERY_HIGH  = (180, 40, 40, 20)
 
-# Layout
-SIDEBAR_WIDTH    = 280
-HEADER_HEIGHT    = 50
-FOOTER_HEIGHT    = 30
+# Layout (base values — scaled at runtime by the current text scale)
+BASE_SIDEBAR_WIDTH = 320
+BASE_HEADER_HEIGHT = 56
+BASE_FOOTER_HEIGHT = 34
 CHART_PADDING    = 10
 MIN_WINDOW_W     = 1200
 MIN_WINDOW_H     = 700
+
+# Base font sizes (medium = 1.0× of these)
+BASE_FONT_SM = 15
+BASE_FONT_MD = 18
+BASE_FONT_LG = 24
+BASE_FONT_XL = 30
+
+# Text scale presets — cycled at runtime with the F key.
+# small ≈ pre-feature defaults; medium is the new default; large for hi-DPI / presentation.
+TEXT_SCALES = {
+    'small':  0.80,
+    'medium': 1.00,
+    'large':  1.25,
+}
+TEXT_SCALE_ORDER = ['small', 'medium', 'large']
+DEFAULT_TEXT_SCALE = 'medium'
 
 STEPS_PER_DAY = 24 * 60 // DT_MINUTES  # 288
 
@@ -158,11 +175,10 @@ class Visualizer:
         # Off-screen buffer to eliminate flickering
         self.buffer = pygame.Surface((self.win_w, self.win_h))
 
-        # Fonts
-        self.font_sm = pygame.font.SysFont("DejaVu Sans Mono", 12)
-        self.font_md = pygame.font.SysFont("DejaVu Sans Mono", 14)
-        self.font_lg = pygame.font.SysFont("DejaVu Sans Mono", 18)
-        self.font_xl = pygame.font.SysFont("DejaVu Sans Mono", 22)
+        # Fonts + scale-dependent layout (sidebar/header/footer dims live on self
+        # so they can react to text-scale changes; see _apply_text_scale).
+        self.text_scale = DEFAULT_TEXT_SCALE
+        self._apply_text_scale()
 
         # Simulator
         self.seed = 42
@@ -185,6 +201,31 @@ class Visualizer:
 
         # Clock
         self.clock = pygame.time.Clock()
+
+    def _apply_text_scale(self):
+        """Rebuild fonts and scale-dependent layout from self.text_scale."""
+        mult = TEXT_SCALES[self.text_scale]
+        self._text_scale_mult = mult
+        self.font_sm = pygame.font.SysFont("DejaVu Sans Mono", max(8, int(BASE_FONT_SM * mult)))
+        self.font_md = pygame.font.SysFont("DejaVu Sans Mono", max(8, int(BASE_FONT_MD * mult)))
+        self.font_lg = pygame.font.SysFont("DejaVu Sans Mono", max(8, int(BASE_FONT_LG * mult)))
+        self.font_xl = pygame.font.SysFont("DejaVu Sans Mono", max(8, int(BASE_FONT_XL * mult)))
+        self.sidebar_width = int(BASE_SIDEBAR_WIDTH * mult)
+        self.header_height = int(BASE_HEADER_HEIGHT * mult)
+        # Footer must hold the scrollbar; chart leaves room for X-axis time labels above
+        # the footer and curve-name labels above the chart, so they never collide.
+        self.footer_height = max(int(BASE_FOOTER_HEIGHT * mult), self.font_sm.get_linesize() + int(18 * mult))
+        self.time_label_height = self.font_sm.get_linesize() + 4
+        self.curve_label_height = self.font_sm.get_linesize() + 4
+
+    def _s(self, n):
+        """Scale a layout pixel value by the current text scale."""
+        return int(n * self._text_scale_mult)
+
+    def _cycle_text_scale(self):
+        idx = TEXT_SCALE_ORDER.index(self.text_scale)
+        self.text_scale = TEXT_SCALE_ORDER[(idx + 1) % len(TEXT_SCALE_ORDER)]
+        self._apply_text_scale()
 
     def _generate(self, hours):
         """Generate more data."""
@@ -211,10 +252,12 @@ class Visualizer:
 
     def _chart_rect(self):
         """Get the chart drawing area."""
-        x = SIDEBAR_WIDTH + CHART_PADDING
-        y = HEADER_HEIGHT + CHART_PADDING
-        w = self.win_w - SIDEBAR_WIDTH - CHART_PADDING * 2
-        h = self.win_h - HEADER_HEIGHT - FOOTER_HEIGHT - CHART_PADDING * 2
+        x = self.sidebar_width + CHART_PADDING
+        y = self.header_height + CHART_PADDING + self.curve_label_height
+        w = self.win_w - self.sidebar_width - CHART_PADDING * 2
+        h = (self.win_h - self.header_height - self.footer_height
+             - self.time_label_height - self.curve_label_height
+             - CHART_PADDING * 2)
         return pygame.Rect(x, y, w, h)
 
     def _visible_range(self):
@@ -231,22 +274,28 @@ class Visualizer:
 
     def _draw_sidebar(self):
         """Draw the parameter panel on the left."""
-        sidebar = pygame.Rect(0, 0, SIDEBAR_WIDTH, self.win_h)
+        sidebar = pygame.Rect(0, 0, self.sidebar_width, self.win_h)
         pygame.draw.rect(self.buffer, PANEL_COLOR, sidebar)
         pygame.draw.line(self.buffer, GRID_COLOR_MAJOR,
-                         (SIDEBAR_WIDTH - 1, 0), (SIDEBAR_WIDTH - 1, self.win_h))
+                         (self.sidebar_width - 1, 0), (self.sidebar_width - 1, self.win_h))
 
-        x, y = 12, 12
+        line_sm = self.font_sm.get_linesize()
+        line_md = self.font_md.get_linesize()
+
+        x = self._s(12)
+        y = self._s(12)
         draw_text(self.buffer, self.font_lg, "T1DM Simulator", x, y, TEXT_BRIGHT)
-        y += 30
+        y += self.font_lg.get_linesize() + self._s(6)
 
-        # Seed
+        # Seed + text scale
         draw_text(self.buffer, self.font_md, f"Seed: {self.seed}", x, y, ACCENT)
-        y += 25
+        draw_text(self.buffer, self.font_sm, f"Text: {self.text_scale}",
+                  self.sidebar_width - self._s(12), y, TEXT_DIM, anchor='topright')
+        y += line_md + self._s(6)
 
         # Patient profile
         draw_text(self.buffer, self.font_md, "— Patient Profile —", x, y, TEXT_DIM)
-        y += 22
+        y += line_md + self._s(4)
 
         p = self.sim.patient
         profile_items = [
@@ -255,22 +304,21 @@ class Visualizer:
             ("Dose Competence", p.dosing_competence,   COLOR_IS),
             ("Consistency",     p.lifestyle_consistency, COLOR_EXERCISE),
         ]
+        bar_w = self._s(100)
+        bar_h = self._s(10)
         for label, val, color in profile_items:
             draw_text(self.buffer, self.font_sm, label, x, y, TEXT_DIM)
-            # Skill bar
-            bar_x = x + 140
-            bar_w = 100
-            bar_h = 10
-            bar_y_c = y + 6
+            bar_x = x + self._s(140)
+            bar_y_c = y + (line_sm - bar_h) // 2
             pygame.draw.rect(self.buffer, GRID_COLOR, (bar_x, bar_y_c, bar_w, bar_h))
             fill_w = int(val * bar_w)
             pygame.draw.rect(self.buffer, color, (bar_x, bar_y_c, fill_w, bar_h))
-            draw_text(self.buffer, self.font_sm, f"{val:.2f}", bar_x + bar_w + 5, y, TEXT_DIM)
-            y += 18
+            draw_text(self.buffer, self.font_sm, f"{val:.2f}", bar_x + bar_w + self._s(5), y, TEXT_DIM)
+            y += line_sm + self._s(2)
 
-        y += 10
+        y += self._s(10)
         draw_text(self.buffer, self.font_md, "— Parameters —", x, y, TEXT_DIM)
-        y += 22
+        y += line_md + self._s(4)
 
         summary = self.sim.get_patient_summary()
         param_keys = ['is_base', 'icr', 'correction_factor', 'basal_dose',
@@ -280,16 +328,17 @@ class Visualizer:
                         'CGM Check Interval', 'Patience Time', 'Exercise Prob',
                         'Basal Miss Prob', 'Slow Carb Pref', 'Panic Factor']
 
+        param_col_x = x + self._s(150)
         for label, key in zip(param_labels, param_keys):
             draw_text(self.buffer, self.font_sm, f"{label}:", x, y, TEXT_DIM)
-            draw_text(self.buffer, self.font_sm, summary[key], x + 150, y, TEXT_COLOR)
-            y += 16
+            draw_text(self.buffer, self.font_sm, summary[key], param_col_x, y, TEXT_COLOR)
+            y += line_sm
 
         # Stats
         if self.data is not None and self.total_steps > 0:
-            y += 15
+            y += self._s(15)
             draw_text(self.buffer, self.font_md, "— Statistics —", x, y, TEXT_DIM)
-            y += 22
+            y += line_md + self._s(4)
 
             bg = self.data['bg'][:self.total_steps]
             tir = np.mean((bg >= 70) & (bg <= 180)) * 100
@@ -310,6 +359,7 @@ class Visualizer:
             if self.sim.state.is_rare_event_day:
                 stats.append(("Today", "RARE EVENT"))
 
+            stats_col_x = x + self._s(140)
             for label, val in stats:
                 draw_text(self.buffer, self.font_sm, f"{label}:", x, y, TEXT_DIM)
                 color = TEXT_COLOR
@@ -319,24 +369,24 @@ class Visualizer:
                     color = (255, 80, 80)
                 elif label == "Today":
                     color = (255, 200, 50)
-                draw_text(self.buffer, self.font_sm, val, x + 120, y, color)
-                y += 16
+                draw_text(self.buffer, self.font_sm, val, stats_col_x, y, color)
+                y += line_sm
 
         # Curve legend / toggles
-        y += 15
-        draw_text(self.buffer, self.font_md, "— Curves (1-6) —", x, y, TEXT_DIM)
-        y += 22
+        y += self._s(15)
+        draw_text(self.buffer, self.font_md, "— Curves (1-8) —", x, y, TEXT_DIM)
+        y += line_md + self._s(4)
 
         for i, curve in enumerate(CURVES):
             prefix = "●" if self.curve_visible[i] else "○"
             color = curve['color'] if self.curve_visible[i] else TEXT_DIM
             draw_text(self.buffer, self.font_sm, f"[{i+1}] {prefix} {curve['name']}", x, y, color)
-            y += 16
+            y += line_sm
 
         # Controls
-        y += 15
+        y += self._s(15)
         draw_text(self.buffer, self.font_md, "— Controls —", x, y, TEXT_DIM)
-        y += 20
+        y += line_md + self._s(2)
         controls = [
             "SPACE  Generate +24h",
             "R      Random reseed",
@@ -346,14 +396,15 @@ class Visualizer:
             "HOME   Jump to start",
             "END    Jump to end",
             "A      Toggle all curves",
+            "F      Cycle text size",
             "S      Screenshot",
             "Q/ESC  Quit",
         ]
         for line in controls:
-            if y + 14 > self.win_h - 10:
+            if y + line_sm > self.win_h - self._s(10):
                 break
             draw_text(self.buffer, self.font_sm, line, x, y, TEXT_DIM)
-            y += 14
+            y += line_sm
 
     def _draw_nocturnal_zones(self, chart):
         """Shade chart background during nocturnal hours (NIGHT_START_HOUR to NIGHT_END_HOUR)."""
@@ -457,11 +508,12 @@ class Visualizer:
         active_curves = [(i, c) for i, c in enumerate(CURVES) if self.curve_visible[i]]
         if active_curves:
             # Use the first visible curve for Y axis on the left
+            col_w = self._s(65)
             for ci, (idx, curve_def) in enumerate(active_curves):
                 y_min, y_max = curve_def['y_min'], curve_def['y_max']
-                label_x = chart.x + chart.width + 5 + ci * 65
+                label_x = chart.x + chart.width + self._s(5) + ci * col_w
 
-                if label_x + 60 > self.win_w:
+                if label_x + self._s(60) > self.win_w:
                     break
 
                 # Y axis ticks
@@ -476,16 +528,18 @@ class Visualizer:
                         pygame.draw.line(self.buffer, GRID_COLOR,
                                          (chart.x, int(py)), (chart.x + chart.width, int(py)))
 
-                    # Label
+                    # Label — vertically center against the tick
                     if val == int(val):
                         txt = str(int(val))
                     else:
                         txt = f"{val:.1f}"
-                    draw_text(self.buffer, self.font_sm, txt, label_x, int(py) - 6, curve_def['color'])
+                    draw_text(self.buffer, self.font_sm, txt,
+                              label_x, int(py) - self.font_sm.get_height() // 2,
+                              curve_def['color'])
 
                 # Curve name at top
                 draw_text(self.buffer, self.font_sm, curve_def['name'][:8],
-                          label_x, chart.y - 14, curve_def['color'])
+                          label_x, chart.y - self.font_sm.get_linesize(), curve_def['color'])
 
     def _draw_curves(self, chart):
         """Draw all visible curves."""
@@ -565,9 +619,12 @@ class Visualizer:
             tooltip_lines.append("⚠ RARE DAY")
 
         # Draw tooltip box
-        tt_w = max(self.font_sm.size(line)[0] for line in tooltip_lines) + 16
-        tt_h = len(tooltip_lines) * 16 + 8
-        tt_x = min(mx + 15, self.win_w - tt_w - 5)
+        tt_line_h = self.font_sm.get_linesize()
+        tt_pad_x = self._s(8)
+        tt_pad_y = self._s(4)
+        tt_w = max(self.font_sm.size(line)[0] for line in tooltip_lines) + tt_pad_x * 2
+        tt_h = len(tooltip_lines) * tt_line_h + tt_pad_y * 2
+        tt_x = min(mx + self._s(15), self.win_w - tt_w - self._s(5))
         tt_y = max(chart.y, my - tt_h // 2)
 
         tt_surf = pygame.Surface((tt_w, tt_h), pygame.SRCALPHA)
@@ -577,7 +634,7 @@ class Visualizer:
 
         for j, line in enumerate(tooltip_lines):
             color = TEXT_BRIGHT if j == 0 else TEXT_COLOR
-            draw_text(self.buffer, self.font_sm, line, tt_x + 8, tt_y + 4 + j * 16, color)
+            draw_text(self.buffer, self.font_sm, line, tt_x + tt_pad_x, tt_y + tt_pad_y + j * tt_line_h, color)
 
         # Dots on curves at this step
         for i, curve_def in enumerate(CURVES):
@@ -595,35 +652,40 @@ class Visualizer:
 
     def _draw_header(self):
         """Draw header bar."""
-        pygame.draw.rect(self.buffer, PANEL_COLOR, (SIDEBAR_WIDTH, 0, self.win_w - SIDEBAR_WIDTH, HEADER_HEIGHT))
+        pygame.draw.rect(self.buffer, PANEL_COLOR, (self.sidebar_width, 0, self.win_w - self.sidebar_width, self.header_height))
         pygame.draw.line(self.buffer, GRID_COLOR_MAJOR,
-                         (SIDEBAR_WIDTH, HEADER_HEIGHT), (self.win_w, HEADER_HEIGHT))
+                         (self.sidebar_width, self.header_height), (self.win_w, self.header_height))
 
-        # Current time info
+        # Current time info — vertically center font_lg in header
         if self.total_steps > 0:
             total_hours = self.total_steps * DT_MINUTES / 60
             total_days = total_hours / 24
+            text_y = (self.header_height - self.font_lg.get_height()) // 2
             draw_text(self.buffer, self.font_lg,
                       f"Generated: {total_hours:.0f}h ({total_days:.1f} days)  |  "
                       f"Steps: {self.total_steps}  |  "
                       f"Zoom: {self.pixels_per_step:.1f}px/step",
-                      SIDEBAR_WIDTH + 15, 15, TEXT_COLOR)
+                      self.sidebar_width + self._s(15), text_y, TEXT_COLOR)
 
     def _draw_footer(self):
         """Draw footer bar."""
-        footer_y = self.win_h - FOOTER_HEIGHT
-        pygame.draw.rect(self.buffer, PANEL_COLOR, (0, footer_y, self.win_w, FOOTER_HEIGHT))
+        footer_y = self.win_h - self.footer_height
+        pygame.draw.rect(self.buffer, PANEL_COLOR, (0, footer_y, self.win_w, self.footer_height))
 
-        # Scrollbar
+        # Scrollbar — centered vertically inside the footer, height scales with text
         chart = self._chart_rect()
         if self.total_steps > 0:
+            sb_h = max(8, self._s(14))
+            sb_y = footer_y + (self.footer_height - sb_h) // 2
+            track_pad = self._s(5)
+            track_w = self.win_w - self.sidebar_width - track_pad * 2
             visible_frac = min(1.0, chart.width / (self.total_steps * self.pixels_per_step))
             scroll_frac = self.scroll_x / max(1, self.total_steps)
-            sb_x = SIDEBAR_WIDTH + int(scroll_frac * (self.win_w - SIDEBAR_WIDTH - 20))
-            sb_w = max(20, int(visible_frac * (self.win_w - SIDEBAR_WIDTH - 20)))
+            sb_x = self.sidebar_width + track_pad + int(scroll_frac * track_w)
+            sb_w = max(self._s(20), int(visible_frac * track_w))
             pygame.draw.rect(self.buffer, GRID_COLOR,
-                             (SIDEBAR_WIDTH + 5, footer_y + 8, self.win_w - SIDEBAR_WIDTH - 10, 14))
-            pygame.draw.rect(self.buffer, ACCENT, (sb_x, footer_y + 8, sb_w, 14))
+                             (self.sidebar_width + track_pad, sb_y, track_w, sb_h))
+            pygame.draw.rect(self.buffer, ACCENT, (sb_x, sb_y, sb_w, sb_h))
 
     def run(self):
         """Main loop."""
@@ -675,6 +737,9 @@ class Visualizer:
                     elif event.key == pygame.K_a:
                         all_on = all(self.curve_visible)
                         self.curve_visible = [not all_on] * len(self.curve_visible)
+
+                    elif event.key == pygame.K_f:
+                        self._cycle_text_scale()
 
                     elif event.key == pygame.K_HOME:
                         self.scroll_x = 0
