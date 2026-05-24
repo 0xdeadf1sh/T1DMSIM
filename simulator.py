@@ -1307,15 +1307,8 @@ class T1DMSimulator:
         while self._pending_events and self._pending_events[0][0] <= idx:
             event_time, event_type, event_data = self._pending_events.pop(0)
             curve = event_data['curve']
-            # Scatter-add into accumulation arrays (O(len(curve)), done once per event)
-            self._add_to_totals(curve, event_time, event_type)
-            # Keep active_curves populated for external consumers
-            s.active_curves.append(ActiveCurve(
-                start_time_idx=event_time,
-                values=curve,
-                curve_type=event_type,
-                label=event_data.get('label', '')
-            ))
+            self.inject_curve(curve, event_time, event_type,
+                              label=event_data.get('label', ''))
             # Schedule post-exercise IS sensitivity boost
             if event_type == 'exercise':
                 ex_dur = event_data.get('duration_min', EXERCISE_DURATION_MEAN_MIN)

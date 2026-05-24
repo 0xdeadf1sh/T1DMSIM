@@ -20,7 +20,9 @@ from simulator import (
     T1DMSimulator, BG_CLAMP_MIN, BG_CLAMP_MAX,
     gamma_curve, BOLUS_GAMMA_K, BOLUS_GAMMA_THETA, BOLUS_DURATION_HOURS,
     FAST_CARB_K, FAST_CARB_THETA, PUBLIC_HOLIDAYS_PER_YEAR_MIN,
-    PUBLIC_HOLIDAYS_PER_YEAR_MAX, SIMULATION_START_DAY_OF_WEEK
+    PUBLIC_HOLIDAYS_PER_YEAR_MAX, SIMULATION_START_DAY_OF_WEEK,
+    bolus_pk_for_dose, BOLUS_DIA_BASE_HOURS, BOLUS_DIA_MIN_HOURS, BOLUS_DIA_MAX_HOURS,
+    GLYCOGEN_CAPACITY_GRAMS, DT_MINUTES,
 )
 
 
@@ -184,3 +186,79 @@ class TestHolidays:
             assert max(year0_holidays) > 91, "All holidays are in the first quarter"
             # Check that first holiday is not in last quarter
             assert min(year0_holidays) < 274, "All holidays are in the last quarter"
+
+
+class TestBolusPKForDose:
+    """The dose-dependent bolus PK helper must scale duration with dose and
+    return a valid (k, theta, duration_minutes) triple for any dose."""
+
+    def test_returns_triple(self):
+        for dose in [0.1, 1.0, 5.0, 10.0, 30.0]:
+            k, theta, duration_min = bolus_pk_for_dose(dose)
+            assert k > 0, f"k must be positive (dose={dose})"
+            assert theta > 0, f"theta must be positive (dose={dose})"
+            assert duration_min > 0, f"duration must be positive (dose={dose})"
+
+    def test_duration_within_bounds(self):
+        """Duration is clipped to [BOLUS_DIA_MIN_HOURS, BOLUS_DIA_MAX_HOURS]."""
+        for dose in [0.01, 0.5, 5.0, 50.0, 1000.0]:
+            _, _, duration_min = bolus_pk_for_dose(dose)
+            duration_h = duration_min / 60.0
+            assert BOLUS_DIA_MIN_HOURS <= duration_h <= BOLUS_DIA_MAX_HOURS, (
+                f"dose={dose} produced duration_h={duration_h}, "
+                f"outside [{BOLUS_DIA_MIN_HOURS}, {BOLUS_DIA_MAX_HOURS}]")
+
+    def test_duration_monotone_with_dose(self):
+        """Larger doses act at least as long (within clip bounds)."""
+        doses = [1.0, 3.0, 5.0, 10.0, 20.0]
+        durations = [bolus_pk_for_dose(d)[2] for d in doses]
+        for a, b in zip(durations, durations[1:]):
+            assert b >= a - 1e-9, f"duration not monotone: {durations}"
+
+    def test_reference_5u_matches_base(self):
+        """5U dose (reference) should produce duration = BOLUS_DIA_BASE_HOURS."""
+        _, _, duration_min = bolus_pk_for_dose(5.0)
+        assert abs(duration_min / 60.0 - BOLUS_DIA_BASE_HOURS) < 1e-6
+
+
+class TestGlycogenReservoir:
+    """The hepatic glycogen reservoir is a finite store. It must stay in
+    [0, GLYCOGEN_CAPACITY_GRAMS] at every step under any simulation trace."""
+
+    def test_glycogen_within_bounds_over_long_run(self):
+        """Glycogen never goes negative or exceeds capacity across 72h."""
+        for seed in [0, 3, 7, 11, 19]:
+            sim = T1DMSimulator(seed=seed)
+            for _ in range(72 * 60 // DT_MINUTES):
+                sim.generate()
+                g = sim.state.glycogen_grams
+                assert 0.0 <= g <= GLYCOGEN_CAPACITY_GRAMS, (
+                    f"seed={seed}: glycogen={g} out of [0, {GLYCOGEN_CAPACITY_GRAMS}]")
+
+    def test_glycogen_drains_without_carbs(self):
+        """With no incoming carbs, sustained HGO must drain the reservoir."""
+        sim = T1DMSimulator(seed=0)
+        sim._pending_events = []
+        sim.state.active_curves = []
+        sim.state.is_sick = False
+        initial = sim.state.glycogen_grams
+        # Run 24h with no injected carbs/insulin — HGO drains glycogen.
+        for _ in range(24 * 60 // DT_MINUTES):
+            sim.generate()
+        assert sim.state.glycogen_grams < initial, (
+            f"glycogen rose from {initial} to {sim.state.glycogen_grams} with no carbs")
+
+    def test_glycogen_refills_from_large_carb_load(self):
+        """A large injected carb absorption refills a depleted reservoir."""
+        sim = T1DMSimulator(seed=0)
+        sim._pending_events = []
+        sim.state.active_curves = []
+        sim.state.is_sick = False
+        sim.state.glycogen_grams = 5.0  # near-empty
+        # 200g over 5h (well above any meal threshold)
+        big_meal = gamma_curve(200.0, k=3.0, theta=20.0, duration_minutes=300.0)
+        sim.inject_curve(big_meal, sim.state.current_idx, 'carb', 'big')
+        for _ in range(5 * 60 // DT_MINUTES):
+            sim.generate()
+        assert sim.state.glycogen_grams > 5.0, (
+            f"glycogen did not refill from 200g carbs: {sim.state.glycogen_grams}")

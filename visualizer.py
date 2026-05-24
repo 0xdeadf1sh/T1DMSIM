@@ -4,13 +4,12 @@ T1DM Simulator — Interactive Visualizer (Pygame)
 Controls:
   SPACE       — Generate next 24 hours
   R           — Reseed with random seed
-  0-9         — Reseed with that digit as seed
-  UP/DOWN     — Scroll through curves vertically
+  0           — Reseed with seed 0 (canonical patient)
   LEFT/RIGHT  — Scroll timeline
   HOME        — Jump to start
   END         — Jump to end
   +/-         — Zoom in/out on time axis
-  1-6         — Toggle individual curve visibility
+  1-8         — Toggle individual curve visibility
   A           — Toggle all curves on/off
   F           — Cycle text size (small / medium / large)
   S           — Screenshot (saves PNG)
@@ -20,9 +19,11 @@ Curves (toggle with number keys):
   1 — Blood Glucose (observed)
   2 — Carb intake curve
   3 — Insulin curve
-  4 — Insulin Sensitivity
+  4 — Insulin Sensitivity / Resistance
   5 — Exercise curve
   6 — BG Delta
+  7 — Hepatic Glucose Output
+  8 — Glucose In
 """
 
 import sys
@@ -39,7 +40,7 @@ os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
 import pygame
 import pygame.freetype
 
-from simulator import T1DMSimulator, DT_MINUTES, SIMULATION_START_DAY_OF_WEEK
+from simulator import T1DMSimulator, DT_MINUTES, SIMULATION_START_DAY_OF_WEEK, BG_CLAMP_MIN, BG_CLAMP_MAX
 
 DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 WARMUP_HOURS = 24  # Hours discarded before the displayed window starts
@@ -804,10 +805,33 @@ class Visualizer:
 
 if __name__ == '__main__':
     import argparse
+
+    def _nonneg_int(s):
+        v = int(s)
+        if v < 0:
+            raise argparse.ArgumentTypeError(f"must be >= 0, got {v}")
+        return v
+
+    def _positive_float(s):
+        v = float(s)
+        if v <= 0:
+            raise argparse.ArgumentTypeError(f"must be > 0, got {v}")
+        return v
+
+    def _bg_float(s):
+        v = float(s)
+        if not (BG_CLAMP_MIN <= v <= BG_CLAMP_MAX):
+            raise argparse.ArgumentTypeError(
+                f"must be in [{BG_CLAMP_MIN}, {BG_CLAMP_MAX}] mg/dL, got {v}"
+            )
+        return v
+
     parser = argparse.ArgumentParser(description='T1DM Simulator Visualizer')
-    parser.add_argument('--seed', type=int, default=42, help='Initial seed')
-    parser.add_argument('--bg', type=float, default=None, help='Initial blood glucose')
-    parser.add_argument('--hours', type=float, default=24, help='Initial hours to generate')
+    parser.add_argument('--seed', type=_nonneg_int, default=42, help='Initial seed (>= 0)')
+    parser.add_argument('--bg', type=_bg_float, default=None,
+                        help=f'Initial blood glucose ({BG_CLAMP_MIN}-{BG_CLAMP_MAX} mg/dL)')
+    parser.add_argument('--hours', type=_positive_float, default=24,
+                        help='Initial hours to generate (> 0)')
     args = parser.parse_args()
 
     viz = Visualizer()

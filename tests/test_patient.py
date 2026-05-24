@@ -105,8 +105,9 @@ class TestBehavioralParameters:
 
     def test_slow_carb_preference_skill_relationship(self):
         """More dietary discipline → higher slow carb preference."""
-        low_disc = [make_patient(s) for s in range(200) if make_patient(s).dietary_discipline < 0.65]
-        high_disc = [make_patient(s) for s in range(200) if make_patient(s).dietary_discipline > 0.80]
+        patients = [make_patient(s) for s in range(200)]
+        low_disc = [p for p in patients if p.dietary_discipline < 0.65]
+        high_disc = [p for p in patients if p.dietary_discipline > 0.80]
         if low_disc and high_disc:
             assert np.mean([p.slow_carb_preference for p in low_disc]) < \
                    np.mean([p.slow_carb_preference for p in high_disc])

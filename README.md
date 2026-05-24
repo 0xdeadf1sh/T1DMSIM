@@ -30,7 +30,7 @@ The simulator is built on several core ideas:
 
 4. The liver is an insulin-suppressed feeding session. Hepatic glucose output (HGO) is a steady stream of "food" entering the bloodstream, throttled down by a Hill function of EMA-smoothed plasma insulin. A finite hepatic glycogen reservoir gates the glycogenolysis fraction, and large meals schedule a delayed HGO rebound 3.5-5.5h later (the mechanism behind nocturnal hyperglycemia after a big dinner). Basal insulin exists to counteract baseline HGO; the ideal basal dose is anchored to `(HGO_base × 24h) / ICR`.
 
-5. Exercise is negative food. Walking, for example, pulls glucose out of the bloodstream into muscle cells. Modeling this as a negative carb-equivalent curve is a pragmatic simplification that works well for aerobic exercise. Additionally, exercise increases insulin sensitivity for 12–24 hours afterward, modeled as a time-limited IS reduction.
+5. Exercise is negative food. Walking, for example, pulls glucose out of the bloodstream into muscle cells. Modeling this as a negative carb-equivalent curve is a pragmatic simplification that works well for aerobic exercise. Additionally, exercise increases insulin sensitivity for `EXERCISE_IS_DURATION_HOURS` (18h) afterward, modeled as a time-limited IS reduction.
 
 6. Everything is seed-driven. A single integer seed determines the patient's personality, physiology, daily schedule, meal choices, insulin doses, exercise patterns, illness events, and random noise. Same seed, same simulation, always.
 
@@ -116,7 +116,7 @@ The simulator generates the following events:
 
 - **Corrections**: The patient checks their CGM at skill-dependent intervals. High-competence patients account for insulin-on-board (IOB) before correcting to avoid stacking. Attentive patients also react to BG *trends*: a rising trend above 140 mg/dL or a falling trend below 100 mg/dL triggers a preemptive correction before crossing the absolute threshold. At extreme values (above 300 or below 55), rage bolusing or rage eating may occur.
 
-- **Exercise**: Occurs with skill-dependent probability. Modeled as a negative carb-equivalent gamma curve plus a 12–24h post-exercise IS sensitivity boost. Reduced probability on weekends.
+- **Exercise**: Occurs with skill-dependent probability. Modeled as a negative carb-equivalent gamma curve plus an 18h post-exercise IS sensitivity boost (`EXERCISE_IS_DURATION_HOURS`). Reduced probability on weekends.
 
 - **Alcohol**: On weekends, holidays, and rare event days (higher probability), the patient may drink. This triggers HGO suppression (30–70%) for 4–8 hours starting 1–2 hours after drinking, causing the delayed nocturnal lows common in real T1DM patients.
 
@@ -179,8 +179,10 @@ sim.inject_curve(curve, sim.state.current_idx, 'carb', 'Custom meal')
 ```
 SPACE       Generate next 24 hours
 R           Random reseed
-1-6         Toggle curve visibility
+0           Reseed to 0 (canonical patient)
+1-8         Toggle curve visibility
 A           Toggle all curves
+F           Cycle text size (small / medium / large)
 Left/Right  Scroll timeline
 +/-         Zoom in/out
 HOME/END    Jump to start/end
@@ -189,7 +191,7 @@ S           Screenshot (PNG)
 Q/ESC       Quit
 ```
 
-Curves: (1) Blood Glucose, (2) Carb Intake, (3) Insulin, (4) Insulin Sensitivity, (5) Exercise, (6) BG Delta.
+Curves: (1) Blood Glucose, (2) Carb Intake, (3) Insulin, (4) Insulin Sensitivity, (5) Exercise, (6) BG Delta, (7) Hepatic Output, (8) Glucose In.
 
 
 ## Parameters

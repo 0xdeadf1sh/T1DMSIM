@@ -183,8 +183,8 @@ Hepatic glycogen is a finite store that gates the glycogenolysis-sourced fractio
 
 After applying the gate, glycogen is updated each step:
 
-    glycogen += total_carb * GLYCOGEN_REFILL_FRACTION   (refill from absorbed carbs)
     glycogen -= HGO(t) * GLYCOGEN_DRAIN_FRACTION        (drain from glycogenolysis)
+    glycogen += total_carb * GLYCOGEN_REFILL_FRACTION   (refill from absorbed carbs)
     glycogen  = clip(glycogen, 0, GLYCOGEN_CAPACITY)
 
 The refill is a "background" channel — it is not subtracted from BG-bound carbs, since ICR is empirically tuned to net BG response. The coupling back to BG dynamics is via the `glycogen_gate` reducing future HGO when the reservoir is depleted.
@@ -219,6 +219,92 @@ Daily adjustment based on previous day's mean BG:
     if mean_BG < 90:
         undershoot = min((90 - mean_BG) / 50, 1)
         adjustment = 1 - undershoot * BASAL_CORRECTION_MAX_ADJUSTMENT * competence
+
+
+## Behavioral & Stochastic Features
+
+Mechanisms that perturb the deterministic core above. Each closes the gap between an idealized model and the messy reality of a free-living patient.
+
+### Soft-bound BG headroom cap
+
+In addition to the hard clamp at `BG_CLAMP_MIN` / `BG_CLAMP_MAX`, each step's `delta_BG` is capped so it can only close a fraction of the headroom remaining to the soft bound. Lets the dynamics asymptote toward the bounds instead of slamming into the clamp:
+
+    projected = BG(t) + delta_BG
+    if projected < BG_SOFT_FLOOR:
+        headroom = max(0, BG(t) - BG_CLAMP_MIN)
+        delta_BG  = max(delta_BG, -SOFT_APPROACH_FRACTION * headroom)
+    if projected > BG_SOFT_CEILING:
+        headroom = max(0, BG_CLAMP_MAX - BG(t))
+        delta_BG  = min(delta_BG,  SOFT_APPROACH_FRACTION * headroom)
+
+The hard clamp is still applied as a backstop after this cap.
+
+### Per-step absorption noise
+
+Multiplicative noise applied to the per-step carb and insulin contributions read from the accumulation arrays:
+
+    total_carb    *= max(0, 1 + N(0, CARB_ABSORPTION_NOISE_SIGMA))      if total_carb > 0
+    total_insulin *= max(0, 1 + N(0, INSULIN_ABSORPTION_NOISE_SIGMA))   if total_insulin > 0
+
+Models moment-to-moment variation in absorption that the smooth gamma curves cannot capture. Only active when the underlying curve is non-zero.
+
+### Exercise post-effect IS envelope
+
+After an exercise event ends, IS is reduced (more sensitive) for `EXERCISE_IS_DURATION_HOURS` (18h), shaped by the trapezoidal `envelope_intensity()` with `EXERCISE_IS_RAMP_HOURS` ramps:
+
+    reduction  = min(0.30, EXERCISE_IS_REDUCTION * (exercise_duration / EXERCISE_DURATION_MEAN_MIN))
+    factor(t)  = 1 - reduction * envelope_intensity(t; start, start+18h, ramp=1h)
+    exercise_envelope(t) = factor(t)
+
+Larger / longer sessions produce a stronger reduction, capped at 30%.
+
+### Stress IS envelope
+
+Stress events transiently raise IS (more resistant) for `STRESS_DURATION_HOURS_MIN..MAX` hours:
+
+    is_factor      ~ U(STRESS_IS_FACTOR_MIN, STRESS_IS_FACTOR_MAX)
+    duration       ~ U(STRESS_DURATION_HOURS_MIN, STRESS_DURATION_HOURS_MAX)
+    stress_envelope(t) = 1 + (is_factor - 1) * envelope_intensity(t; start, end, STRESS_IS_RAMP_HOURS)
+
+Per-day probability scales with `STRESS_PROBABILITY_BASE - STRESS_LIFESTYLE_WEIGHT * s4`.
+
+### Alcohol HGO suppression envelope
+
+Drinking suppresses HGO multiplicatively, with an onset delay, plateau, and ramp-down:
+
+    hgo_reduction ~ U(ALCOHOL_HGO_REDUCTION_MIN, ALCOHOL_HGO_REDUCTION_MAX)
+    duration      ~ U(ALCOHOL_DURATION_HOURS_MIN, ALCOHOL_DURATION_HOURS_MAX)
+    onset_delay   ~ U(ALCOHOL_ONSET_DELAY_HOURS_MIN, ALCOHOL_ONSET_DELAY_HOURS_MAX)
+    alcohol_factor(t) = 1 - hgo_reduction * envelope_intensity(t; start+onset, start+onset+duration,
+                                                                ALCOHOL_HGO_RAMP_HOURS)
+
+This multiplies the Hill-derived HGO baseline (separate from insulin suppression), explaining the nocturnal-hypo pattern after evening drinking.
+
+### Trend-based anticipatory corrections
+
+Attentive patients with sufficient skill act on a recent BG trend before crossing a threshold. From a sliding window of the last `TREND_CORRECTION_WINDOW_STEPS` BG samples:
+
+    trend = (window[-1] - window[0]) / (TREND_CORRECTION_WINDOW_STEPS - 1)   (mg/dL/step)
+
+A preemptive correction bolus is considered when `trend > TREND_HIGH_RATE_THRESHOLD` and BG is approaching the upper band; a preemptive snack is considered when `trend < TREND_LOW_RATE_THRESHOLD` and BG is approaching the lower band. The projected rise/fall over the next `2 * TREND_CORRECTION_WINDOW_STEPS` steps sizes the dose / carbs.
+
+### Anomalous absorption events
+
+With per-day probability `ANOMALOUS_EVENT_PROBABILITY`, one absorption curve on that day has its shape modified:
+
+    k     *= U(ANOMALOUS_K_MULT_MIN,     ANOMALOUS_K_MULT_MAX)
+    theta *= U(ANOMALOUS_THETA_MULT_MIN, ANOMALOUS_THETA_MULT_MAX)
+
+Models unusual gastric emptying, food composition outliers, or other absorption surprises.
+
+### Rare event days
+
+With per-day probability `RARE_EVENT_PROBABILITY`, all skills are degraded for that day:
+
+    skill_penalty ~ RARE_EVENT_SKILL_REDUCTION + U(0, 0.3)
+    s_i(today)    = max(s_i - skill_penalty, SKILL_MIN)
+
+Even attentive, well-controlled patients have chaotic days (illness onset, travel, emotional events). This is the simulator's way of injecting irreducible behavioral noise.
 
 
 ## Unit Conventions

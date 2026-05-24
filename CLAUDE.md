@@ -10,7 +10,7 @@ Single-file Python simulator (`simulator.py`) with a Pygame-based visualizer (`v
 
 Key design decisions:
 - Output is BG delta, not absolute BG. BG is accumulated from deltas.
-- Patient behavior is driven by 4 correlated skill dimensions sampled from a multivariate normal.
+- Patient behavior is driven by 4 correlated skill dimensions (`s1` dietary_discipline, `s2` attentiveness, `s3` dosing_competence, `s4` lifestyle_consistency) sampled from a multivariate normal.
 - All curves (carb absorption, insulin action including basal) use gamma distributions with parameterized shape.
 - Each meal becomes 2-5 overlapping gamma absorption components (mixed meal). Component types (fast/medium/slow) are weighted by the patient's slow_carb_preference. A protein/fat tail is always added.
 - HGO (hepatic glucose output) is insulin-suppressed via a Hill function on EMA-smoothed plasma insulin. At zero insulin it climbs toward HGO_UNSUPPRESSED_GRAMS_PER_HOUR; HGO_INSULIN_HALF_MAX is tuned so a typical basal level reproduces the legacy ~9 g/hr balanced rate (preserves basal-balances-HGO test invariant).
@@ -22,7 +22,7 @@ Key design decisions:
 - BG delta = α * (glucose_in − glucose_out) where glucose_out = total_insulin * ICR / IS. IS modulates insulin effectiveness, NOT carb load (HGO-vs-insulin coupling is handled separately by the Hill function above).
 - Bolus duration of action scales with dose: `bolus_pk_for_dose(dose) -> (k, theta, duration_minutes)`. Larger doses act longer and peak slightly later. The legacy `BOLUS_DURATION_HOURS` constant is kept for tests but new code must use the helper.
 - Basal insulin uses a trapezoidal curve (`basal_curve`) with a ramp-up and ramp-down phase over `BASAL_DURATION_HOURS` (28h). This ensures continuous overnight coverage.
-- Exercise is modeled as negative food intake, plus a 12-24h post-exercise IS sensitivity boost.
+- Exercise is modeled as negative food intake, plus an 18h post-exercise IS sensitivity boost (`EXERCISE_IS_DURATION_HOURS`).
 - Illness gradually ramps insulin sensitivity via a target/ramp system.
 - Physiological guardrails: renal clearance above 180 mg/dL, counter-regulatory response below 70 mg/dL, additional glucagon dump below SEVERE_HYPO_THRESHOLD.
 - Weekday/weekend/holiday patterns, alcohol (additional HGO suppression on top of insulin's), and stress events (transient IS increase) add behavioral realism.
@@ -53,6 +53,8 @@ python -m pytest tests/ -v
 python scripts/batch_test.py
 ```
 
+Visualizer key bindings are documented in the module docstring at the top of `visualizer.py` (and in the README's "Visualizer Controls" section).
+
 ## Code Style
 
 - Python 3.10+, numpy for numerics
@@ -80,7 +82,7 @@ python scripts/batch_test.py
 ## Warnings
 
 - Both gamma_curve and basal_curve produce values in "amount per step" — never accidentally pass a rate (rate_per_hour) where total_amount is expected. Verify per-step magnitudes when changing curve generation.
-- Basal uses basal_curve (trapezoidal) with total_amount = actual_dose and duration = BASAL_DURATION_HOURS (28h). If you switch to gamma_curve, pick k/theta carefully — high k produces a narrow peak that falls to zero well before 24h, leaving no overnight coverage.
+- Basal uses basal_curve (trapezoidal: ramp-up → plateau → ramp-down) with total_amount = actual_dose and duration = BASAL_DURATION_HOURS (28h); the plateau is what ensures overnight coverage. Do not replace this with gamma_curve without retuning — high k produces a narrow peak that falls to zero well before 24h, leaving no overnight coverage.
 - The visualizer uses an off-screen buffer to avoid flickering on Wayland. Do not remove the double-buffering logic.
 - BG_SCALE_FACTOR is the most sensitive parameter. Small changes have large effects.
 - HGO_INSULIN_HALF_MAX must stay tuned so that compute_hgo_rate(typical_basal_per_step) ≈ HGO_BASE_GRAMS_PER_HOUR. Otherwise `test_hgo_basal_balance` will fail and the patient population will systematically run high or low. Verify with `compute_hgo_rate(0.07)` ≈ 9.
