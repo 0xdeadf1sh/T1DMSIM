@@ -32,7 +32,7 @@ Per-component noise is applied on top:
     k_actual = k * (1 + N(0, CARB_CURVE_K_NOISE))
     theta_actual = theta * (1 + N(0, CARB_CURVE_THETA_NOISE))
 
-A protein/fat tail is always added to every meal regardless of composition, scaled to meal size as `clip(PROTEIN_FAT_FRACTION_OF_CARBS * carb_amount, PROTEIN_FAT_MIN_GRAMS, PROTEIN_FAT_MAX_GRAMS)`. Snacks get ~3 g, typical meals ~9 g, large dinners ~14 g.
+A protein/fat tail is always added to every meal regardless of composition, scaled to meal size as `clip(PROTEIN_FAT_FRACTION_OF_CARBS * carb_amount, PROTEIN_FAT_MIN_GRAMS, PROTEIN_FAT_MAX_GRAMS)`. With the current floor (`PROTEIN_FAT_MIN_GRAMS = 6 g`), snacks get ~6 g, typical meals ~10–15 g, large dinners ~18 g.
 
 Hypo correction carbs use a separate fast pair (`HYPO_CARB_K`, `HYPO_CARB_THETA`) that peaks faster than meal carbs (glucose tablets / juice).
 
@@ -156,7 +156,7 @@ Insulin-suppressed via a Hill function on EMA-smoothed insulin (proxies plasma i
     meal_rebound  = sum over active meal_hgo_effects of (magnitude * envelope_intensity) * (DT_MINUTES / 60)
     HGO(t)        = HGO_baseline + meal_rebound
 
-`HGO_INSULIN_HALF_MAX` is tuned so a typical basal level (~0.07 U/step) yields ~9 g/hr (the legacy balanced rate, preserved so basal sizing — `ideal_basal = HGO_BASE_GRAMS_PER_HOUR * 24 / ICR` — still produces near-zero net delta). At zero insulin, HGO climbs toward `HGO_UNSUPPRESSED_GRAMS_PER_HOUR` (DKA-like). Alcohol additionally suppresses HGO via `alcohol_factor` (trapezoidal envelope around 1.0). The `glycogen_gate` ramps HGO down when the reservoir is depleted (see Glycogen reservoir). The `meal_rebound` term is additive (not multiplicative) — see Delayed-meal HGO rebound below.
+`HGO_INSULIN_HALF_MAX` is tuned so a typical basal level (~0.07 U/step) yields ~9 g/hr (the legacy balanced rate, preserved so basal sizing — `ideal_basal = HGO_BASE_GRAMS_PER_HOUR * 24 * (body_weight_kg / BODY_WEIGHT_MEAN_KG) * is_base / ICR` — still produces near-zero net delta. The weight factor mirrors the per-step HGO scaling and the `is_base` factor keeps the invariant across baseline insulin needs). At zero insulin, HGO climbs toward `HGO_UNSUPPRESSED_GRAMS_PER_HOUR` (DKA-like). Alcohol additionally suppresses HGO via `alcohol_factor` (trapezoidal envelope around 1.0). The `glycogen_gate` ramps HGO down when the reservoir is depleted (see Glycogen reservoir). The `meal_rebound` term is additive (not multiplicative) — see Delayed-meal HGO rebound below.
 
 Helper: `compute_hgo_rate(insulin_per_step) -> g/hr`.
 
@@ -194,8 +194,20 @@ The refill is a "background" channel — it is not subtracted from BG-bound carb
 
 Hypo correction (BG_observed < BG_LOW_THRESHOLD):
 
-    correction_grams = HYPO_CORRECTION_BASE_GRAMS + panic_factor * severity / 20
-    severity = max(0, BG_LOW_THRESHOLD - BG_observed)
+    skill_avg         = (attentiveness + dosing_competence) / 2
+    skill_multiplier  = 1 + 1.5 * skill_avg
+    correction_grams  = HYPO_CORRECTION_BASE_GRAMS * skill_multiplier
+                        + panic_factor * severity / 20
+    severity          = max(0, BG_LOW_THRESHOLD - BG_observed)
+
+The skill multiplier is critical — without it, high-skill patients linger at TBR ~30% because the bare base grams (~6 g) cannot overcome a strong basal pipeline. With it, skilled patients reliably exit hypo while unskilled patients still under-correct.
+
+For severe hypo (BG_observed < `SEVERE_HYPO_THRESHOLD`, default 55):
+
+    deficit = SEVERE_HYPO_THRESHOLD - BG_observed
+    correction_grams = max(correction_grams, 14 + 0.35 * deficit)
+
+This is the non-probabilistic rage-eat that keeps severe episodes under 1h. Severe hypo also bypasses the CGM check interval, but a `SEVERE_HYPO_REFRACTORY_MIN` (10 min) gate still applies between back-to-back doses so stacked carbs don't sawtooth into post-correction hypers. After any hypo correction, basal is scaled down by `POST_HYPO_BASAL_SUSPEND_FACTOR` for `POST_HYPO_BASAL_SUSPEND_DURATION_HOURS` (pump-suspend / temp-basal analogue), and skill-gated patients (`skill_avg > HYPO_FOLLOWUP_SKILL_THRESHOLD`) eat a slow-carb follow-up snack sized as `HYPO_FOLLOWUP_FRACTION × correction_grams`.
 
 If BG_observed < RAGE_EAT_BG_THRESHOLD, rage eating may occur with probability proportional to (1.2 - dosing_competence).
 
@@ -212,13 +224,15 @@ If BG_observed > RAGE_BOLUS_BG_THRESHOLD, rage bolusing may occur.
 
 Daily adjustment based on previous day's mean BG:
 
-    if mean_BG > 150:
-        overshoot = min((mean_BG - 150) / 100, 1)
+    if mean_BG > 130:
+        overshoot  = min((mean_BG - 130) / 80, 1)
         adjustment = 1 + overshoot * BASAL_CORRECTION_MAX_ADJUSTMENT * competence
 
-    if mean_BG < 90:
-        undershoot = min((90 - mean_BG) / 50, 1)
+    if mean_BG < 110:
+        undershoot = min((110 - mean_BG) / 50, 1)
         adjustment = 1 - undershoot * BASAL_CORRECTION_MAX_ADJUSTMENT * competence
+
+The asymmetric thresholds (130 / 110) intentionally bias toward correcting persistent hyperglycemia faster than persistent mild hypoglycemia.
 
 
 ## Behavioral & Stochastic Features
@@ -250,10 +264,10 @@ Models moment-to-moment variation in absorption that the smooth gamma curves can
 
 ### Exercise post-effect IS envelope
 
-After an exercise event ends, IS is reduced (more sensitive) for `EXERCISE_IS_DURATION_HOURS` (18h), shaped by the trapezoidal `envelope_intensity()` with `EXERCISE_IS_RAMP_HOURS` ramps:
+After an exercise event ends, IS is reduced (more sensitive) for `EXERCISE_IS_DURATION_HOURS` (10h), shaped by the trapezoidal `envelope_intensity()` with `EXERCISE_IS_RAMP_HOURS` ramps:
 
     reduction  = min(0.30, EXERCISE_IS_REDUCTION * (exercise_duration / EXERCISE_DURATION_MEAN_MIN))
-    factor(t)  = 1 - reduction * envelope_intensity(t; start, start+18h, ramp=1h)
+    factor(t)  = 1 - reduction * envelope_intensity(t; start, start+10h, ramp=1h)
     exercise_envelope(t) = factor(t)
 
 Larger / longer sessions produce a stronger reduction, capped at 30%.

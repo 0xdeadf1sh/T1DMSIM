@@ -22,7 +22,7 @@ Key design decisions:
 - BG delta = α * (glucose_in − glucose_out) where glucose_out = total_insulin * ICR / IS. IS modulates insulin effectiveness, NOT carb load (HGO-vs-insulin coupling is handled separately by the Hill function above).
 - Bolus duration of action scales with dose: `bolus_pk_for_dose(dose) -> (k, theta, duration_minutes)`. Larger doses act longer and peak slightly later. The legacy `BOLUS_DURATION_HOURS` constant is kept for tests but new code must use the helper.
 - Basal insulin uses a trapezoidal curve (`basal_curve`) with a ramp-up and ramp-down phase over `BASAL_DURATION_HOURS` (28h). This ensures continuous overnight coverage.
-- Exercise is modeled as negative food intake, plus an 18h post-exercise IS sensitivity boost (`EXERCISE_IS_DURATION_HOURS`).
+- Exercise is modeled as negative food intake, plus a 10h post-exercise IS sensitivity boost (`EXERCISE_IS_DURATION_HOURS`).
 - Illness gradually ramps insulin sensitivity via a target/ramp system.
 - Physiological guardrails: renal clearance above 180 mg/dL, counter-regulatory response below 70 mg/dL, additional glucagon dump below SEVERE_HYPO_THRESHOLD.
 - Weekday/weekend/holiday patterns, alcohol (additional HGO suppression on top of insulin's), and stress events (transient IS increase) add behavioral realism.
@@ -32,7 +32,7 @@ Key design decisions:
 
 - `simulator.py` -- core simulation engine, all parameters, patient generator, BG computation
 - `visualizer.py` -- Pygame interactive visualizer (forces X11 on Wayland)
-- `tests/` -- pytest suite (38 tests): test_curves, test_patient, test_simulator, test_balance
+- `tests/` -- pytest suite (49 tests): test_curves, test_patient, test_simulator, test_balance
 - `scripts/batch_test.py` -- run multiple seeds and print TIR/mean BG summary
 - `docs/math.md` -- mathematical formulation reference
 
@@ -89,7 +89,7 @@ Visualizer key bindings are documented in the module docstring at the top of `vi
 - Three structural rules to preserve:
   - `ideal_basal = HGO_BASE * 24 * (body_weight_kg / BODY_WEIGHT_MEAN_KG) * is_base / ICR` (in `generate_patient`) — the weight factor mirrors the per-step HGO scaling and keeps the HGO-balances-basal invariant across body sizes.
   - Hypo correction grams scale with `skill_avg` so skilled patients can recover from over-bolus crashes
-  - Severe hypo (`bg_observed < SEVERE_HYPO_THRESHOLD`) bypasses the CGM check interval AND triggers a non-probabilistic 14-22g rage-eat — this is what keeps severe episodes under 1h. Removing either half re-opens 6+ hour dangerous hypos.
+  - Severe hypo (`bg_observed < SEVERE_HYPO_THRESHOLD`) bypasses the CGM check interval AND triggers a non-probabilistic ≥14g rescue (grows with deficit: `14 + 0.35 * deficit`) — this is what keeps severe episodes under 1h. The rescue is still gated by a short `SEVERE_HYPO_REFRACTORY_MIN` (10 min) between back-to-back doses so that stacked carbs don't sawtooth into post-correction hypers. Skill-gated slow-carb follow-up snack (`HYPO_FOLLOWUP_*`) supplies a tail so the patient doesn't immediately re-hypo. Removing any of the three pieces (severe bypass, ≥14g rescue, follow-up tail) re-opens 6+ hour dangerous hypos or 10-15min sawtooth.
 
 ## Warnings
 

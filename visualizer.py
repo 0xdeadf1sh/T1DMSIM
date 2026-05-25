@@ -19,7 +19,7 @@ Curves (toggle with number keys):
   1 — Blood Glucose (observed)
   2 — Carb intake curve
   3 — Insulin curve
-  4 — Insulin Sensitivity / Resistance
+  4 — Insulin Resistance (multiplier; >1 = resistant, <1 = sensitive)
   5 — Exercise curve
   6 — BG Delta
   7 — Hepatic Glucose Output

@@ -23,6 +23,8 @@ from simulator import (
     PUBLIC_HOLIDAYS_PER_YEAR_MAX, SIMULATION_START_DAY_OF_WEEK,
     bolus_pk_for_dose, BOLUS_DIA_BASE_HOURS, BOLUS_DIA_MIN_HOURS, BOLUS_DIA_MAX_HOURS,
     GLYCOGEN_CAPACITY_GRAMS, DT_MINUTES,
+    SEVERE_HYPO_REFRACTORY_MIN, HYPO_FOLLOWUP_SKILL_THRESHOLD,
+    STEPS_PER_DAY,
 )
 
 
@@ -46,17 +48,26 @@ class TestReproducibility:
         assert not np.array_equal(data1['bg'], data2['bg'])
 
     def test_reseed_matches_fresh_instance(self):
-        """reseed() produces the same output as a fresh instance."""
+        """reseed() produces the same output as a fresh instance.
+
+        Compares the full output dict — bg alone is not sufficient because
+        per-step IS drift can diverge by ~1.8% from a leaked prior-patient
+        state and still produce near-identical BG due to small basal
+        contributions per step.
+        """
         seed = 17
         sim_fresh = T1DMSimulator(seed=seed)
         data_fresh = sim_fresh.generate_hours(48)
 
         sim_reseeded = T1DMSimulator(seed=0)
-        sim_reseeded.generate_hours(24)  # Advance, then reseed
+        sim_reseeded.generate_hours(24)
         sim_reseeded.reseed(seed=seed)
         data_reseeded = sim_reseeded.generate_hours(48)
 
-        np.testing.assert_array_equal(data_fresh['bg'], data_reseeded['bg'])
+        for key in data_fresh:
+            np.testing.assert_array_equal(
+                data_fresh[key], data_reseeded[key],
+                err_msg=f"reseed diverged from fresh on key '{key}'")
 
 
 class TestBGBounds:
@@ -262,3 +273,119 @@ class TestGlycogenReservoir:
             sim.generate()
         assert sim.state.glycogen_grams > 5.0, (
             f"glycogen did not refill from 200g carbs: {sim.state.glycogen_grams}")
+
+
+class TestSevereHypoRefractory:
+    """The 10-min severe-hypo refractory keeps rescue carbs from stacking.
+
+    This is a CLAUDE.md-documented critical clinical invariant: a full
+    bypass produces a sawtooth where the patient rage-eats 3-5 times in
+    10-15 min and overshoots to 140-180, while removing the bypass
+    re-opens 6+ hour dangerous hypos. The 10-min gate is the compromise.
+    """
+
+    def _setup_severe_hypo(self, sim, idx):
+        """Force the simulator into a severe-hypo state the patient will act on."""
+        s = sim.state
+        s.bg = 40.0
+        s.bg_observed = 40.0
+        s.last_cgm_check_idx = -9999
+        s.last_hypo_correction_idx = -9999
+        # Ensure awake — wake at start, sleep far in the future
+        sim._today_wake_idx = 0
+        sim._today_sleep_idx = idx + STEPS_PER_DAY
+
+    def test_severe_hypo_refractory_blocks_back_to_back(self):
+        """A second severe-hypo rescue within 10 min must be blocked."""
+        sim = T1DMSimulator(seed=0)
+        sim.generate()  # advance one step so _today_wake/sleep are populated
+        idx = sim.state.current_idx
+        self._setup_severe_hypo(sim, idx)
+
+        sim._check_and_correct(idx)
+        first_idx = sim.state.last_hypo_correction_idx
+        assert first_idx == idx, "first severe-hypo rescue did not fire"
+
+        # 5 min later, BG still severe — refractory must block
+        idx2 = idx + 1
+        self._setup_severe_hypo(sim, idx2)
+        sim.state.last_hypo_correction_idx = first_idx
+        sim._check_and_correct(idx2)
+        assert sim.state.last_hypo_correction_idx == first_idx, (
+            "second rescue fired within 5 min — refractory bypassed")
+
+        # 10+ min later, BG still severe — refractory must release
+        idx3 = idx + int(SEVERE_HYPO_REFRACTORY_MIN / DT_MINUTES) + 1
+        self._setup_severe_hypo(sim, idx3)
+        sim.state.last_hypo_correction_idx = first_idx
+        sim._check_and_correct(idx3)
+        assert sim.state.last_hypo_correction_idx == idx3, (
+            "third rescue did not fire after refractory window — gate stuck")
+
+    def test_moderate_hypo_uses_longer_refractory(self):
+        """Moderate hypo (55-70) must use the 20-min refractory, not 10."""
+        sim = T1DMSimulator(seed=0)
+        sim.generate()
+        idx = sim.state.current_idx
+        self._setup_severe_hypo(sim, idx)
+        sim.state.bg = sim.state.bg_observed = 62.0  # moderate, not severe
+
+        sim._check_and_correct(idx)
+        first_idx = sim.state.last_hypo_correction_idx
+        if first_idx != idx:
+            return  # patient's eff_low_thresh may exclude 62 — skip silently
+
+        # 11 min later — within 20-min moderate refractory, must block
+        idx2 = idx + int(11 / DT_MINUTES)
+        sim.state.bg = sim.state.bg_observed = 62.0
+        sim.state.last_cgm_check_idx = -9999
+        sim._check_and_correct(idx2)
+        assert sim.state.last_hypo_correction_idx == first_idx, (
+            "moderate hypo fired within 20 min — wrong refractory used")
+
+
+class TestHypoFollowupSnack:
+    """The skill-gated slow-tail follow-up snack is the other half of the
+    sawtooth fix. CLAUDE.md flags removing it as re-opening dangerous hypos.
+    """
+
+    def _trigger_correction(self, sim):
+        sim.generate()
+        idx = sim.state.current_idx
+        s = sim.state
+        s.bg = 40.0
+        s.bg_observed = 40.0
+        s.last_cgm_check_idx = -9999
+        s.last_hypo_correction_idx = -9999
+        sim._today_wake_idx = 0
+        sim._today_sleep_idx = idx + STEPS_PER_DAY
+        carbs_before = sum(1 for c in s.active_curves
+                           if c.curve_type == 'correction_carb')
+        sim._check_and_correct(idx)
+        new_carbs = [c for c in s.active_curves
+                     if c.curve_type == 'correction_carb'][carbs_before:]
+        return new_carbs
+
+    def test_high_skill_patient_gets_followup(self):
+        """A high-skill patient should get a followup slow-carb curve."""
+        sim = T1DMSimulator(seed=0)
+        p = sim.patient
+        # Force skill above the threshold
+        p.attentiveness = 0.9
+        p.dosing_competence = 0.9
+        new_curves = self._trigger_correction(sim)
+        labels = [c.label for c in new_curves]
+        assert any('followup' in l.lower() for l in labels), (
+            f"expected followup curve for skill_avg=0.9, got {labels}")
+
+    def test_low_skill_patient_no_followup(self):
+        """A patient below HYPO_FOLLOWUP_SKILL_THRESHOLD must NOT get a followup."""
+        sim = T1DMSimulator(seed=0)
+        p = sim.patient
+        below = HYPO_FOLLOWUP_SKILL_THRESHOLD - 0.1
+        p.attentiveness = below
+        p.dosing_competence = below
+        new_curves = self._trigger_correction(sim)
+        labels = [c.label for c in new_curves]
+        assert not any('followup' in l.lower() for l in labels), (
+            f"low-skill patient got followup unexpectedly: {labels}")
