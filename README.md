@@ -236,10 +236,10 @@ The simulator matches both real cohorts on mean BG and GMI within a fraction of 
 | Metric          | OhioT1DM | ShanghaiT1DM | T1DMSIM |
 |-----------------|---------:|-------------:|--------:|
 | Patients / records | 6     | 16           | 30 seeds |
-| Mean BG (mg/dL) | 162.3    | 163.6        | 163.2   |
-| GMI             | 7.2      | 7.2          | 7.2     |
-| CV (%)          | 36.3     | 38.6         | 48.5    |
-| Δ5min std       | 5.81     | (15-min: 10.65) | 5.83 |
+| Mean BG (mg/dL) | 162.3    | 163.6        | 160.0   |
+| GMI             | 7.2      | 7.2          | 7.1     |
+| CV (%)          | 36.3     | 38.6         | 47.6    |
+| Δ5min std       | 5.81     | (15-min: 10.65) | 5.82 |
 
 #### Clinical glucose ranges
 ![Clinical ranges](assets/clinical_ranges.png)
