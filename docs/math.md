@@ -32,7 +32,7 @@ Per-component noise is applied on top:
     k_actual = k * (1 + N(0, CARB_CURVE_K_NOISE))
     theta_actual = theta * (1 + N(0, CARB_CURVE_THETA_NOISE))
 
-A protein/fat tail (`PROTEIN_FAT_EQUIV_GRAMS` worth of very slow carbs) is always added to every meal regardless of composition.
+A protein/fat tail is always added to every meal regardless of composition, scaled to meal size as `clip(PROTEIN_FAT_FRACTION_OF_CARBS * carb_amount, PROTEIN_FAT_MIN_GRAMS, PROTEIN_FAT_MAX_GRAMS)`. Snacks get ~3 g, typical meals ~9 g, large dinners ~14 g.
 
 Hypo correction carbs use a separate fast pair (`HYPO_CARB_K`, `HYPO_CARB_THETA`) that peaks faster than meal carbs (glucose tablets / juice).
 

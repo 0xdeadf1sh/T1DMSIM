@@ -49,10 +49,15 @@ MEAL_CARB_DISCIPLINE_SCALE = 0.7  # How much s1 reduces carb intake
 SNACK_CARB_MEAN = 20.0
 SNACK_CARB_SIGMA = 10.0
 
-# Protein/fat baseline (modeled as ~10g slow carbs per meal even for zero-carb meals)
-PROTEIN_FAT_EQUIV_GRAMS = 10.0  # Equivalent grams of very slow carbs from protein/fat
-PROTEIN_FAT_GAMMA_K = 6.0  # Very slow absorption
-PROTEIN_FAT_GAMMA_THETA = 30.0  # Peak at ~180 min
+# Protein/fat baseline — peak around 87 min (k=4.5, θ=25). Earlier (k=3.5)
+# pulled mean BG below the ±3 stopping threshold because the BG-time area
+# compressed and triggered extra corrections; original k=6 (peak 150 min)
+# dragged the cohort envelope peak past 200 min vs real ~100. This balances.
+PROTEIN_FAT_GAMMA_K = 4.5
+PROTEIN_FAT_GAMMA_THETA = 25.0
+PROTEIN_FAT_FRACTION_OF_CARBS = 0.26  # Slow tail grams as fraction of meal carbs
+PROTEIN_FAT_MIN_GRAMS = 6.0
+PROTEIN_FAT_MAX_GRAMS = 18.0
 
 # Carb curve (gamma distribution parameters)
 # Peak time = (k-1)*theta. Mean = k*theta.
@@ -61,8 +66,11 @@ PROTEIN_FAT_GAMMA_THETA = 30.0  # Peak at ~180 min
 # MIXED_MEAL_FAST_*_RANGE constants instead — these are NOT the live values.
 FAST_CARB_K = 3.0  # Gamma shape for fast carbs (peak ~40 min)
 FAST_CARB_THETA = 20.0  # Gamma scale for fast carbs (minutes)
-SLOW_CARB_PREFERENCE_BASE = 0.3  # Base probability of choosing slow carbs
-SLOW_CARB_PREFERENCE_SKILL_BONUS = 0.5  # Added probability from s1
+# slow_carb_preference of ~0.35 for mid-skill leaves fast/medium dominant
+# enough to keep the post-meal envelope rising at t=0 (real-data shape) while
+# preserving enough late tail to keep mean BG near the OhioT1DM target.
+SLOW_CARB_PREFERENCE_BASE = 0.20  # Base probability of choosing slow carbs
+SLOW_CARB_PREFERENCE_SKILL_BONUS = 0.30  # Added probability from s1
 
 # Hypo correction carbs (glucose tablets / juice — kick in faster than meal carbs)
 HYPO_CARB_K = 2.0
@@ -80,9 +88,14 @@ MIXED_MEAL_DIRICHLET_ALPHA = 1.5  # Higher = more uniform fractions per componen
 MIXED_MEAL_FAST_K_RANGE = (2.0, 3.5)
 MIXED_MEAL_FAST_THETA_RANGE = (15.0, 22.0)
 MIXED_MEAL_MED_K_RANGE = (3.0, 4.5)
-MIXED_MEAL_MED_THETA_RANGE = (22.0, 32.0)
-MIXED_MEAL_SLOW_K_RANGE = (4.0, 6.0)
-MIXED_MEAL_SLOW_THETA_RANGE = (28.0, 45.0)
+MIXED_MEAL_MED_THETA_RANGE = (20.0, 28.0)
+# Slow components shifted earlier to bring the cohort post-meal envelope peak
+# from ~200 min back toward the ~100 min seen in OhioT1DM. Original (4-6,28-45)
+# put peaks at 84-225 min; the new ranges put them at 55-140 min while still
+# being the latest of the three categories. Tighter (3.0-4.5) dropped mean BG
+# below the ±3 threshold so this is the working compromise.
+MIXED_MEAL_SLOW_K_RANGE = (3.5, 5.0)
+MIXED_MEAL_SLOW_THETA_RANGE = (22.0, 35.0)
 MIXED_MEAL_MED_WEIGHT_BASE = 0.4  # Base weight for medium-speed components
 
 # Body weight and insulin resistance — two per-patient axes added in P2 of
@@ -172,8 +185,11 @@ BOLUS_DIA_MAX_HOURS = 7.5
 BOLUS_THETA_DOSE_SLOPE = 0.06  # Theta multiplier per unit of sqrt(dose) - sqrt(5)
 ICR_MEAN = 10.0  # Insulin-to-carb ratio (1 unit per X grams)
 ICR_SIGMA = 2.0
-BOLUS_TIMING_COMPETENT_MEAN = -20.0  # Minutes before meal (negative = before)
-BOLUS_TIMING_INCOMPETENT_MEAN = 15.0  # Minutes after meal
+BOLUS_TIMING_COMPETENT_MEAN = -5.0  # Minutes before meal (negative = before). A
+# small pre-bolus matches OhioT1DM behavior. Larger pre-boluses (e.g. -20 min)
+# caused the cohort-aligned post-meal envelope to dip below baseline before
+# rising, which is not seen in real CGM data.
+BOLUS_TIMING_INCOMPETENT_MEAN = 10.0  # Minutes after meal
 BOLUS_TIMING_SIGMA_BASE = 5.0  # Base timing variance
 
 # Carb counting error. Lowered from 0.60 → 0.35 when OhioT1DM target (~3% TBR) replaced
@@ -337,13 +353,38 @@ SEVERE_HYPO_GLUCAGON_RATE = 2.0  # Extra mg/dL per step at severity=1.0
 # in `_compute_cgm_observation` (lookup of true BG from `CGM_LAG_MINUTES` ago).
 # It is currently DEFINED BUT UNUSED — the CGM reads instantaneous BG.
 CGM_LAG_MINUTES = 10
-CGM_NOISE_FRACTION = 0.018  # ~1.8% step-to-step noise (was 0.01 — too tight; 2.5% overshot Δ5min).
-                            # Real Dexcom/Libre show step-to-step σ of ~2-3 mg/dL at BG=150 after
-                            # manufacturer smoothing, so this lands closer than either prior value.
+CGM_NOISE_FRACTION = 0.060  # Stationary σ of the AR(1) sensor-noise process
+                            # (~9 mg/dL drift around BG=150). Bumped from 0.018 to compensate
+                            # for the AR(1) step-to-step variance reduction; preserves the
+                            # 5.81 mg/dL Δ5min std target while producing the smooth,
+                            # correlated "Perlin-like" wobble seen in real CGM data instead
+                            # of the white-noise spikiness independent draws produced.
+
+# AR(1) correlation for noise sources. Replaces independent per-step Gaussian
+# draws with Ornstein-Uhlenbeck-like smooth variability. ρ=0.85 for metabolic
+# noises (~22 min correlation half-life); ρ=0.92 for the CGM sensor (~42 min,
+# matches documented Dexcom/Libre ARMA models).
+NOISE_AR1_RHO_METABOLIC = 0.85
+NOISE_AR1_RHO_SENSOR = 0.92
+# Pre-computed √(1 − ρ²) — the per-step innovation scale that preserves
+# stationary variance σ² when iterating x_t = ρ·x_{t−1} + scale·ε_t.
+NOISE_AR1_INNOV_METABOLIC = float(np.sqrt(1.0 - NOISE_AR1_RHO_METABOLIC ** 2))
+NOISE_AR1_INNOV_SENSOR = float(np.sqrt(1.0 - NOISE_AR1_RHO_SENSOR ** 2))
 
 # Rare events
 RARE_EVENT_PROBABILITY = 0.02  # Per-day probability of a rare/chaotic day
 RARE_EVENT_SKILL_REDUCTION = 0.3  # Even skilled people have bad days sometimes
+
+# Hypo correction refractory + nocturnal basal stand-down. Without these, a
+# nocturnal hypo cascades into 3-5 consecutive corrections per night: the first
+# rage-eat hits, BG returns to range, then the forward basal pipeline pulls it
+# low again within 2-3h. Real patients respond to a night hypo by *also*
+# reducing future basal coverage (suspending the pump, skipping the next
+# basal dose) — not just by eating carbs. Real CGM traces don't show this
+# 3-5x cycling but our sim did.
+HYPO_CORRECTION_REFRACTORY_MIN = 20.0  # Min minutes between hypo corrections.
+NOCTURNAL_BASAL_SUSPEND_DURATION_HOURS = 1.5  # Scale-down window after a sleep-time hypo.
+NOCTURNAL_BASAL_SUSPEND_FACTOR = 0.5           # Basal contribution multiplier while suspended.
 
 # Rage behavior
 RAGE_EAT_BG_THRESHOLD = 50.0       # Below this, patient may rage eat
@@ -519,6 +560,9 @@ class SimulatorState:
     # Slow physiological state
     glycogen_grams: float = 70.0  # Current hepatic glycogen reserve (g)
     glucotox_bg_ema: float = 120.0  # 6h EMA of true BG, drives glucotoxic IR
+    # Hypo correction tracking (see HYPO_CORRECTION_REFRACTORY_MIN).
+    last_hypo_correction_idx: int = -9999
+    nocturnal_basal_suspend_until_idx: int = -1
 
 
 # ============================================================================
@@ -760,6 +804,15 @@ class T1DMSimulator:
         # plasma-insulin lag behind subcutaneous absorption.
         self._smoothed_insulin_for_hgo: float = 0.0
 
+        # AR(1) noise state. Each step advances via:
+        #   noise = ρ·noise_prev + √(1 − ρ²) · N(0, σ)
+        # giving stationary variance σ² but smooth time-correlated noise.
+        self._ar_is: float = 0.0
+        self._ar_hgo: float = 0.0
+        self._ar_carb: float = 0.0
+        self._ar_insulin: float = 0.0
+        self._ar_cgm: float = 0.0
+
         # Pre-generate day plan
         self._plan_day()
 
@@ -798,6 +851,13 @@ class T1DMSimulator:
         self._bolus_totals = np.zeros(_init_len)
         self._exercise_totals = np.zeros(_init_len)
         self._smoothed_insulin_for_hgo = 0.0
+
+        # Reset AR(1) noise state (mirrors __init__).
+        self._ar_is = 0.0
+        self._ar_hgo = 0.0
+        self._ar_carb = 0.0
+        self._ar_insulin = 0.0
+        self._ar_cgm = 0.0
 
         self._pending_events = []
         self._plan_day()
@@ -1111,12 +1171,17 @@ class T1DMSimulator:
                     'label': f'Meal {component_carbs:.0f}g {ctype}'
                 }))
 
-            # Protein/fat slow tail (always present)
-            pf_curve = gamma_curve(PROTEIN_FAT_EQUIV_GRAMS, PROTEIN_FAT_GAMMA_K,
+            # Protein/fat slow tail — scaled to the meal so snacks don't carry
+            # the same 10 g slow tail as a 50 g dinner. Fixed-tail behavior
+            # pulled the cohort post-meal envelope peak to ~220 min vs ~100 in
+            # real data; this scaling keeps the tail proportional.
+            pf_grams = float(np.clip(PROTEIN_FAT_FRACTION_OF_CARBS * carb_amount,
+                                     PROTEIN_FAT_MIN_GRAMS, PROTEIN_FAT_MAX_GRAMS))
+            pf_curve = gamma_curve(pf_grams, PROTEIN_FAT_GAMMA_K,
                                    PROTEIN_FAT_GAMMA_THETA,
                                    PROTEIN_FAT_GAMMA_K * PROTEIN_FAT_GAMMA_THETA * 4)
             self._pending_events.append((meal_idx, 'carb', {
-                'curve': pf_curve, 'label': f'Protein/fat {PROTEIN_FAT_EQUIV_GRAMS:.0f}g equiv'
+                'curve': pf_curve, 'label': f'Protein/fat {pf_grams:.0f}g equiv'
             }))
 
             # Delayed-meal HGO rebound: large meals trigger a positive HGO bump
@@ -1325,8 +1390,11 @@ class T1DMSimulator:
             bonus = POSTPRANDIAL_IS_BONUS_FACTOR * active_carb / (POSTPRANDIAL_IS_BONUS_HALF + active_carb)
             is_val *= (1.0 - bonus)
 
-        # Fast noise
-        is_val *= (1.0 + self.rng.normal(0, IS_FAST_NOISE_SIGMA))
+        # Fast noise via AR(1) — same stationary σ as the previous independent
+        # draw, but with ~22 min correlation half-life so IS swings are smooth.
+        self._ar_is = (NOISE_AR1_RHO_METABOLIC * self._ar_is
+                       + NOISE_AR1_INNOV_METABOLIC * self.rng.normal(0, IS_FAST_NOISE_SIGMA))
+        is_val *= (1.0 + self._ar_is)
 
         return max(0.2, is_val)
 
@@ -1337,8 +1405,12 @@ class T1DMSimulator:
         the observation tracks instantaneous true BG plus noise. See the
         constant's comment for the future implementation hook.
         """
-        noise_sigma = CGM_NOISE_FRACTION * true_bg
-        observed = true_bg + self.rng.normal(0, noise_sigma)
+        # AR(1) sensor noise: real CGMs show smoothly-drifting offsets over
+        # 30-60 min windows, not white-noise spikes. The Perlin-like wobble is
+        # produced by ρ=0.92 (~42 min half-life) with σ scaled by true BG.
+        self._ar_cgm = (NOISE_AR1_RHO_SENSOR * self._ar_cgm
+                        + NOISE_AR1_INNOV_SENSOR * self.rng.normal(0, CGM_NOISE_FRACTION))
+        observed = true_bg * (1.0 + self._ar_cgm)
         return np.clip(observed, BG_CLAMP_MIN, BG_CLAMP_MAX)
 
     def _check_and_correct(self, time_idx: int):
@@ -1388,6 +1460,16 @@ class T1DMSimulator:
 
         # --- Handle hypoglycemia ---
         if s.bg_observed < eff_low_thresh:
+            # Refractory: in moderate hypo (55-70) a second correction within
+            # 20 min just stacks carbs on top of carbs that haven't acted yet.
+            # Severe hypo (<55) bypasses the refractory — symptomatic patient
+            # keeps eating until BG is safely up, matching real-life rescue
+            # behavior. Without the exemption TBR2 doubled because rescue
+            # corrections were blocked.
+            refractory_steps = int(HYPO_CORRECTION_REFRACTORY_MIN / DT_MINUTES)
+            if (not severe_hypo) and (time_idx - s.last_hypo_correction_idx < refractory_steps):
+                return
+
             severity = max(0, eff_low_thresh - s.bg_observed)
             # Skilled patients eat more carbs (toward classical rule-of-15) so
             # they recover from over-bolus crashes; unskilled under-correct and
@@ -1416,6 +1498,17 @@ class T1DMSimulator:
             curve = gamma_curve(correction_grams, k, theta, duration)
             self.inject_curve(curve, time_idx, 'correction_carb',
                               f'Hypo correction {correction_grams:.0f}g')
+            s.last_hypo_correction_idx = time_idx
+
+            # If this correction fired during sleep, scale down basal insulin
+            # for the next ~90 min. Real patients respond to a night hypo by
+            # *also* suspending the pump / skipping basal, not just eating —
+            # without this, forward basal pulled BG low again 2-3h later and
+            # produced 3-5 consecutive nocturnal hypo cycles per night.
+            if not is_awake:
+                suspend_steps = int(NOCTURNAL_BASAL_SUSPEND_DURATION_HOURS * 60 / DT_MINUTES)
+                s.nocturnal_basal_suspend_until_idx = max(
+                    s.nocturnal_basal_suspend_until_idx, time_idx + suspend_steps)
 
             # After a SEVERE hypo correction, recheck soon (don't wait the full
             # CGM interval). Mild hypos keep the normal cadence so they linger
@@ -1523,15 +1616,27 @@ class T1DMSimulator:
 
         # --- Read per-step contributions from pre-computed accumulation arrays (O(1)) ---
         total_carb = float(self._carb_totals[idx]) if idx < len(self._carb_totals) else 0.0
-        total_insulin = (float(self._basal_totals[idx]) + float(self._bolus_totals[idx])) if idx < len(self._basal_totals) else 0.0
+        basal_step = float(self._basal_totals[idx]) if idx < len(self._basal_totals) else 0.0
+        bolus_step = float(self._bolus_totals[idx]) if idx < len(self._bolus_totals) else 0.0
+        # Nocturnal basal stand-down (set by _check_cgm_and_correct after a
+        # sleep-time hypo correction).
+        if idx < s.nocturnal_basal_suspend_until_idx:
+            basal_step *= NOCTURNAL_BASAL_SUSPEND_FACTOR
+        total_insulin = basal_step + bolus_step
         total_exercise = float(self._exercise_totals[idx]) if idx < len(self._exercise_totals) else 0.0
 
-        # Per-step absorption noise (gut variability for carbs, SC depot variance
-        # for insulin). Multiplicative, so dormant when no curve is active.
+        # Per-step absorption noise via AR(1) (smooth, correlated — gut motility
+        # and SC depot uptake don't reset every 5 min). Stationary σ matches the
+        # original NOISE_SIGMA constants; AR(1) reduces step-to-step jaggedness
+        # without changing total spread.
+        self._ar_carb = (NOISE_AR1_RHO_METABOLIC * self._ar_carb
+                         + NOISE_AR1_INNOV_METABOLIC * self.rng.normal(0, CARB_ABSORPTION_NOISE_SIGMA))
+        self._ar_insulin = (NOISE_AR1_RHO_METABOLIC * self._ar_insulin
+                            + NOISE_AR1_INNOV_METABOLIC * self.rng.normal(0, INSULIN_ABSORPTION_NOISE_SIGMA))
         if total_carb > 0.0:
-            total_carb = max(0.0, total_carb * (1.0 + self.rng.normal(0, CARB_ABSORPTION_NOISE_SIGMA)))
+            total_carb = max(0.0, total_carb * (1.0 + self._ar_carb))
         if total_insulin > 0.0:
-            total_insulin = max(0.0, total_insulin * (1.0 + self.rng.normal(0, INSULIN_ABSORPTION_NOISE_SIGMA)))
+            total_insulin = max(0.0, total_insulin * (1.0 + self._ar_insulin))
 
         # --- HGO with insulin-mediated suppression (Hill function) ---
         # Plasma insulin lags subcutaneous absorption, so feed an EMA-smoothed
@@ -1542,7 +1647,9 @@ class T1DMSimulator:
             HGO_INSULIN_SMOOTHING_ALPHA * total_insulin
             + (1.0 - HGO_INSULIN_SMOOTHING_ALPHA) * self._smoothed_insulin_for_hgo
         )
-        hgo_rate = compute_hgo_rate(self._smoothed_insulin_for_hgo) * (1 + self.rng.normal(0, HGO_NOISE_SIGMA))
+        self._ar_hgo = (NOISE_AR1_RHO_METABOLIC * self._ar_hgo
+                        + NOISE_AR1_INNOV_METABOLIC * self.rng.normal(0, HGO_NOISE_SIGMA))
+        hgo_rate = compute_hgo_rate(self._smoothed_insulin_for_hgo) * (1 + self._ar_hgo)
         hgo_value = hgo_rate * (DT_MINUTES / 60.0)
         # Scale HGO by body weight (heavier liver, proportionally more endogenous
         # glucose). The basal calibration in generate_patient mirrors this scale,
