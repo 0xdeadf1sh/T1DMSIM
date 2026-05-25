@@ -32,7 +32,7 @@ ASSETS = os.path.join(REPO_ROOT, 'assets')
 os.makedirs(ASSETS, exist_ok=True)
 
 sys.path.insert(0, REPO_ROOT)
-sys.path.insert(0, '/tmp')
+sys.path.insert(0, os.path.dirname(__file__))
 
 from compare_all_datasets import (  # noqa: E402
     load_ohio_patients, load_shanghai_patients,

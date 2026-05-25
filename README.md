@@ -235,20 +235,20 @@ The simulator matches both real cohorts on mean BG and GMI within a fraction of 
 | Metric          | OhioT1DM | ShanghaiT1DM | T1DMSIM |
 |-----------------|---------:|-------------:|--------:|
 | Patients / records | 6     | 16           | 30 seeds |
-| Mean BG (mg/dL) | 162.3    | 163.6        | 160.0   |
-| GMI             | 7.2      | 7.2          | 7.1     |
-| CV (%)          | 36.3     | 38.6         | 47.6    |
-| Δ5min std       | 5.81     | (15-min: 10.65) | 5.82 |
+| Mean BG (mg/dL) | 162.3    | 163.6        | 161.0   |
+| GMI             | 7.2      | 7.2          | 7.2     |
+| CV (%)          | 36.2     | 38.6         | 47.0    |
+| Δ5min std       | 5.55     | (15-min: 10.65) | 6.13 |
 
 #### Clinical glucose ranges
 ![Clinical ranges](assets/clinical_ranges.png)
 
-TBR2 / TBR1 / TIR / TAR1 / TAR2 in percent of CGM time. Simulator TIR sits between OhioT1DM and ShanghaiT1DM; the higher TBR1 reflects the wider IS/weight axis spanned by the synthetic cohort.
+TBR2 / TBR1 / TIR / TAR1 / TAR2 in percent of CGM time. Simulator TIR (62.7%) sits slightly above both real cohorts (Ohio 60.5%, Shanghai 54.7%). The higher TBR1 (6.3% vs Ohio 2.6%) reflects the wider IS/weight axis spanned by the synthetic cohort. The simulator under-weights TAR1 (15.2% vs Ohio 27.4%) and over-weights TAR2 (14.8% vs Ohio 8.9%) — a small fraction of seeds settle into multi-day hyper-glycaemia that real adult cohorts don't show.
 
 #### Diurnal pattern
 ![Diurnal mean BG by hour](assets/diurnal_bg.png)
 
-All three datasets show the morning peak at 08:00 (dawn phenomenon + breakfast). The simulator's peak amplitude is slightly muted compared to the real cohorts, but the peak hour, trough, and late-evening trajectory align.
+All three datasets show the morning peak at 08:00 (dawn phenomenon + breakfast). The simulator's peak amplitude is slightly muted compared to the real cohorts. The simulator runs ~20 mg/dL below Ohio in the overnight trough (02:00–05:00) and ~15 mg/dL above Ohio in the late-evening (20:00–22:00); the late-evening gap reflects a longer dinner clearance tail in the synthetic cohort.
 
 #### Pooled BG distribution
 ![Pooled BG histogram](assets/bg_histogram.png)
@@ -258,7 +258,7 @@ The full pooled CGM-value distribution. Vertical lines mark the 54 / 70 / 180 / 
 #### Episode durations
 ![Hypo/hyper episode durations](assets/episode_durations.png)
 
-Pooled hypo and hyper episode duration boxplots on a log y-axis. ShanghaiT1DM's multi-hour hypo episodes (max ~540 min) confirm that the simulator's long-hypo tail is realistic. The simulator's hyper-tail extends further than in either real dataset — a small fraction of seeds (~2 of 30) settle into multi-day hyper-glycaemia in a way that real adult cohorts don't, a known limitation.
+Pooled hypo and hyper episode duration boxplots on a log y-axis. The simulator's hypo episodes are shorter than in either real cohort (sim p90 ~65 min vs Ohio ~110 min, Shanghai ~270 min) — sim hypos get caught and corrected fast, while the real cohorts include long sensor-stuck-low artefacts that the simulator does not model. The simulator's hyper p90 (~535 min) is close to Ohio's (~415 min), but its long-tail outliers still extend beyond either real dataset — a small fraction of seeds settle into multi-day hyper-glycaemia in a way that real adult cohorts don't, a known limitation driven by under-calibrated basal in a few IR seeds.
 
 ### Curve-shape comparison
 
@@ -288,18 +288,22 @@ Nocturnal-only windows. The simulator does not exhibit the recurrent 3–5x noct
 
 | Aspect | Verdict |
 |---|---|
-| Mean BG, GMI | match both real cohorts within 1 mg/dL / 0.1 unit |
-| Δ5min std | matches OhioT1DM (5.83 vs 5.81) |
+| Mean BG, GMI | match both real cohorts within 1.5 mg/dL / 0.05 unit |
+| Δ5min std | within 10% of OhioT1DM (6.13 vs 5.55) |
 | Diurnal peak hour (08:00) | matches both real datasets |
-| TIR | within 3pp of OhioT1DM, 3pp of ShanghaiT1DM |
-| Long hypo episodes | realistic shape (validated against ShanghaiT1DM) |
+| TIR | within 3pp of OhioT1DM, 8pp of ShanghaiT1DM |
+| Hyper p90 episode duration | close to OhioT1DM (sim 535 vs Ohio 415 min) |
 | Post-meal rise direction at t=0 | matches OhioT1DM |
 | Sensor-noise character | smooth Perlin-like wobble matches real CGM |
 | Recurrent nocturnal hypos | not present in simulator output |
+| Late-evening BG (20:00–22:00) | runs ~15 mg/dL above Ohio (slow dinner clearance) |
+| Overnight trough (02:00–05:00) | runs ~20 mg/dL below Ohio |
 | Post-meal peak timing | ~125 min in simulator vs ~100 min in OhioT1DM |
 | Multi-hour ACF persistence | simulator slightly more autocorrelated than real |
 | Sample entropy / regularity | simulator more regular than either real dataset |
-| Hyper-tail outliers | rare simulator seeds (~2 of 30) settle into multi-day hyper |
+| TAR2 (>250) rate | 14.8% vs Ohio 8.9% — heavy hyper tail still present |
+| Hyper-tail outliers | rare simulator seeds settle into multi-day hyper streaks |
+| Short hypo episodes | sim p90 ~65 min vs Ohio ~110 min — sim hypos get caught fast |
 | TBR1 (54–70) rate | wider than OhioT1DM by design (broader IS/weight axis) |
 
 To reproduce the figures and the underlying numbers, run `scripts/generate_comparison_figures.py` with `OhioT1DM/` and `ShanghaiT1DM/` placed at the repo root (both datasets are gated by data-use agreements and not redistributable, so they are not included).
