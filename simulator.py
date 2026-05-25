@@ -327,7 +327,9 @@ SEVERE_HYPO_GLUCAGON_RATE = 2.0  # Extra mg/dL per step at severity=1.0
 # in `_compute_cgm_observation` (lookup of true BG from `CGM_LAG_MINUTES` ago).
 # It is currently DEFINED BUT UNUSED — the CGM reads instantaneous BG.
 CGM_LAG_MINUTES = 10
-CGM_NOISE_FRACTION = 0.01  # ~1% MARD
+CGM_NOISE_FRACTION = 0.018  # ~1.8% step-to-step noise (was 0.01 — too tight; 2.5% overshot Δ5min).
+                            # Real Dexcom/Libre show step-to-step σ of ~2-3 mg/dL at BG=150 after
+                            # manufacturer smoothing, so this lands closer than either prior value.
 
 # Rare events
 RARE_EVENT_PROBABILITY = 0.02  # Per-day probability of a rare/chaotic day
