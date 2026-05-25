@@ -53,11 +53,19 @@ def isolated_biology(monkeypatch):
 
 
 def _quiet_sim(seed: int, initial_bg: float = 100.0) -> T1DMSimulator:
-    """Clear pending behaviors so injected curves are the only inputs."""
+    """Clear pending behaviors so injected curves are the only inputs.
+
+    Pins body_weight_kg=75 and insulin_resistance_factor=1.0 on the generated
+    patient so the HGO scaling matches the test's HGO_BASE assumption.
+    Otherwise a heavy or IR patient would have hgo_value scaled and the
+    plateau-basal-vs-HGO balance assertion would no longer hold.
+    """
     sim = T1DMSimulator(seed=seed, initial_bg=initial_bg)
     sim._pending_events = []
     sim.state.active_curves = []
     sim.state.is_sick = False
+    sim.patient.body_weight_kg = 75.0
+    sim.patient.insulin_resistance_factor = 1.0
     return sim
 
 

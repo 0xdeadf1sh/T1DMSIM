@@ -87,7 +87,7 @@ Visualizer key bindings are documented in the module docstring at the top of `vi
   - **Low-skill** (<0.45): TIR ~43%, TBR ~8%, TAR ~48% (hyper-dominant — missed basal, big carb errors)
 - Skill-TIR correlation should be ~+0.5; Skill-TBR near zero
 - Three structural rules to preserve:
-  - `ideal_basal = HGO_BASE * 24 * is_base / ICR` (in `generate_patient`)
+  - `ideal_basal = HGO_BASE * 24 * (body_weight_kg / BODY_WEIGHT_MEAN_KG) * is_base / ICR` (in `generate_patient`) — the weight factor mirrors the per-step HGO scaling and keeps the HGO-balances-basal invariant across body sizes.
   - Hypo correction grams scale with `skill_avg` so skilled patients can recover from over-bolus crashes
   - Severe hypo (`bg_observed < SEVERE_HYPO_THRESHOLD`) bypasses the CGM check interval AND triggers a non-probabilistic 14-22g rage-eat — this is what keeps severe episodes under 1h. Removing either half re-opens 6+ hour dangerous hypos.
 

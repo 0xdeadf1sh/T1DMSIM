@@ -84,7 +84,32 @@ MIXED_MEAL_SLOW_K_RANGE = (4.0, 6.0)
 MIXED_MEAL_SLOW_THETA_RANGE = (28.0, 45.0)
 MIXED_MEAL_MED_WEIGHT_BASE = 0.4  # Base weight for medium-speed components
 
-# Insulin sensitivity
+# Body weight and insulin resistance — two per-patient axes added in P2 of
+# OhioT1DM alignment. Real T1D populations include thin sensitive patients
+# (low TDD ~25 U/day) and heavy IR patients (TDD >100 U/day); the previous
+# single-axis IS_BASE model couldn't span that range.
+#
+# body_weight_kg scales HGO (heavier liver → more endogenous glucose) and via
+# the basal-balance rule, basal dose. insulin_resistance_factor scales ICR
+# inversely (resistant patients need more insulin per gram of carbs) AND sets
+# is_base (resistance reduces glucose clearance per unit insulin). The two
+# axes are independent so a thin-IR patient and an obese-sensitive patient
+# both exist.
+BODY_WEIGHT_MEAN_KG = 75.0
+BODY_WEIGHT_SIGMA_KG = 18.0
+BODY_WEIGHT_MIN_KG = 45.0
+BODY_WEIGHT_MAX_KG = 130.0
+IR_LOGNORMAL_SIGMA = 0.30       # σ of log(insulin_resistance_factor); factor range ~[0.5, 2.0]
+IR_FACTOR_MIN = 0.40
+IR_FACTOR_MAX = 2.50
+IR_TO_IS_NOISE_SIGMA = 0.10     # Additional per-patient noise so is_base isn't a deterministic
+                                 # function of ir_factor (real ICR/IS are correlated, not identical)
+IR_TO_ICR_NOISE_SIGMA = 0.12    # Same for ICR
+
+# Insulin sensitivity. is_base is now derived from insulin_resistance_factor
+# (per P2) rather than sampled independently; this constant stays as the
+# reference centerpoint for the lognormal draw and isn't directly used in
+# generation any more.
 IS_BASE_MEAN = 1.0
 IS_BASE_SIGMA = 0.2
 IS_DAILY_DRIFT_SIGMA = 0.10  # Day-to-day drift (scaled per-patient by (1.5 - s4)). Lowered from 0.16 —
@@ -408,6 +433,8 @@ class PatientProfile:
     lifestyle_consistency: float = 0.5
 
     # Derived physiological parameters
+    body_weight_kg: float = BODY_WEIGHT_MEAN_KG
+    insulin_resistance_factor: float = 1.0  # >1 = resistant, <1 = sensitive
     is_base: float = 1.0
     icr: float = 10.0
     correction_factor: float = 40.0
@@ -594,24 +621,40 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     profile.dosing_competence = s3
     profile.lifestyle_consistency = s4
 
-    # Physiological parameters
-    profile.is_base = max(0.3, rng.normal(IS_BASE_MEAN, IS_BASE_SIGMA))
-    profile.icr = max(3.0, rng.normal(ICR_MEAN, ICR_SIGMA))
-    profile.correction_factor = max(10.0, rng.normal(CORRECTION_FACTOR_MEAN, CORRECTION_FACTOR_SIGMA))
+    # Physiological parameters — two independent axes (body weight and insulin
+    # resistance) widen the population spread enough to span real-T1D TDDs.
+    profile.body_weight_kg = float(np.clip(
+        rng.normal(BODY_WEIGHT_MEAN_KG, BODY_WEIGHT_SIGMA_KG),
+        BODY_WEIGHT_MIN_KG, BODY_WEIGHT_MAX_KG))
+    profile.insulin_resistance_factor = float(np.clip(
+        np.exp(rng.normal(0.0, IR_LOGNORMAL_SIGMA)),
+        IR_FACTOR_MIN, IR_FACTOR_MAX))
+
+    # is_base and ICR are coupled to insulin_resistance_factor (real IR/ICR
+    # are physiologically correlated) but each carries a small independent
+    # noise term so they aren't perfectly redundant.
+    ir = profile.insulin_resistance_factor
+    profile.is_base = max(0.3, ir * np.exp(rng.normal(0.0, IR_TO_IS_NOISE_SIGMA)))
+    profile.icr = max(3.0, (ICR_MEAN / ir) * np.exp(rng.normal(0.0, IR_TO_ICR_NOISE_SIGMA)))
+    profile.correction_factor = max(10.0, rng.normal(CORRECTION_FACTOR_MEAN, CORRECTION_FACTOR_SIGMA) / ir)
     profile.dawn_hgo_amplitude = max(0.0, rng.normal(DAWN_HGO_AMPLITUDE_MEAN, DAWN_HGO_AMPLITUDE_SIGMA))
     profile.night_hgo_dip_amplitude = max(0.0, rng.normal(NIGHT_HGO_DIP_AMPLITUDE_MEAN, NIGHT_HGO_DIP_AMPLITUDE_SIGMA))
 
     # Ideal basal balances 24h of HGO at the patient's own insulin sensitivity:
     # at steady state, glucose_out = total_insulin * ICR / IS must equal HGO,
-    # so basal = HGO * 24 * IS / ICR. Skipping the IS_base factor systematically
-    # over-doses sensitive patients (IS<1) and under-doses resistant ones (IS>1),
-    # which dominates the population TBR/TAR imbalance.
+    # so basal = HGO * 24 * IS / ICR. HGO itself is scaled per-patient by
+    # body_weight_kg/75 in the step function (heavier liver, more HGO), so the
+    # ideal basal must include that factor or heavy patients are under-dosed.
+    # Skipping the IS_base or weight factors systematically biases populations.
     # Competent patients (high s3) stay close to ideal; incompetent ones deviate more.
-    ideal_basal = (HGO_BASE_GRAMS_PER_HOUR * 24.0) * profile.is_base / profile.icr
+    weight_factor = profile.body_weight_kg / BODY_WEIGHT_MEAN_KG
+    ideal_basal = (HGO_BASE_GRAMS_PER_HOUR * 24.0) * weight_factor * profile.is_base / profile.icr
     # Strong nonlinearity on s3 so high-skill patients have near-perfect basal
     # and don't rely on the basal_adjustment feedback (which can oscillate).
     noise_scale = BASAL_DOSE_SIGMA * (1.5 - s3) ** 2.5
-    profile.basal_dose = float(np.clip(rng.normal(ideal_basal, noise_scale), 5.0, 40.0))
+    # Clamp widened from [5, 40] to [5, 80] — heavy IR patients can legitimately
+    # need 60+ U basal/day (e.g., 110kg patient with IR=1.8).
+    profile.basal_dose = float(np.clip(rng.normal(ideal_basal, noise_scale), 5.0, 80.0))
 
     # Behavioral parameters derived from skills
     wake_sigma = WAKE_TIME_SIGMA_BASE / (0.3 + 0.7 * s4)
@@ -1455,6 +1498,10 @@ class T1DMSimulator:
         )
         hgo_rate = compute_hgo_rate(self._smoothed_insulin_for_hgo) * (1 + self.rng.normal(0, HGO_NOISE_SIGMA))
         hgo_value = hgo_rate * (DT_MINUTES / 60.0)
+        # Scale HGO by body weight (heavier liver, proportionally more endogenous
+        # glucose). The basal calibration in generate_patient mirrors this scale,
+        # so the structural HGO-balances-basal invariant holds across weights.
+        hgo_value *= self.patient.body_weight_kg / BODY_WEIGHT_MEAN_KG
 
         # Circadian HGO modulation — cortisol-driven dawn surge (~6:30am) plus a
         # deep-sleep trough (~3am). Added to hgo_value in g/hr rather than as a
