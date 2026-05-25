@@ -459,8 +459,17 @@ EXERCISE_IS_RAMP_HOURS = 1.0           # Trapezoidal ramp up/down for the IS boo
 # ============================================================================
 
 TREND_CORRECTION_WINDOW_STEPS = 6      # BG history window for trend (6 steps = 30 min)
-TREND_HIGH_RATE_THRESHOLD = 7.0        # mg/dL/step rising trend to trigger preemptive correction
-TREND_HIGH_BG_MIN = 160.0              # BG must exceed this for trend-based high correction
+TREND_HIGH_RATE_THRESHOLD = 5.0        # mg/dL/step rising trend to trigger preemptive correction.
+                                       # Lowered from 7.0 — flatter sustained climbs into the 200-250 zone
+                                       # were missing the trend gate and stretching hyper p90 / TAR2 well
+                                       # past Ohio's distribution.
+TREND_HIGH_BG_MIN = 145.0              # BG must exceed this for trend-based high correction.
+                                       # Lowered from 160 — `eff_high_thresh = 180 - 25*skill_avg` lands at
+                                       # 160 for high-skill patients, which made the trend-correction
+                                       # window (TREND_HIGH_BG_MIN < BG ≤ eff_high_thresh) empty. The branch
+                                       # never fired for skilled patients. With 145 the window is 145-160
+                                       # for high-skill and 145-170 for low-skill, restoring preemptive
+                                       # corrections on dinner climbs before they reach TAR territory.
 TREND_LOW_RATE_THRESHOLD = -5.0        # mg/dL/step falling trend to trigger preemptive carb
 TREND_LOW_BG_MAX = 85.0                # BG must be below this for trend-based low correction
 
@@ -1111,15 +1120,16 @@ class T1DMSimulator:
                 # IR patients get stuck above 220 for weeks.
                 overshoot = min((recent_mean - 150) / 80.0, 1.0)
                 skill_factor = 0.4 + 0.6 * eff_s3   # baseline 40% + up to 100%
-                # Extreme-high relief: a patient running >220 for multiple days is
+                # Extreme-high relief: a patient running high for multiple days is
                 # in clinical-emergency territory and behavior shifts (urgent care
                 # visit, doctor call, friend/family intervention). Boost the ratio
                 # so multi-day hyper streaks recover in 2-3 days rather than 10.
-                # Trigger on EITHER the 3-day OR the 1-day mean exceeding 220 so
-                # the boost engages on day 2 of a hyper streak rather than day 4+.
+                # Trigger lowered 220→200 so patients stuck in the 200-250 zone
+                # (the dominant TAR2 contributor) get basal escalation instead of
+                # sitting there until basal-drift catches up.
                 trigger_mean = max(recent_mean, one_day_mean)
-                if trigger_mean > 220:
-                    extreme_boost = 1.0 + 0.5 * min(1.0, (trigger_mean - 220) / 50.0)
+                if trigger_mean > 200:
+                    extreme_boost = 1.0 + 0.5 * min(1.0, (trigger_mean - 200) / 50.0)
                 else:
                     extreme_boost = 1.0
                 basal_adjustment = 1.0 + overshoot * (BASAL_CORRECTION_MAX_ADJUSTMENT * skill_factor) * extreme_boost
@@ -1629,7 +1639,11 @@ class T1DMSimulator:
         # --- Handle hyperglycemia ---
         elif s.bg_observed > eff_high_thresh:
             steps_since_correction = time_idx - s.last_correction_idx
-            urgency = max(1.0, (s.bg_observed - 250) / 50.0) if s.bg_observed > 250 else 1.0
+            # Urgency now ramps from BG_HIGH_THRESHOLD (180) up. At 180 → 1.0
+            # (full patience), at 230 → 2.0 (half), at 280 → 3.0 (third). Without
+            # this, sustained 200-250 BG sat for the full 2h patience window and
+            # produced the heavy >250 tail (TAR2 15% vs Ohio 9%).
+            urgency = min(3.0, 1.0 + max(0.0, (s.bg_observed - BG_HIGH_THRESHOLD) / 50.0))
             patience_steps = int(p.patience_time_min / (DT_MINUTES * urgency))
 
             if steps_since_correction >= patience_steps:
