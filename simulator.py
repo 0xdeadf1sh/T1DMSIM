@@ -49,13 +49,13 @@ MEAL_CARB_DISCIPLINE_SCALE = 0.7  # How much s1 reduces carb intake
 SNACK_CARB_MEAN = 20.0
 SNACK_CARB_SIGMA = 10.0
 
-# Protein/fat baseline — peak around 87 min (k=4.5, θ=25). Earlier (k=3.5)
-# pulled mean BG below the ±3 stopping threshold because the BG-time area
-# compressed and triggered extra corrections; original k=6 (peak 150 min)
-# dragged the cohort envelope peak past 200 min vs real ~100. This balances.
-PROTEIN_FAT_GAMMA_K = 4.5
+# Protein/fat baseline — peak around 75 min (k=4, θ=25). Earlier value (k=3.5)
+# regressed mean BG; original k=6 dragged the cohort envelope peak past 200 min.
+# This shape sits the protein/fat tail close to the OhioT1DM cohort post-meal
+# peak time of ~75-100 min.
+PROTEIN_FAT_GAMMA_K = 4.0
 PROTEIN_FAT_GAMMA_THETA = 25.0
-PROTEIN_FAT_FRACTION_OF_CARBS = 0.26  # Slow tail grams as fraction of meal carbs
+PROTEIN_FAT_FRACTION_OF_CARBS = 0.24
 PROTEIN_FAT_MIN_GRAMS = 6.0
 PROTEIN_FAT_MAX_GRAMS = 18.0
 
@@ -66,11 +66,12 @@ PROTEIN_FAT_MAX_GRAMS = 18.0
 # MIXED_MEAL_FAST_*_RANGE constants instead — these are NOT the live values.
 FAST_CARB_K = 3.0  # Gamma shape for fast carbs (peak ~40 min)
 FAST_CARB_THETA = 20.0  # Gamma scale for fast carbs (minutes)
-# slow_carb_preference of ~0.35 for mid-skill leaves fast/medium dominant
-# enough to keep the post-meal envelope rising at t=0 (real-data shape) while
-# preserving enough late tail to keep mean BG near the OhioT1DM target.
-SLOW_CARB_PREFERENCE_BASE = 0.20  # Base probability of choosing slow carbs
-SLOW_CARB_PREFERENCE_SKILL_BONUS = 0.30  # Added probability from s1
+# slow_carb_preference of ~0.18 for mid-skill keeps the cohort post-meal
+# envelope peak close to the ~100 min observed in OhioT1DM. Higher values
+# (e.g. 0.55) put 47% of meal carbs on the late slow tail, dragging the peak
+# past 200 min.
+SLOW_CARB_PREFERENCE_BASE = 0.10  # Base probability of choosing slow carbs
+SLOW_CARB_PREFERENCE_SKILL_BONUS = 0.15  # Added probability from s1
 
 # Hypo correction carbs (glucose tablets / juice — kick in faster than meal carbs)
 HYPO_CARB_K = 2.0
@@ -176,7 +177,7 @@ BASAL_RAMP_DOWN_HOURS = 4.0 # How long it will take before basal insulin decays 
 # A 5U bolus uses BASE; a 1U bolus is shorter, a 20U bolus is longer.
 # Theta also drifts with dose so larger boluses peak slightly later.
 BOLUS_GAMMA_K = 3.0
-BOLUS_GAMMA_THETA = 25.0  # Peak around 60 min for typical 5U dose
+BOLUS_GAMMA_THETA = 25.0  # Peak around 50 min for typical 5U dose
 BOLUS_DURATION_HOURS = 4.0  # Legacy typical duration; new code uses bolus_pk_for_dose()
 BOLUS_DIA_BASE_HOURS = 4.0  # Duration at the 5U reference dose
 BOLUS_DIA_DOSE_SCALE = 0.6  # Hours added per unit of sqrt(dose) - sqrt(5)
