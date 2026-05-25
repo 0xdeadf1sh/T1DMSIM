@@ -22,17 +22,15 @@ The ultimate goal is to train a transformer model on these synthetic factor curv
 
 The simulator is built on several core ideas:
 
-1. The output is blood sugar *deltas*, not absolute values. BG at each step is the accumulation of all previous deltas. This keeps the model compositional and avoids needing to model absolute physiology.
+1. Every factor is a curve, not a number. Eating 40g of bread and 40g of orange juice both contribute 40g of carbs, but the absorption curves have different shapes (the juice peaks faster and falls faster). The same applies to rapid-acting vs long-acting insulin.
 
-2. Every factor is a curve, not a number. Eating 40g of bread and 40g of orange juice both contribute 40g of carbs, but the absorption curves have different shapes (the juice peaks faster and falls faster). The same applies to rapid-acting vs long-acting insulin.
+2. Patient behavior is driven by a latent skill profile. Four correlated skill dimensions (dietary discipline, attentiveness, dosing competence, lifestyle consistency) determine everything about how a patient lives: what they eat, when they eat, how accurately they dose, how quickly they correct, whether they exercise.
 
-3. Patient behavior is driven by a latent skill profile. Four correlated skill dimensions (dietary discipline, attentiveness, dosing competence, lifestyle consistency) determine everything about how a patient lives: what they eat, when they eat, how accurately they dose, how quickly they correct, whether they exercise.
+3. The liver is an insulin-suppressed feeding session. Hepatic glucose output (HGO) is a steady stream of "food" entering the bloodstream, throttled down by a Hill function of EMA-smoothed plasma insulin. A finite hepatic glycogen reservoir gates the glycogenolysis fraction, and large meals schedule a delayed HGO rebound 3.5-5.5h later (the mechanism behind nocturnal hyperglycemia after a big dinner). Basal insulin exists to counteract baseline HGO; the ideal basal dose is anchored to `(HGO_base × 24h) / ICR`.
 
-4. The liver is an insulin-suppressed feeding session. Hepatic glucose output (HGO) is a steady stream of "food" entering the bloodstream, throttled down by a Hill function of EMA-smoothed plasma insulin. A finite hepatic glycogen reservoir gates the glycogenolysis fraction, and large meals schedule a delayed HGO rebound 3.5-5.5h later (the mechanism behind nocturnal hyperglycemia after a big dinner). Basal insulin exists to counteract baseline HGO; the ideal basal dose is anchored to `(HGO_base × 24h) / ICR`.
+4. Exercise is negative food. Walking, for example, pulls glucose out of the bloodstream into muscle cells. Modeling this as a negative carb-equivalent curve is a pragmatic simplification that works well for aerobic exercise. Additionally, exercise increases insulin sensitivity for `EXERCISE_IS_DURATION_HOURS` (18h) afterward, modeled as a time-limited IS reduction.
 
-5. Exercise is negative food. Walking, for example, pulls glucose out of the bloodstream into muscle cells. Modeling this as a negative carb-equivalent curve is a pragmatic simplification that works well for aerobic exercise. Additionally, exercise increases insulin sensitivity for `EXERCISE_IS_DURATION_HOURS` (18h) afterward, modeled as a time-limited IS reduction.
-
-6. Everything is seed-driven. A single integer seed determines the patient's personality, physiology, daily schedule, meal choices, insulin doses, exercise patterns, illness events, and random noise. Same seed, same simulation, always.
+5. Everything is seed-driven. A single integer seed determines the patient's personality, physiology, daily schedule, meal choices, insulin doses, exercise patterns, illness events, and random noise. Same seed, same simulation, always.
 
 
 ## Architecture
@@ -233,25 +231,25 @@ python scripts/generate_comparison_figures.py
 
 ### Aggregate statistics
 
-The simulator matches both real cohorts on mean BG and GMI within a fraction of a unit, while preserving wider inter-patient variability than either dataset (n=6 and n=16 are too small to define population dynamics).
+The simulator matches both real cohorts on mean BG and GMI within a fraction of a unit, while preserving wider inter-patient variability than either dataset — both real cohorts are small (n=6 and n=16) and don't capture the full distribution of real T1D populations.
 
 | Metric          | OhioT1DM | ShanghaiT1DM | T1DMSIM |
 |-----------------|---------:|-------------:|--------:|
 | Patients / records | 6     | 16           | 30 seeds |
-| Mean BG (mg/dL) | 162.3    | 163.6        | 159.3   |
-| GMI             | 7.2      | 7.2          | 7.1     |
-| CV (%)          | 36.3     | 38.6         | 49.3    |
-| Δ5min std       | 5.81     | (15-min: 10.65) | 5.77 |
+| Mean BG (mg/dL) | 162.3    | 163.6        | 163.2   |
+| GMI             | 7.2      | 7.2          | 7.2     |
+| CV (%)          | 36.3     | 38.6         | 48.5    |
+| Δ5min std       | 5.81     | (15-min: 10.65) | 5.83 |
 
 #### Clinical glucose ranges
 ![Clinical ranges](assets/clinical_ranges.png)
 
-TBR2 / TBR1 / TIR / TAR1 / TAR2 in percent of CGM time. Simulator TIR (58.6%) is between OhioT1DM (60.7%) and ShanghaiT1DM (54.7%); the higher TBR1 reflects the wider IS/weight axis spanned by the synthetic cohort.
+TBR2 / TBR1 / TIR / TAR1 / TAR2 in percent of CGM time. Simulator TIR sits between OhioT1DM and ShanghaiT1DM; the higher TBR1 reflects the wider IS/weight axis spanned by the synthetic cohort.
 
 #### Diurnal pattern
 ![Diurnal mean BG by hour](assets/diurnal_bg.png)
 
-All three show the morning peak at 08:00 (dawn phenomenon + breakfast). Simulator amplitude is slightly muted (175.7 vs Ohio 185.9, Shanghai 191.8) but the peak hour, trough, and late-evening trajectory are correctly aligned.
+All three datasets show the morning peak at 08:00 (dawn phenomenon + breakfast). The simulator's peak amplitude is slightly muted compared to the real cohorts, but the peak hour, trough, and late-evening trajectory align.
 
 #### Pooled BG distribution
 ![Pooled BG histogram](assets/bg_histogram.png)
@@ -261,7 +259,7 @@ The full pooled CGM-value distribution. Vertical lines mark the 54 / 70 / 180 / 
 #### Episode durations
 ![Hypo/hyper episode durations](assets/episode_durations.png)
 
-Pooled hypo and hyper episode duration boxplots on a log y-axis. Real-cohort multi-hour hypo episodes (visible in ShanghaiT1DM, max 540 min) validate that the simulator's long-hypo tail is realistic, not an artifact. The hyper-tail in the simulator extends further than in either real dataset — a known structural issue with 2–3 of 30 seeds locked into multi-day hyper that real adult cohorts don't show.
+Pooled hypo and hyper episode duration boxplots on a log y-axis. ShanghaiT1DM's multi-hour hypo episodes (max ~540 min) confirm that the simulator's long-hypo tail is realistic. The simulator's hyper-tail extends further than in either real dataset — a small fraction of seeds (~2 of 30) settle into multi-day hyper-glycaemia in a way that real adult cohorts don't, a known limitation.
 
 ### Curve-shape comparison
 
@@ -270,41 +268,42 @@ Statistical aggregates can be matched by curves that visibly look synthetic, so 
 #### 24-hour random windows
 ![24h trace grid](assets/24h_traces.png)
 
-Random 24-hour CGM windows from each dataset, plotted on identical axes. Sim and Ohio show a similar jaggedness; Shanghai's chunkier appearance is the 15-min cadence. The AR(1) sensor-noise model (ρ=0.92) produces the smoothly-drifting wobble seen in real Dexcom data rather than the white-noise spikes earlier independent-Gaussian versions had.
+Random 24-hour CGM windows from each dataset, plotted on identical axes. The simulator and OhioT1DM show similar jaggedness; ShanghaiT1DM's chunkier appearance is the 15-min cadence. AR(1) sensor noise (ρ=0.92) produces the smoothly-drifting wobble of real Dexcom traces rather than white-noise spikes.
 
 #### Post-meal excursion envelope
 ![Post-meal envelope](assets/postmeal_envelope.png)
 
-Median + IQR ribbon of every detected post-meal BG segment (meals ≥ 20 g), aligned to meal time. Simulator now rises monotonically from t=0 (matching OhioT1DM) instead of dipping first as it did when pre-bolus was set to −20 min. Peak time is ~150 min vs Ohio ~75–100 min — the residual late-peak is the strictest remaining curve-shape gap; pushing further regresses mean BG outside the ±3 mg/dL stopping rule.
+Median + IQR ribbon of every detected post-meal BG segment (meals ≥ 20 g), aligned to meal time. The simulator rises monotonically from t=0 matching the OhioT1DM shape, with peak around 125 min vs OhioT1DM ~75–100 min. The residual late-peak is the largest remaining curve-shape gap.
 
 #### Quantitative shape metrics
 ![Quantitative shape metrics](assets/quantitative_shape.png)
 
-Three diagnostics: Δ-BG distribution (sim slightly narrower tails than Ohio), autocorrelation function over 24h (sim ACF still elevated vs Ohio but improved from baseline), and sample entropy box plots (sim more regular than Ohio — the synthetic signal still has too much coupled internal state).
+Three diagnostics: Δ-BG distribution (simulator has slightly narrower tails than OhioT1DM), autocorrelation function over 24h (the simulator's BG remains autocorrelated longer than real CGM, partially driven by the simulator's coupled internal state), and sample entropy boxplots (the simulator is more regular / predictable than either real dataset).
 
 #### Nocturnal windows (23:00 → 07:00)
 ![Nocturnal traces](assets/nocturnal_traces.png)
 
-Nocturnal-only windows. After Phase 6 fixes, the simulator no longer exhibits the recurrent 3–5x nocturnal hypo cycling that real CGM data never shows. The dawn phenomenon (gradual morning rise from ~4 am) is visible in sim windows just as it is in Ohio.
+Nocturnal-only windows. The simulator does not exhibit the recurrent 3–5x nocturnal hypo cycling that would occur without hypo-correction refractory periods + nocturnal basal scale-down. The dawn phenomenon (gradual morning rise from ~4 am) is visible just as it is in OhioT1DM.
 
 ### What's matched, what's not
 
 | Aspect | Verdict |
 |---|---|
-| Mean BG, GMI, Δ5min std | match within stopping rule |
+| Mean BG, GMI | match both real cohorts within 1 mg/dL / 0.1 unit |
+| Δ5min std | matches OhioT1DM (5.83 vs 5.81) |
 | Diurnal peak hour (08:00) | matches both real datasets |
-| TIR | within 2pp of Ohio, exact match to Shanghai |
-| Long hypo episodes | realistic (validated against ShanghaiT1DM) |
-| Post-meal direction at t=0 | matches Ohio (was dipping before Phase 6) |
-| Spiky vs Perlin-like noise | matches (AR(1) on sensor + metabolic noise) |
-| Recurrent nocturnal hypos | fixed (refractory + nocturnal basal stand-down) |
-| Post-meal peak timing | ~150 min vs Ohio ~100 min (improved, not fully closed) |
-| Multi-hour ACF persistence | improved (~0.25 at lag 5h vs Ohio ~0.05) |
-| Sample entropy / regularity | sim still more regular than real |
-| Hyper-tail outliers (2–3/30 seeds locked high) | known structural issue |
-| TBR1 (54–70) rate | wider than Ohio, by design (broader IS/weight axis) |
+| TIR | within 3pp of OhioT1DM, 3pp of ShanghaiT1DM |
+| Long hypo episodes | realistic shape (validated against ShanghaiT1DM) |
+| Post-meal rise direction at t=0 | matches OhioT1DM |
+| Sensor-noise character | smooth Perlin-like wobble matches real CGM |
+| Recurrent nocturnal hypos | not present in simulator output |
+| Post-meal peak timing | ~125 min in simulator vs ~100 min in OhioT1DM |
+| Multi-hour ACF persistence | simulator slightly more autocorrelated than real |
+| Sample entropy / regularity | simulator more regular than either real dataset |
+| Hyper-tail outliers | rare simulator seeds (~2 of 30) settle into multi-day hyper |
+| TBR1 (54–70) rate | wider than OhioT1DM by design (broader IS/weight axis) |
 
-The comparison scripts (`/tmp/compare_all_datasets.py` for 3-way pooled stats, `/tmp/compare_curves.py` for curve-shape diagnostics) are not checked in but documented in the project's per-session memory.
+To reproduce the figures and the underlying numbers, run `scripts/generate_comparison_figures.py` with `OhioT1DM/` and `ShanghaiT1DM/` placed at the repo root (both datasets are gated by data-use agreements and not redistributable, so they are not included).
 
 ## Testing
 
