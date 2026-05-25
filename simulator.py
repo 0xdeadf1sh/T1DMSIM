@@ -77,6 +77,14 @@ SLOW_CARB_PREFERENCE_SKILL_BONUS = 0.15  # Added probability from s1
 HYPO_CARB_K = 2.0
 HYPO_CARB_THETA = 15.0  # Peak ~15 min
 
+# Slow-tail follow-up snack after a hypo correction (clinical "rule-of-15 plus snack").
+# Damps the recurrent dip 60-90 min later when fast carbs are gone but the meal bolus is
+# still acting. Skill-gated: only attentive patients remember the follow-up.
+HYPO_FOLLOWUP_FRACTION = 0.20      # Fraction of rescue dose, delivered as slow carbs.
+HYPO_FOLLOWUP_GAMMA_K = 4.0        # Slow gamma — peaks around 90 min
+HYPO_FOLLOWUP_GAMMA_THETA = 30.0   # Tail extends ~5h
+HYPO_FOLLOWUP_SKILL_THRESHOLD = 0.50  # Only attentive/competent patients remember the follow-up.
+
 # Carb curve noise
 CARB_CURVE_K_NOISE = 0.1  # Relative noise on gamma k
 CARB_CURVE_THETA_NOISE = 0.1  # Relative noise on gamma theta
@@ -382,7 +390,13 @@ RARE_EVENT_SKILL_REDUCTION = 0.3  # Even skilled people have bad days sometimes
 # as the patient eats to recover. Real patients respond by reducing or
 # suspending basal coverage — for pump users a temp basal / pump suspend,
 # for MDI users skipping the next basal injection — not by stacking carbs.
-HYPO_CORRECTION_REFRACTORY_MIN = 20.0  # Min minutes between hypo corrections.
+HYPO_CORRECTION_REFRACTORY_MIN = 20.0  # Min minutes between hypo corrections (moderate hypo 55-70).
+SEVERE_HYPO_REFRACTORY_MIN = 10.0      # Shorter refractory for severe hypo (<55). Rule-of-15 spirit:
+                                       # symptomatic patient still rage-eats, but waits ~10 min between
+                                       # doses so the first rescue's carbs can act. Without this gap,
+                                       # the CGM-check bypass let the patient eat every 5 min, stacking
+                                       # 3-5 rage doses (60+ g) and producing visible sawtooth as BG
+                                       # bounced between severe hypo and post-overcorrection peaks.
 POST_HYPO_BASAL_SUSPEND_DURATION_HOURS = 1.0  # Scale-down window after any hypo correction.
 POST_HYPO_BASAL_SUSPEND_FACTOR = 0.5           # Basal contribution multiplier while suspended.
 
@@ -1462,12 +1476,16 @@ class T1DMSimulator:
         if s.bg_observed < eff_low_thresh:
             # Refractory: in moderate hypo (55-70) a second correction within
             # 20 min just stacks carbs on top of carbs that haven't acted yet.
-            # Severe hypo (<55) bypasses the refractory — symptomatic patient
-            # keeps eating until BG is safely up, matching real-life rescue
-            # behavior. Without the exemption TBR2 doubled because rescue
-            # corrections were blocked.
-            refractory_steps = int(HYPO_CORRECTION_REFRACTORY_MIN / DT_MINUTES)
-            if (not severe_hypo) and (time_idx - s.last_hypo_correction_idx < refractory_steps):
+            # Severe hypo (<55) uses a SHORTER refractory (10 min) rather than
+            # bypassing entirely — symptomatic patients still rage-eat multiple
+            # times if BG stays low, but rule-of-15 says wait between doses so
+            # the first rescue's carbs can start acting. Without the gap the
+            # CGM-check bypass let the patient stack 3-5 rage doses in 10-15 min,
+            # then overshoot to 140-180 (visible sawtooth). A full bypass also
+            # broke TBR2 when stacked carbs produced post-correction crashes.
+            refractory_min = SEVERE_HYPO_REFRACTORY_MIN if severe_hypo else HYPO_CORRECTION_REFRACTORY_MIN
+            refractory_steps = int(refractory_min / DT_MINUTES)
+            if time_idx - s.last_hypo_correction_idx < refractory_steps:
                 return
 
             severity = max(0, eff_low_thresh - s.bg_observed)
@@ -1498,6 +1516,22 @@ class T1DMSimulator:
             curve = gamma_curve(correction_grams, k, theta, duration)
             self.inject_curve(curve, time_idx, 'correction_carb',
                               f'Hypo correction {correction_grams:.0f}g')
+            # Slow-carb follow-up snack: standard clinical advice after a
+            # rescue is "treat the low, then eat a small carb+protein snack"
+            # to keep glucose coming while the active bolus continues to act.
+            # Without this the sawtooth recurs: BG climbs from the fast carbs,
+            # then drops again 60-90 min later when fast carbs are gone but
+            # the meal bolus is still working. Skill-gated — only attentive
+            # patients remember the follow-up; low-skill patients just eat the
+            # fast carbs and re-hypo. Amount scales with the rescue dose so
+            # severe-hypo cascades get a proportional tail.
+            if skill_avg > HYPO_FOLLOWUP_SKILL_THRESHOLD:
+                followup_grams = correction_grams * HYPO_FOLLOWUP_FRACTION
+                fk = HYPO_FOLLOWUP_GAMMA_K
+                ft = HYPO_FOLLOWUP_GAMMA_THETA
+                followup_curve = gamma_curve(followup_grams, fk, ft, fk * ft * 4)
+                self.inject_curve(followup_curve, time_idx, 'correction_carb',
+                                  f'Hypo followup {followup_grams:.0f}g slow')
             s.last_hypo_correction_idx = time_idx
 
             # Scale down basal insulin for the next ~90 min after any hypo
