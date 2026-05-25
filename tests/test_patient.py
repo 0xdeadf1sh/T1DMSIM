@@ -36,10 +36,18 @@ class TestSkillRange:
                     f"seed={seed}: {attr}={val:.3f} outside [{SKILL_MIN}, {SKILL_MAX}]")
 
     def test_skills_span_reasonable_range(self):
-        """With many seeds, we see both low and high skill patients."""
+        """The patient population must cover a wide skill spread, not cluster
+        near the mean. Empirical distribution over 500 seeds:
+        mean=0.49, std=0.15, min=0.25 (clamp), max=0.86. Bounds set so a
+        degenerate generator that produced near-constant skills would fail
+        but the real distribution comfortably passes."""
         skills = [make_patient(s).dietary_discipline for s in range(200)]
-        assert min(skills) < 0.63, "Never generated low-skill patients"
-        assert max(skills) > 0.70, "Never generated high-skill patients"
+        assert min(skills) < 0.40, (
+            f"No clearly low-skill patients generated (min={min(skills):.3f})")
+        assert max(skills) > 0.72, (
+            f"No clearly high-skill patients generated (max={max(skills):.3f})")
+        assert np.std(skills) > 0.10, (
+            f"Skill distribution too narrow (std={np.std(skills):.3f})")
 
 
 class TestPhysiologicalParameters:

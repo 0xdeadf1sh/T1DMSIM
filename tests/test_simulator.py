@@ -24,7 +24,7 @@ from simulator import (
     bolus_pk_for_dose, BOLUS_DIA_BASE_HOURS, BOLUS_DIA_MIN_HOURS, BOLUS_DIA_MAX_HOURS,
     GLYCOGEN_CAPACITY_GRAMS, DT_MINUTES,
     SEVERE_HYPO_REFRACTORY_MIN, HYPO_FOLLOWUP_SKILL_THRESHOLD,
-    STEPS_PER_DAY,
+    SEVERE_HYPO_THRESHOLD, ActiveCurve, STEPS_PER_DAY,
 )
 
 
@@ -332,16 +332,28 @@ class TestSevereHypoRefractory:
 
         sim._check_and_correct(idx)
         first_idx = sim.state.last_hypo_correction_idx
-        if first_idx != idx:
-            return  # patient's eff_low_thresh may exclude 62 — skip silently
+        # eff_low_thresh = 70 + 18*skill_avg ≥ 70, so 62 always triggers.
+        assert first_idx == idx, (
+            f"moderate-hypo correction failed to fire (last_hypo_correction_idx={first_idx})")
 
-        # 11 min later — within 20-min moderate refractory, must block
-        idx2 = idx + int(11 / DT_MINUTES)
+        # 15 min later — within 20-min moderate refractory, must block.
+        # (15 not 11: int(11/5)=2 steps=10 min, which is *outside* the 10-min
+        # severe gate too — the test would pass regardless of which refractory
+        # is selected. 15 min is inside 20-min but outside 10-min.)
+        idx2 = idx + int(15 / DT_MINUTES)
         sim.state.bg = sim.state.bg_observed = 62.0
         sim.state.last_cgm_check_idx = -9999
         sim._check_and_correct(idx2)
         assert sim.state.last_hypo_correction_idx == first_idx, (
-            "moderate hypo fired within 20 min — wrong refractory used")
+            "moderate hypo fired within 20 min — severe refractory used instead")
+
+        # 25 min later — outside 20-min refractory, must release.
+        idx3 = idx + int(25 / DT_MINUTES)
+        sim.state.bg = sim.state.bg_observed = 62.0
+        sim.state.last_cgm_check_idx = -9999
+        sim._check_and_correct(idx3)
+        assert sim.state.last_hypo_correction_idx == idx3, (
+            "moderate hypo did not re-fire after 25 min — refractory stuck")
 
 
 class TestHypoFollowupSnack:
@@ -389,3 +401,187 @@ class TestHypoFollowupSnack:
         labels = [c.label for c in new_curves]
         assert not any('followup' in l.lower() for l in labels), (
             f"low-skill patient got followup unexpectedly: {labels}")
+
+    def test_followup_lifts_post_correction_bg_trace(self):
+        """The followup snack must measurably raise BG over the post-correction
+        window vs an otherwise-identical patient who skips the followup. This
+        is the structural test for CLAUDE.md's warning that removing the tail
+        re-opens 6+ hour dangerous hypos."""
+        def run(skill: float) -> np.ndarray:
+            sim = T1DMSimulator(seed=3)
+            p = sim.patient
+            p.attentiveness = skill
+            p.dosing_competence = skill
+            sim._pending_events = []
+            sim.state.active_curves = []
+            sim.state.is_sick = False
+            sim.generate()
+            idx = sim.state.current_idx
+            s = sim.state
+            s.bg = 40.0
+            s.bg_observed = 40.0
+            s.last_cgm_check_idx = -9999
+            s.last_hypo_correction_idx = -9999
+            sim._today_wake_idx = 0
+            sim._today_sleep_idx = idx + STEPS_PER_DAY
+            sim._check_and_correct(idx)
+            bgs = []
+            for _ in range(120 // DT_MINUTES):
+                step = sim.generate()
+                bgs.append(float(step['bg']))
+            return np.array(bgs)
+
+        bgs_with = run(0.9)   # skill above HYPO_FOLLOWUP_SKILL_THRESHOLD
+        bgs_without = run(HYPO_FOLLOWUP_SKILL_THRESHOLD - 0.05)  # below
+
+        # With-followup trace should be higher on average over the 2h window:
+        # the followup tail keeps glucose flowing while the rescue burst fades.
+        assert bgs_with.mean() > bgs_without.mean() + 5.0, (
+            f"followup did not lift the post-correction trace meaningfully: "
+            f"with={bgs_with.mean():.1f}, without={bgs_without.mean():.1f}")
+        # And the minimum dip should be less severe with followup.
+        assert bgs_with.min() > bgs_without.min(), (
+            f"followup did not raise the post-correction minimum: "
+            f"with_min={bgs_with.min():.1f}, without_min={bgs_without.min():.1f}")
+
+
+class TestSevereHypoRescueAmount:
+    """CLAUDE.md structural rule: severe hypo triggers a non-probabilistic
+    >=14g rescue that grows linearly with deficit (14 + 0.35 * deficit).
+    The grams floor is what keeps severe episodes <= 1h."""
+
+    def _force_correction_and_get_grams(self, sim, target_bg):
+        sim.generate()
+        idx = sim.state.current_idx
+        s = sim.state
+        s.bg = target_bg
+        s.bg_observed = target_bg
+        s.last_cgm_check_idx = -9999
+        s.last_hypo_correction_idx = -9999
+        sim._today_wake_idx = 0
+        sim._today_sleep_idx = idx + STEPS_PER_DAY
+        before = {id(c) for c in s.active_curves}
+        sim._check_and_correct(idx)
+        rescues = [c for c in s.active_curves
+                   if c.curve_type == 'correction_carb'
+                   and id(c) not in before
+                   and 'followup' not in c.label.lower()]
+        assert len(rescues) == 1, (
+            f"expected exactly one rescue curve, got {len(rescues)}: "
+            f"{[c.label for c in rescues]}")
+        return float(np.sum(rescues[0].values))
+
+    def test_rescue_minimum_is_at_least_14g(self):
+        """Severe hypo with tiny deficit should still rescue with >=14g."""
+        sim = T1DMSimulator(seed=0)
+        # BG just below threshold: deficit ~= 0
+        g = self._force_correction_and_get_grams(sim, SEVERE_HYPO_THRESHOLD - 0.5)
+        assert g >= 14.0 - 1e-6, (
+            f"rescue at BG={SEVERE_HYPO_THRESHOLD-0.5} returned {g:.2f}g, "
+            f"below the 14g floor")
+
+    def test_rescue_grams_grow_with_deficit(self):
+        """Deeper hypo must yield strictly more carbs (deficit-driven term)."""
+        # Use the same patient (same seed) so skill multiplier is constant.
+        sim_shallow = T1DMSimulator(seed=4)
+        sim_deep = T1DMSimulator(seed=4)
+        g_shallow = self._force_correction_and_get_grams(sim_shallow, 50.0)
+        g_deep = self._force_correction_and_get_grams(sim_deep, 30.0)
+        # Difference attributable to deficit term:
+        # delta_deficit = (54-30) - (54-50) = 20, so delta_g should be ~= 0.35 * 20 = 7g
+        assert g_deep > g_shallow + 3.0, (
+            f"BG=30 rescue ({g_deep:.2f}g) should clearly exceed BG=50 "
+            f"rescue ({g_shallow:.2f}g) per the 14 + 0.35*deficit formula")
+
+
+class TestHypoCorrectionSkillScaling:
+    """CLAUDE.md structural rule: hypo correction grams scale with skill
+    (skill_avg = (s2+s3)/2). Without this, high-skill patients
+    under-correct and the population TBR ceiling sticks at ~30%."""
+
+    def _moderate_hypo_grams(self, sim, attentiveness, dosing):
+        p = sim.patient
+        p.attentiveness = attentiveness
+        p.dosing_competence = dosing
+        # Cancel the rage-eat random branch by raising BG above
+        # RAGE_EAT_BG_THRESHOLD but keeping it below eff_low_thresh.
+        sim.generate()
+        idx = sim.state.current_idx
+        s = sim.state
+        s.bg = 65.0
+        s.bg_observed = 65.0
+        s.last_cgm_check_idx = -9999
+        s.last_hypo_correction_idx = -9999
+        sim._today_wake_idx = 0
+        sim._today_sleep_idx = idx + STEPS_PER_DAY
+        before = {id(c) for c in s.active_curves}
+        sim._check_and_correct(idx)
+        rescues = [c for c in s.active_curves
+                   if c.curve_type == 'correction_carb'
+                   and id(c) not in before
+                   and 'followup' not in c.label.lower()]
+        assert len(rescues) == 1, (
+            f"expected one rescue curve, got {len(rescues)}")
+        return float(np.sum(rescues[0].values))
+
+    def test_high_skill_corrects_with_more_grams(self):
+        """High-skill (skill_avg=0.9) > low-skill (skill_avg=0.3) by the
+        (1 + 1.5*skill_avg) multiplier — ratio ~= 2.35/1.45 ~= 1.6×."""
+        sim_low = T1DMSimulator(seed=0)
+        sim_high = T1DMSimulator(seed=0)  # same patient, only skills overridden
+        g_low = self._moderate_hypo_grams(sim_low, 0.3, 0.3)
+        g_high = self._moderate_hypo_grams(sim_high, 0.9, 0.9)
+        assert g_high > g_low, (
+            f"high-skill correction ({g_high:.2f}g) should exceed low-skill "
+            f"({g_low:.2f}g) per the (1 + 1.5*skill_avg) multiplier")
+        # Expected: low ~ HYPO_CORRECTION_BASE_GRAMS * 1.45,
+        # high ~ HYPO_CORRECTION_BASE_GRAMS * 2.35 — ratio ~= 1.6.
+        # Allow slack for the panic-factor severity term.
+        assert g_high / g_low > 1.25, (
+            f"ratio {g_high/g_low:.2f} too small — skill multiplier may be flat")
+
+
+class TestInjectCurveUpdatesTotals:
+    """CLAUDE.md: 'Use inject_curve() (not state.active_curves.append) whenever
+    inserting curves from outside generate().' Raw append leaves the
+    pre-accumulated _carb/_basal/_bolus/_exercise totals stale, so per-step
+    reads silently drop the contribution. This test pins that contract."""
+
+    def test_inject_curve_changes_bg_response(self):
+        """A carb curve injected via inject_curve must visibly raise BG;
+        the same curve appended raw to active_curves must NOT (because the
+        totals arrays — which drive the per-step reads — stay untouched)."""
+        # Path A: use inject_curve
+        sim_a = T1DMSimulator(seed=11, initial_bg=120.0)
+        for _ in range(10):
+            sim_a.generate()
+        bg_before_a = sim_a.state.bg
+        curve = gamma_curve(60.0, FAST_CARB_K, FAST_CARB_THETA, 120.0)
+        sim_a.inject_curve(curve, sim_a.state.current_idx, 'carb', 'injected')
+        for _ in range(12):
+            sim_a.generate()
+        delta_a = sim_a.state.bg - bg_before_a
+
+        # Path B: raw append (the contract violation)
+        sim_b = T1DMSimulator(seed=11, initial_bg=120.0)
+        for _ in range(10):
+            sim_b.generate()
+        bg_before_b = sim_b.state.bg
+        sim_b.state.active_curves.append(ActiveCurve(
+            start_time_idx=sim_b.state.current_idx,
+            values=curve.copy(),
+            curve_type='carb',
+            label='raw-append',
+        ))
+        for _ in range(12):
+            sim_b.generate()
+        delta_b = sim_b.state.bg - bg_before_b
+
+        # Path A should produce a real BG rise; path B should not (because the
+        # carb contribution is read from _carb_totals, which raw append doesn't
+        # update). This is the bug-class the CLAUDE.md warning prevents.
+        assert delta_a > delta_b + 10.0, (
+            f"inject_curve effect (Δ={delta_a:+.1f}) should clearly exceed "
+            f"raw-append effect (Δ={delta_b:+.1f}). Either the totals arrays "
+            f"are being bypassed, or raw append is being silently honored — "
+            f"both violate the documented contract.")

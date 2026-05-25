@@ -314,10 +314,10 @@ To reproduce the figures and the underlying numbers, run `scripts/generate_compa
 python -m pytest tests/ -v
 ```
 
-The test suite (45 tests) covers:
+The test suite (54 tests) covers:
 - `tests/test_curves.py` — curve generation correctness and unit consistency
 - `tests/test_patient.py` — skill ranges, basal/HGO/ICR relationship, behavioral parameters
-- `tests/test_simulator.py` — reproducibility, BG bounds, meal/insulin effects, weekday/weekend/holiday
+- `tests/test_simulator.py` — reproducibility, BG bounds, meal/insulin effects, weekday/weekend/holiday, severe-hypo rescue grams, skill-scaled correction, `inject_curve` totals contract, follow-up snack effect
 - `tests/test_balance.py` — basal-HGO balance, meal-bolus balance, ICR-basal proportionality
 
 ## License

@@ -16,9 +16,12 @@ def main():
     parser = argparse.ArgumentParser(description='Batch test BG distributions')
     parser.add_argument('--seeds', type=int, default=20, help='Number of seeds to test')
     parser.add_argument('--hours', type=float, default=72, help='Hours to simulate per seed')
+    parser.add_argument('--warmup-hours', type=float, default=24.0,
+                        help='Warmup hours discarded before stats are computed')
     args = parser.parse_args()
 
-    print(f"Testing {args.seeds} seeds, {args.hours}h each")
+    print(f"Testing {args.seeds} seeds, {args.hours}h each "
+          f"(after {args.warmup_hours}h warmup)")
     print(f"{'Seed':>5} {'Min':>5} {'Max':>5} {'Mean':>6} {'Std':>6} {'TIR%':>5} "
           f"{'TBR%':>5} {'TAR%':>5} {'s1':>5} {'s2':>5} {'s3':>5} {'s4':>5}")
     print("-" * 85)
@@ -26,8 +29,10 @@ def main():
     all_tir = []
     for seed in range(args.seeds):
         sim = T1DMSimulator(seed=seed)
+        if args.warmup_hours > 0:
+            sim.generate_hours(args.warmup_hours)
         data = sim.generate_hours(args.hours)
-        bg = data['bg']
+        bg = data['bg_observed']
 
         tir = np.mean((bg >= 70) & (bg <= 180)) * 100
         tbr = np.mean(bg < 70) * 100

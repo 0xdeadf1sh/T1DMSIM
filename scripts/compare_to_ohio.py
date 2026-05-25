@@ -26,6 +26,7 @@ OHIO_DIR = os.path.join(REPO_ROOT, 'ohiot1dm')
 STEP_MIN = 5
 N_SEEDS = 40
 DAYS = 70
+WARMUP_HOURS = 24  # sim starts at initial_bg=140 and needs ~24h to reach steady state
 
 
 def load_ohio() -> dict:
@@ -226,12 +227,16 @@ def run_ohio() -> dict:
 
 def run_sim(n_seeds: int = N_SEEDS, days: int = DAYS) -> dict:
     per = {}
-    steps = days * 24 * 12
+    steps_per_hour = 60 // STEP_MIN
+    warmup_steps = WARMUP_HOURS * steps_per_hour
+    steps = days * 24 * steps_per_hour
     for seed in range(n_seeds):
         s = sim.T1DMSimulator(seed=seed, initial_bg=140.0)
+        for _ in range(warmup_steps):
+            s.generate()
         bg = np.zeros(steps)
         for i in range(steps):
-            bg[i] = float(s.generate()['bg'])  # pyright: ignore[reportArgumentType]
+            bg[i] = float(s.generate()['bg_observed'])  # pyright: ignore[reportArgumentType]
         start = datetime(2025, 1, 6, 0, 0)
         times = np.array([start + timedelta(minutes=STEP_MIN * i) for i in range(steps)])
         per[f'seed{seed}'] = stat_block(times, bg)

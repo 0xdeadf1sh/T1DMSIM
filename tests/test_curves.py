@@ -88,14 +88,19 @@ class TestBasalCurve:
         assert curve[-1] < curve[mid], "Curve should ramp down to zero"
 
     def test_units_compatible_with_gamma_curve(self):
-        """Both curves produce values in amount-per-step units (not rate units)."""
-        # gamma_curve: sum = total_amount
-        # basal_curve: sum = total_amount
-        # Both should be in grams-per-step so they can be directly added
+        """Both curves produce values in amount-per-step units (not rate units).
+
+        Catches the bug class where someone passes a rate (e.g. units/hour)
+        as total_amount — that would inflate the per-step mean by ~10× for
+        gamma and ~60× for basal. Bounds are tight to actually catch this.
+        """
         gamma = gamma_curve(40.0, k=2.0, theta=15.0, duration_minutes=120.0)
         basal = basal_curve(total_amount=20.0, duration_minutes=1560.0)
-        # Verify magnitudes are comparable (both are grams per 5-min step)
-        # gamma: 40g over 120min = 24 steps → ~1.67g/step average
-        # basal: 20g over 1560min = 312 steps → ~0.064g/step average
-        assert gamma.mean() < 10.0 and basal.mean() < 10.0, (
-            "Curve values appear to be in wrong units (too large)")
+        # gamma: 40g over 120min = 24 steps → exactly 40/24 = 1.667 g/step mean
+        expected_gamma_mean = 40.0 / (120.0 / DT_MINUTES)
+        assert abs(gamma.mean() - expected_gamma_mean) < 1e-6, (
+            f"gamma mean {gamma.mean():.4f} != expected {expected_gamma_mean:.4f}")
+        # basal: 20U over 1560min = 312 steps → exactly 20/312 = 0.0641 U/step mean
+        expected_basal_mean = 20.0 / (1560.0 / DT_MINUTES)
+        assert abs(basal.mean() - expected_basal_mean) < 1e-6, (
+            f"basal mean {basal.mean():.4f} != expected {expected_basal_mean:.4f}")

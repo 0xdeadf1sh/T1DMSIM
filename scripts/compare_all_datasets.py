@@ -310,14 +310,16 @@ def main(n_seeds: int = 30, days: int = 70):
                          regularize_bg_15min, shanghai_event_rates, step_min=15)
     print(f'  {len(shang["per"])} records')
 
-    print(f'Running T1DMSIM: {n_seeds} seeds × {days}d...')
+    print(f'Running T1DMSIM: {n_seeds} seeds × {days}d (24h warmup discarded)...')
     sim_per = []
     sim_pooled = []
     sim_diurnals = []
     sim_hypo_durs: list = []
     sim_hyper_durs: list = []
+    warmup_hours = 24
     for seed in range(n_seeds):
         s = TappedSimulator(seed=seed, initial_bg=120.0)
+        s.generate_hours(warmup_hours)  # discard transient before steady state
         data = s.generate_hours(days * 24)
         bg = np.asarray(data['bg_observed'])
         t0 = datetime(2024, 1, 1)
