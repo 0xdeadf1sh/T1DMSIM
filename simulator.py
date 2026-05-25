@@ -87,8 +87,10 @@ MIXED_MEAL_MED_WEIGHT_BASE = 0.4  # Base weight for medium-speed components
 # Insulin sensitivity
 IS_BASE_MEAN = 1.0
 IS_BASE_SIGMA = 0.2
-IS_DAILY_DRIFT_SIGMA = 0.16  # Day-to-day drift (scaled per-patient by (1.5 - s4))
-IS_FAST_NOISE_SIGMA = 0.04  # Step-to-step noise
+IS_DAILY_DRIFT_SIGMA = 0.10  # Day-to-day drift (scaled per-patient by (1.5 - s4)). Lowered from 0.16 —
+                             # 16% day-to-day IS swings produced sim CV of 49% vs real 36%, pushing TBR1
+                             # well above OhioT1DM's ~3%.
+IS_FAST_NOISE_SIGMA = 0.025  # Step-to-step noise (was 0.04 — same reason).
 IS_DAWN_PHASE_DAILY_SIGMA = 1.5  # Hours of day-to-day variation in dawn phenomenon timing
 IS_DRIFT_TRANSITION_HOURS = 4.0  # Smooth blend across midnight from prev to today's drift/phase
 
@@ -114,8 +116,11 @@ ILLNESS_IS_RAMP_RATE = 0.4  # How fast illness IS factor changes per day (0 to 1
 
 # Basal insulin (long-acting)
 # Note: ideal basal dose is derived from HGO and ICR in generate_patient().
-BASAL_DOSE_SIGMA = 4.5  # Sigma around the HGO/ICR-derived ideal dose
-BASAL_DOSE_COMPETENCE_NOISE = 0.25  # Relative noise, scaled by 1/s3
+BASAL_DOSE_SIGMA = 4.5  # Sigma around the HGO/ICR-derived ideal dose (inter-patient)
+BASAL_DOSE_COMPETENCE_NOISE = 0.15  # Day-to-day relative noise on basal dose, scaled by 1/s3.
+                                    # Lowered from 0.25 — at 0.25, low-skill patients saw 22%
+                                    # day-to-day basal swings that pushed TBR1 well above the
+                                    # OhioT1DM ~3% target.
 BASAL_DURATION_HOURS = 28.0  # Duration of action
 BASAL_MISS_PROB_BASE = 0.10  # Base probability of missing basal dose
 BASAL_MISS_SKILL_SCALE = 5.0  # How much skills reduce miss probability
@@ -141,18 +146,25 @@ BOLUS_TIMING_COMPETENT_MEAN = -20.0  # Minutes before meal (negative = before)
 BOLUS_TIMING_INCOMPETENT_MEAN = 15.0  # Minutes after meal
 BOLUS_TIMING_SIGMA_BASE = 5.0  # Base timing variance
 
-# Carb counting error
-CARB_COUNT_ERROR_SIGMA_BASE = 0.60  # Relative error, scaled by 1/s3
+# Carb counting error. Lowered from 0.60 → 0.35 when OhioT1DM target (~3% TBR) replaced
+# the earlier ~10% TBR target — the high sigma was the dominant source of meal-bolus
+# crashes pushing TBR1 well above real-world.
+CARB_COUNT_ERROR_SIGMA_BASE = 0.35  # Relative error, scaled by 1/s3
 
 # Insulin stacking
 CGM_CHECK_INTERVAL_ATTENTIVE = 20  # Minutes between checks for attentive patient
 CGM_CHECK_INTERVAL_INATTENTIVE = 240  # Minutes for inattentive patient
-PATIENCE_TIME_COMPETENT = 240  # Minutes before re-correcting (competent)
+PATIENCE_TIME_COMPETENT = 120  # Minutes before re-correcting (competent). Tightened from 240 — IOB-aware
+                               # correction sizing keeps rebound bounded, and real T1D pump users typically
+                               # correct every 2h when high. With 240, sim averaged 0.2 corr/day vs real ~2.
 PATIENCE_TIME_INCOMPETENT = 60  # Minutes before re-correcting (incompetent)
 CORRECTION_FACTOR_MEAN = 40.0  # mg/dL drop per unit of insulin
 CORRECTION_FACTOR_SIGMA = 10.0
-BG_TARGET = 130.0  # Target BG for corrections (centered in TIR to avoid hypo overshoot)
-BG_HIGH_THRESHOLD = 210.0  # Threshold to trigger correction
+BG_TARGET = 135.0  # Target BG for corrections. Sits well above the ATTD ideal (~110) — sim correction
+                   # kinetics + delivery lag tend to overshoot, so a higher target keeps median BG
+                   # near the real OhioT1DM ~157 and TBR1 near real's ~3% rather than runaway hypo.
+BG_HIGH_THRESHOLD = 180.0  # Threshold to trigger correction. Back to the ATTD upper-TIR bound from the
+                           # prior defensive 210 (which was set when corrections weren't IOB-aware).
 BG_LOW_THRESHOLD = 60.0  # Threshold for hypo correction
 
 # Hypo correction
@@ -201,8 +213,10 @@ DAWN_HGO_AMPLITUDE_MEAN = 9.0        # Mean peak HGO surge in g/hr (additive)
 DAWN_HGO_AMPLITUDE_SIGMA = 2.0       # Per-patient SD on dawn amplitude — wide so patient diversity is visible
 NIGHT_HGO_DIP_HOUR = 2.0             # Hour of deep-sleep HGO trough
 NIGHT_HGO_DIP_SIGMA_HOURS = 2.5      # Narrower so it ends before dawn surge starts
-NIGHT_HGO_DIP_AMPLITUDE_MEAN = 1.5   # Mean peak HGO reduction in g/hr
-NIGHT_HGO_DIP_AMPLITUDE_SIGMA = 0.4  # Per-patient SD
+NIGHT_HGO_DIP_AMPLITUDE_MEAN = 0.7   # Mean peak HGO reduction in g/hr. Lowered from 1.5 — at 1.5 the dip
+                                     # drove a nocturnal-hypo bulge (hypos peaked 8.9% of time at 3am vs
+                                     # 4% at 2-5pm) far above OhioT1DM's flat-by-hour hypo distribution.
+NIGHT_HGO_DIP_AMPLITUDE_SIGMA = 0.25 # Per-patient SD (scaled with amplitude)
 # Daily-integrated contribution: dawn ≈ 5.0 * 1.5 * √(2π) ≈ 18.8 g/day extra;
 # dip ≈ 1.5 * 2.5 * √(2π) ≈ 9.4 g/day reduction. Net +9.4 g/day glucose-in,
 # which slightly raises mean BG and is intentional — the breakfast bolus
@@ -236,7 +250,8 @@ POSTPRANDIAL_IS_BONUS_HALF = 1.5  # g/step active carb at half-max bonus
 # Injection site quality (lipohypertrophy) — per-dose multiplier on the
 # delivered insulin. Sigma scales inversely with lifestyle_consistency (poor
 # rotation discipline → more variance and occasional poor sites).
-SITE_QUALITY_SIGMA_BASE = 0.28  # Base relative sigma, scaled by (1.5 - s4)
+SITE_QUALITY_SIGMA_BASE = 0.15  # Base relative sigma, scaled by (1.5 - s4). Lowered from 0.28 — at
+                                # 0.28, lucky-site doses delivered 1.4× expected insulin and crashed BG.
 SITE_QUALITY_MIN = 0.5  # Minimum effective absorption multiplier
 SITE_QUALITY_MAX = 1.4  # Maximum (rare absorption surge)
 
@@ -299,9 +314,9 @@ RAGE_EAT_CARB_MIN = 12.0           # Minimum rage eat carbs
 RAGE_EAT_CARB_MAX = 30.0           # Maximum rage eat carbs
 RAGE_EAT_PROBABILITY_BASE = 0.10   # Base chance of rage eating when below threshold
 RAGE_BOLUS_BG_THRESHOLD = 300.0    # Above this, patient may rage bolus
-RAGE_BOLUS_MULTIPLIER_MIN = 1.2    # Minimum dose multiplier during rage bolus
-RAGE_BOLUS_MULTIPLIER_MAX = 2.0    # Maximum dose multiplier during rage bolus
-RAGE_BOLUS_PROBABILITY_BASE = 0.15 # Base chance of rage bolusing when above threshold
+RAGE_BOLUS_MULTIPLIER_MIN = 1.1    # Minimum dose multiplier during rage bolus (was 1.2 — caused crashes)
+RAGE_BOLUS_MULTIPLIER_MAX = 1.5    # Maximum dose multiplier during rage bolus (was 2.0 — caused crashes)
+RAGE_BOLUS_PROBABILITY_BASE = 0.08 # Base chance of rage bolusing when above threshold (was 0.15)
 
 # ============================================================================
 # WEEKDAY / WEEKEND PARAMETERS
@@ -1031,9 +1046,11 @@ class T1DMSimulator:
             # --- Bolus for this meal ---
             carb_estimate = max(0, carb_amount * (1 + self.rng.normal(0, p.carb_count_error_sigma)))
 
+            # Real pump users bolus for almost everything they eat, including
+            # snacks. Skip-prob caps at ~10% for the lowest-skill snackers.
             bolus_skip_prob = 0.0
             if i >= MEALS_BASE:
-                bolus_skip_prob = 0.3 * (1 - eff_s3)
+                bolus_skip_prob = 0.1 * (1 - eff_s3)
 
             if self.rng.random() > bolus_skip_prob and carb_estimate > 0:
                 intended_dose = carb_estimate / p.icr
@@ -1326,9 +1343,12 @@ class T1DMSimulator:
             patience_steps = int(p.patience_time_min / (DT_MINUTES * urgency))
 
             if steps_since_correction >= patience_steps:
-                # IOB-aware correction: skilled patients subtract remaining active insulin
+                # IOB-aware correction: subtract a baseline 70% of expected IOB drop for
+                # everyone (real pump users always see a "remaining active insulin" estimate)
+                # plus a skill-scaled bonus up to 30%. Without the baseline floor, low-skill
+                # patients stacked corrections and crashed (TBR ~10% against OhioT1DM's ~3%).
                 iob_equiv_bg_drop = iob * p.correction_factor
-                iob_consideration = iob_equiv_bg_drop * p.dosing_competence
+                iob_consideration = iob_equiv_bg_drop * (0.7 + 0.3 * p.dosing_competence)
                 adjusted_excess = max(0.0, (s.bg_observed - BG_TARGET) - iob_consideration)
                 correction_dose = adjusted_excess / p.correction_factor
                 correction_dose *= (1 + self.rng.normal(0, p.carb_count_error_sigma * 0.5))
