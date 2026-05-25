@@ -7,11 +7,13 @@ build/
 .eggs/
 *.png
 !screenshots/*.png
+!assets/*.png
 *.npz
 .venv/
 venv/
 env/
 .env
 
-# Real-world dataset (not redistributable)
+# Real-world datasets (not redistributable)
 ohiot1dm/
+ShanghaiT1DM/
