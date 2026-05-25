@@ -376,16 +376,15 @@ NOISE_AR1_INNOV_SENSOR = float(np.sqrt(1.0 - NOISE_AR1_RHO_SENSOR ** 2))
 RARE_EVENT_PROBABILITY = 0.02  # Per-day probability of a rare/chaotic day
 RARE_EVENT_SKILL_REDUCTION = 0.3  # Even skilled people have bad days sometimes
 
-# Hypo correction refractory + nocturnal basal stand-down. Without these, a
-# nocturnal hypo cascades into 3-5 consecutive corrections per night: the first
-# rage-eat hits, BG returns to range, then the forward basal pipeline pulls it
-# low again within 2-3h. Real patients respond to a night hypo by *also*
-# reducing future basal coverage (suspending the pump, skipping the next
-# basal dose) — not just by eating carbs. Real CGM traces don't show this
-# 3-5x cycling but our sim did.
+# Hypo correction refractory + post-hypo basal stand-down. Without the basal
+# stand-down a hypo cascades into 3-5 consecutive corrections (or a sawtooth
+# of snacking) because the forward basal pipeline keeps clearing glucose just
+# as the patient eats to recover. Real patients respond by reducing or
+# suspending basal coverage — for pump users a temp basal / pump suspend,
+# for MDI users skipping the next basal injection — not by stacking carbs.
 HYPO_CORRECTION_REFRACTORY_MIN = 20.0  # Min minutes between hypo corrections.
-NOCTURNAL_BASAL_SUSPEND_DURATION_HOURS = 1.5  # Scale-down window after a sleep-time hypo.
-NOCTURNAL_BASAL_SUSPEND_FACTOR = 0.5           # Basal contribution multiplier while suspended.
+POST_HYPO_BASAL_SUSPEND_DURATION_HOURS = 1.0  # Scale-down window after any hypo correction.
+POST_HYPO_BASAL_SUSPEND_FACTOR = 0.5           # Basal contribution multiplier while suspended.
 
 # Rage behavior
 RAGE_EAT_BG_THRESHOLD = 50.0       # Below this, patient may rage eat
@@ -563,7 +562,7 @@ class SimulatorState:
     glucotox_bg_ema: float = 120.0  # 6h EMA of true BG, drives glucotoxic IR
     # Hypo correction tracking (see HYPO_CORRECTION_REFRACTORY_MIN).
     last_hypo_correction_idx: int = -9999
-    nocturnal_basal_suspend_until_idx: int = -1
+    post_hypo_basal_suspend_until_idx: int = -1
 
 
 # ============================================================================
@@ -1501,15 +1500,16 @@ class T1DMSimulator:
                               f'Hypo correction {correction_grams:.0f}g')
             s.last_hypo_correction_idx = time_idx
 
-            # If this correction fired during sleep, scale down basal insulin
-            # for the next ~90 min. Real patients respond to a night hypo by
-            # *also* suspending the pump / skipping basal, not just eating —
-            # without this, forward basal pulled BG low again 2-3h later and
-            # produced 3-5 consecutive nocturnal hypo cycles per night.
-            if not is_awake:
-                suspend_steps = int(NOCTURNAL_BASAL_SUSPEND_DURATION_HOURS * 60 / DT_MINUTES)
-                s.nocturnal_basal_suspend_until_idx = max(
-                    s.nocturnal_basal_suspend_until_idx, time_idx + suspend_steps)
+            # Scale down basal insulin for the next ~90 min after any hypo
+            # correction (awake or asleep). Real patients respond to a hypo by
+            # also reducing future basal coverage — pump suspend / temp basal
+            # for pump users, skipping the next basal injection for MDI — not
+            # just by eating. Without this scale-down the forward basal pipeline
+            # keeps clearing glucose as fast as the patient eats, producing a
+            # sawtooth of repeated snacks that never bring BG back to range.
+            suspend_steps = int(POST_HYPO_BASAL_SUSPEND_DURATION_HOURS * 60 / DT_MINUTES)
+            s.post_hypo_basal_suspend_until_idx = max(
+                s.post_hypo_basal_suspend_until_idx, time_idx + suspend_steps)
 
             # After a SEVERE hypo correction, recheck soon (don't wait the full
             # CGM interval). Mild hypos keep the normal cadence so they linger
@@ -1619,10 +1619,10 @@ class T1DMSimulator:
         total_carb = float(self._carb_totals[idx]) if idx < len(self._carb_totals) else 0.0
         basal_step = float(self._basal_totals[idx]) if idx < len(self._basal_totals) else 0.0
         bolus_step = float(self._bolus_totals[idx]) if idx < len(self._bolus_totals) else 0.0
-        # Nocturnal basal stand-down (set by _check_cgm_and_correct after a
-        # sleep-time hypo correction).
-        if idx < s.nocturnal_basal_suspend_until_idx:
-            basal_step *= NOCTURNAL_BASAL_SUSPEND_FACTOR
+        # Post-hypo basal stand-down (set by _check_cgm_and_correct after any
+        # hypo correction). Represents pump suspend / next-basal skip behavior.
+        if idx < s.post_hypo_basal_suspend_until_idx:
+            basal_step *= POST_HYPO_BASAL_SUSPEND_FACTOR
         total_insulin = basal_step + bolus_step
         total_exercise = float(self._exercise_totals[idx]) if idx < len(self._exercise_totals) else 0.0
 
