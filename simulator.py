@@ -203,8 +203,13 @@ EXERCISE_PROBABILITY_BASE = 0.3  # Base daily probability
 EXERCISE_SKILL_BONUS = 0.4  # Added probability from s4
 EXERCISE_TIME_MEAN_OFFSET_HOURS = 9.0  # Typical time: wake + 9h (afternoon/evening)
 EXERCISE_TIME_SIGMA_HOURS = 2.0
-EXERCISE_DURATION_MEAN_MIN = 40.0
-EXERCISE_DURATION_SIGMA_MIN = 15.0
+EXERCISE_DURATION_MEAN_MIN = 75.0       # Population-mean session length. Real OhioT1DM mean ≈ 86 min,
+                                        # σ across patients ≈ 57; the previous 40-min mean represented
+                                        # only short walkers. Each patient now samples their own mean
+                                        # from N(75, 45) so the population spans walkers to cyclists.
+EXERCISE_DURATION_MEAN_SIGMA_MIN = 45.0  # σ for the per-patient mean (across-patient spread)
+EXERCISE_DURATION_MEAN_MIN_CLAMP = (15.0, 200.0)
+EXERCISE_DURATION_SIGMA_MIN = 20.0       # Within-patient day-to-day session-length variance
 EXERCISE_CARB_EQUIV_PER_MIN = 0.5  # Negative carb equivalent per minute of exercise
 EXERCISE_GAMMA_K = 3.0
 EXERCISE_GAMMA_THETA = 15.0
@@ -443,6 +448,7 @@ class PatientProfile:
     basal_dose: float = 20.0
     dawn_hgo_amplitude: float = DAWN_HGO_AMPLITUDE_MEAN
     night_hgo_dip_amplitude: float = NIGHT_HGO_DIP_AMPLITUDE_MEAN
+    exercise_duration_mean_min: float = EXERCISE_DURATION_MEAN_MIN
 
     # Derived behavioral parameters
     wake_time_hours: float = 8.0
@@ -641,6 +647,9 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     profile.correction_factor = max(10.0, rng.normal(CORRECTION_FACTOR_MEAN, CORRECTION_FACTOR_SIGMA) / ir)
     profile.dawn_hgo_amplitude = max(0.0, rng.normal(DAWN_HGO_AMPLITUDE_MEAN, DAWN_HGO_AMPLITUDE_SIGMA))
     profile.night_hgo_dip_amplitude = max(0.0, rng.normal(NIGHT_HGO_DIP_AMPLITUDE_MEAN, NIGHT_HGO_DIP_AMPLITUDE_SIGMA))
+    profile.exercise_duration_mean_min = float(np.clip(
+        rng.normal(EXERCISE_DURATION_MEAN_MIN, EXERCISE_DURATION_MEAN_SIGMA_MIN),
+        *EXERCISE_DURATION_MEAN_MIN_CLAMP))
 
     # Ideal basal balances 24h of HGO at the patient's own insulin sensitivity:
     # at steady state, glucose_out = total_insulin * ICR / IS must equal HGO,
@@ -1125,7 +1134,7 @@ class T1DMSimulator:
             ex_offset = self.rng.normal(EXERCISE_TIME_MEAN_OFFSET_HOURS, EXERCISE_TIME_SIGMA_HOURS)
             ex_time = today_wake + ex_offset
             ex_idx = max(self.state.current_idx, day_start_idx + int(ex_time * 60 / DT_MINUTES))
-            ex_duration = max(10.0, self.rng.normal(EXERCISE_DURATION_MEAN_MIN, EXERCISE_DURATION_SIGMA_MIN))
+            ex_duration = max(10.0, self.rng.normal(p.exercise_duration_mean_min, EXERCISE_DURATION_SIGMA_MIN))
             ex_magnitude = ex_duration * EXERCISE_CARB_EQUIV_PER_MIN
             ex_curve_duration = ex_duration + 90
             ex_curve = gamma_curve(ex_magnitude, EXERCISE_GAMMA_K, EXERCISE_GAMMA_THETA, ex_curve_duration)
