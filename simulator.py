@@ -42,7 +42,8 @@ MEALS_BASE = 3  # Base number of meals per day
 MEALS_EXTRA_LAMBDA = 2.0  # Extra meals Poisson lambda, scaled by (1 - s1)
 MEAL_TIME_OFFSETS_HOURS = [0.5, 5.0, 11.0]  # Breakfast, lunch, dinner offset from wake
 MEAL_TIME_JITTER_BASE_MIN = 15.0  # Base jitter in minutes, scaled by 1/s4
-MEAL_CARB_MEANS = [40.0, 55.0, 65.0]  # Mean carbs (g) per meal slot
+MEAL_CARB_MEANS = [48.0, 63.0, 75.0]  # Mean carbs (g) per meal slot. Bumped ~15% from 40/55/65
+                                       # in P5 to close the 25 g/day shortfall vs OhioT1DM (193 g/day).
 MEAL_CARB_SIGMA = 22.0  # Sigma for carb amount
 MEAL_CARB_DISCIPLINE_SCALE = 0.7  # How much s1 reduces carb intake
 SNACK_CARB_MEAN = 20.0
@@ -149,7 +150,11 @@ BASAL_DOSE_COMPETENCE_NOISE = 0.15  # Day-to-day relative noise on basal dose, s
 BASAL_DURATION_HOURS = 28.0  # Duration of action
 BASAL_MISS_PROB_BASE = 0.10  # Base probability of missing basal dose
 BASAL_MISS_SKILL_SCALE = 5.0  # How much skills reduce miss probability
-BASAL_CORRECTION_MAX_ADJUSTMENT = 0.12  # Max % a patient will adjust basal in one day
+BASAL_CORRECTION_MAX_ADJUSTMENT = 0.22  # Max % a patient will adjust basal vs base dose in one day.
+                                        # Raised from 0.12 in P5 — under-dosed IR patients couldn't
+                                        # break out of stuck-high BG (mean BG >200 for entire weeks)
+                                        # at 0.12, even averaging over 7 days. 0.22 lets a chronic-high
+                                        # patient effectively dose 22% above base within their cadence.
 BASAL_RAMP_UP_HOURS = 3.0 # How long it will take before basal insulin peaks in the bloodstream
 BASAL_RAMP_DOWN_HOURS = 4.0 # How long it will take before basal insulin decays completely (from peak)
 
@@ -494,6 +499,13 @@ class SimulatorState:
     last_correction_idx: int = -9999
     last_cgm_check_idx: int = 0
     day_number: int = 0
+    # Persistent multi-day basal-dose drift. Each day the reactive
+    # basal_adjustment (limited to ±22% on a 3-day rolling mean) leaks a
+    # small fraction into this multiplier, so chronically over- or under-
+    # dosed patients permanently shift their base dose over a few weeks
+    # (matches real-world clinic-driven basal program updates). Initialized
+    # to 1.0 = no offset. Bounded in _generate_day_events.
+    basal_dose_drift: float = 1.0
     is_rare_event_day: bool = False
     illness_is_target: float = 1.0
     # Weekday/weekend/holiday tracking
@@ -959,27 +971,50 @@ class T1DMSimulator:
         # --- Basal insulin ---
         basal_time_idx = max(self.state.current_idx, wake_idx + int(self.rng.normal(0, 30) / DT_MINUTES))
         # Slow basal adjustment based on recent BG history (patient learns over days).
-        # Tight dead-band (110-130) around the TIR midpoint — without this, a
-        # persistently low-but-not-hypo mean (e.g. 95 mg/dL) never triggers a
-        # downward basal adjustment, so sensitive skilled patients spend ~30% in
-        # TBR forever.
+        # Uses a 3-day rolling mean so single bad days don't whipsaw the dose,
+        # but persistent over- or under-dosing self-corrects within a couple
+        # weeks. Tight dead-band (110-130) around the TIR midpoint — without
+        # the lower bound a persistently low-but-not-hypo mean (e.g. 95 mg/dL)
+        # never triggers a downward basal adjustment, so sensitive skilled
+        # patients spend ~30% in TBR forever.
         basal_adjustment = 1.0
         if len(self.state.bg_history) > 0:
-            recent_bg = self.state.bg_history[-min(len(self.state.bg_history), STEPS_PER_DAY):]
+            rolling_window = min(len(self.state.bg_history), 3 * STEPS_PER_DAY)
+            recent_bg = self.state.bg_history[-rolling_window:]
             recent_mean = np.mean(recent_bg)
 
             if recent_mean > 130:
+                # Skill scales only partially on the upward path — chronically-high
+                # patients eventually self-correct regardless of skill (clinician
+                # visits, symptoms, fatigue from hyperglycemia). Otherwise low-skill
+                # IR patients get stuck above 220 for weeks.
                 overshoot = min((recent_mean - 130) / 80.0, 1.0)
-                basal_adjustment = 1.0 + overshoot * (BASAL_CORRECTION_MAX_ADJUSTMENT * eff_s3)
+                skill_factor = 0.4 + 0.6 * eff_s3   # baseline 40% + up to 100%
+                basal_adjustment = 1.0 + overshoot * (BASAL_CORRECTION_MAX_ADJUSTMENT * skill_factor)
             elif recent_mean < 110:
+                # Downward path keeps full skill scaling — low-skill patients
+                # tend to ignore mild lows ("just eat something") rather than
+                # cut basal.
                 undershoot = min((110 - recent_mean) / 50.0, 1.0)
                 basal_adjustment = 1.0 - undershoot * (BASAL_CORRECTION_MAX_ADJUSTMENT * eff_s3)
+
+        # Accumulate the reactive adjustment's *delta* into a persistent drift
+        # so multi-week under/over-dosing eventually shifts the base dose well
+        # beyond the per-day cap. A chronically-high patient with daily
+        # adjustment=1.22 adds (1.22 - 1.0) * 0.08 = 0.018 per day, reaching
+        # the 1.8 cap (80% above base) in ~45 days. Combined with the reactive
+        # adjustment that's an effective ~120% boost — enough to break the
+        # most severely under-dosed IR patients out of stuck-high BG.
+        BASAL_DRIFT_ALPHA = 0.08
+        s.basal_dose_drift = float(np.clip(
+            s.basal_dose_drift + BASAL_DRIFT_ALPHA * (basal_adjustment - 1.0),
+            0.4, 1.8))
 
         if self.rng.random() > p.basal_miss_prob:
             # Administer basal — multiplied by injection-site quality for the day
             dose_noise = 1.0 + self.rng.normal(0, BASAL_DOSE_COMPETENCE_NOISE * (1.2 - eff_s3))
             site_q = self._site_quality(eff_s4)
-            actual_dose = max(1.0, p.basal_dose * dose_noise * basal_adjustment * site_q)
+            actual_dose = max(1.0, p.basal_dose * s.basal_dose_drift * dose_noise * basal_adjustment * site_q)
             duration = BASAL_DURATION_HOURS * 60
             curve = basal_curve(float(actual_dose), duration, ramp_up_hours=BASAL_RAMP_UP_HOURS, ramp_down_hours=BASAL_RAMP_DOWN_HOURS)
             self._pending_events.append((basal_time_idx, 'basal', {
