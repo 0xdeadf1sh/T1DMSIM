@@ -75,9 +75,21 @@ Visualizer key bindings are documented in the module docstring at the top of `vi
 ## Testing Approach
 
 - Use multiple seeds (0-20) over 72-hour runs to verify BG distributions
-- Check TIR (time in range 70-180), mean BG, and min/max across seeds
-- A good distribution: most patients TIR 40-80%, mean BG 120-200, rare extremes
-- Verify that skilled patients (high skills) have higher TIR than unskilled ones
+- Check TIR (70-180), TBR (<70), TAR (>180), severe-low (<55), mean BG across seeds
+- Target population averages (n≈100, 96h each): **TBR ~10, TIR ~53, TAR ~37**. Mean BG ~150
+- Hypo episode shape (critical clinical invariant):
+  - Severe-hypo (<55) episodes: max duration ≤ 1h, mean ≤ 0.15h, **zero** > 2h
+  - Mild hypo (55-70) episodes: median ~0.75h, p90 ~1.4h, max ~6-7h (rare outliers)
+  - Population time below 55: mean ≤ 2%, max patient ≤ 6%
+- Skill stratification:
+  - **High-skill** (avg s > 0.6): TIR ~61%, TBR ~10%, TAR ~29%
+  - **Mid-skill** (0.45-0.6): TIR ~55%, TBR ~12%, TAR ~33%
+  - **Low-skill** (<0.45): TIR ~43%, TBR ~8%, TAR ~48% (hyper-dominant — missed basal, big carb errors)
+- Skill-TIR correlation should be ~+0.5; Skill-TBR near zero
+- Three structural rules to preserve:
+  - `ideal_basal = HGO_BASE * 24 * is_base / ICR` (in `generate_patient`)
+  - Hypo correction grams scale with `skill_avg` so skilled patients can recover from over-bolus crashes
+  - Severe hypo (`bg_observed < SEVERE_HYPO_THRESHOLD`) bypasses the CGM check interval AND triggers a non-probabilistic 14-22g rage-eat — this is what keeps severe episodes under 1h. Removing either half re-opens 6+ hour dangerous hypos.
 
 ## Warnings
 

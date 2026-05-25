@@ -60,15 +60,17 @@ class TestPhysiologicalParameters:
             assert p.is_base > 0
 
     def test_basal_dose_tied_to_hgo_icr(self):
-        """Basal dose should be near ideal = (HGO_BASE_GRAMS_PER_HOUR * 24) / ICR.
+        """Basal dose should be near ideal = (HGO_BASE * 24) * IS_base / ICR.
 
-        The ideal dose balances 24h of hepatic glucose output. Patients should be
-        within a few sigma of the ideal (not at an independent arbitrary value).
+        The ideal dose balances 24h of HGO at the patient's own insulin
+        sensitivity (glucose_out = insulin * ICR / IS at steady state). Patients
+        should be within a few sigma of that ideal — not at an arbitrary value,
+        and not at the IS-naive (HGO*24/ICR) figure either, which would
+        systematically over-dose sensitive patients.
         """
         for seed in range(50):
             p = make_patient(seed)
-            ideal = (HGO_BASE_GRAMS_PER_HOUR * 24.0) / p.icr
-            # Allow generous tolerance (skilled patients are close, unskilled deviate)
+            ideal = (HGO_BASE_GRAMS_PER_HOUR * 24.0) * p.is_base / p.icr
             tolerance = BASAL_DOSE_SIGMA * 5.0
             assert abs(p.basal_dose - ideal) < tolerance, (
                 f"seed={seed}: basal_dose={p.basal_dose:.1f} too far from "

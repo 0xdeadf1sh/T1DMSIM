@@ -36,6 +36,13 @@ def isolated_biology(monkeypatch):
     monkeypatch.setattr(simulator, 'GLUCOTOX_MAX_IS_INCREASE', 0.0)
     monkeypatch.setattr(simulator, 'CARB_ABSORPTION_NOISE_SIGMA', 0.0)
     monkeypatch.setattr(simulator, 'INSULIN_ABSORPTION_NOISE_SIGMA', 0.0)
+    # Circadian HGO would skew the 8h measurement window (which straddles the
+    # dawn peak at ~6.5am) so the basal-vs-HGO balance test would see a
+    # systematic +30-40% glucose_in spike during measurement.
+    monkeypatch.setattr(simulator, 'DAWN_HGO_AMPLITUDE_MEAN', 0.0)
+    monkeypatch.setattr(simulator, 'DAWN_HGO_AMPLITUDE_SIGMA', 0.0)
+    monkeypatch.setattr(simulator, 'NIGHT_HGO_DIP_AMPLITUDE_MEAN', 0.0)
+    monkeypatch.setattr(simulator, 'NIGHT_HGO_DIP_AMPLITUDE_SIGMA', 0.0)
     # Flatten HGO to a constant = HGO_BASE so basal sized against HGO_BASE
     # exactly balances; otherwise the bolus's plasma-insulin spike over-suppresses
     # HGO via the Hill function and the basal becomes "too much" during meals.

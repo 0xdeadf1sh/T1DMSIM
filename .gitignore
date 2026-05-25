@@ -12,3 +12,6 @@ build/
 venv/
 env/
 .env
+
+# Real-world dataset (not redistributable)
+ohiot1dm/
