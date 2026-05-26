@@ -66,7 +66,7 @@ Visualizer key bindings are documented in the module docstring at the top of `vi
 
 ## Important Conventions
 
-- The gamma_curve function normalizes so sum(values) = total_amount (values are in amount-per-step units). The basal_curve function (trapezoidal) likewise normalizes so the area equals the total dose. All curves are in amount-per-step units — do not pass rates.
+- The gamma_curve function normalizes so sum(values) = total_amount (values are in amount-per-step units). The basal_curve function (Bateman one-compartment PK, smootherstep tail clip) likewise normalizes so sum(values) = total dose. All curves are in amount-per-step units — do not pass rates.
 - When changing the BG delta formula, always trace through the math with concrete numbers to verify the magnitudes make sense. A typical meal should produce a post-meal BG rise of 30-80 mg/dL over 1-2 hours.
 - The seed determines everything. Same seed = same patient = same simulation. Always verify reproducibility after changes.
 - Never add dependencies beyond numpy and pygame without discussion.
@@ -91,9 +91,9 @@ Visualizer key bindings are documented in the module docstring at the top of `vi
 ## Warnings
 
 - Both gamma_curve and basal_curve produce values in "amount per step" — never accidentally pass a rate (rate_per_hour) where total_amount is expected. Verify per-step magnitudes when changing curve generation.
-- Basal uses basal_curve (trapezoidal: ramp-up → plateau → ramp-down) with total_amount = actual_dose and duration = BASAL_DURATION_HOURS (28h); the plateau is what ensures overnight coverage. Do not replace this with gamma_curve without retuning — high k produces a narrow peak that falls to zero well before 24h, leaving no overnight coverage.
+- Basal uses basal_curve (Bateman one-compartment PK: f(t) = exp(-ke·t) − exp(-ka·t), smootherstep tail clip) with total_amount = actual_dose and per-injection duration = patient.basal_duration_hours × (1 + BASAL_PK_OVERLAP_FRACTION). Per-patient basal_duration_hours is sampled uniformly on [BASAL_DURATION_HOURS_MIN, BASAL_DURATION_HOURS_MAX] (18–30h); injections are scheduled at that same cadence. The broad ~6.3h-peak shape plus the 2× cadence PK overlap is what ensures overnight coverage and bridges single missed doses — do not replace with gamma_curve, narrower k, or a fixed 24h duration without retuning. BASAL_DURATION_HOURS (28h) is now only a population-reference constant kept for legacy tests.
 - The visualizer uses an off-screen buffer to avoid flickering on Wayland. Do not remove the double-buffering logic.
 - BG_SCALE_FACTOR is the most sensitive parameter. Small changes have large effects.
-- HGO_INSULIN_HALF_MAX must stay tuned so that compute_hgo_rate(typical_basal_per_step) ≈ HGO_BASE_GRAMS_PER_HOUR. Otherwise `test_hgo_basal_balance` will fail and the patient population will systematically run high or low. Verify with `compute_hgo_rate(0.07)` ≈ 9.
+- HGO_INSULIN_HALF_MAX must stay tuned so that compute_hgo_rate(typical_basal_per_step) ≈ HGO_BASE_GRAMS_PER_HOUR. Otherwise `test_hgo_basal_balance` will fail and the patient population will systematically run high or low. Verify with `compute_hgo_rate(0.075) == 9.0` exactly.
 - BG bounds are enforced softly (delta-damping near floor/ceiling) followed by a hard clamp as backstop. Do not remove the hard clamp; do not raise BG_CLAMP_MIN above the soft floor — they work together.
 - The _carb_totals/_basal_totals/_bolus_totals/_exercise_totals arrays are instance variables (not state), so they are reset in reseed() but not serialized. If you add serialization, include them.

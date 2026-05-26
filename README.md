@@ -107,7 +107,7 @@ The simulator generates the following events:
 
 - **Meals**: Number, timing, and carb amount are all skill-dependent. Each meal is decomposed into 2-5 overlapping gamma absorption components (a "mixed meal" model): the component count is `MIXED_MEAL_MIN_COMPONENTS + Poisson(λ)` capped at the max, and carb fractions are drawn from a Dirichlet distribution. Each component is classified as fast / medium / slow with weights driven by the patient's `slow_carb_preference`, and its `(k, θ)` is uniformly sampled from category-specific ranges. A protein/fat tail is always added, sized as `PROTEIN_FAT_FRACTION_OF_CARBS × meal_carbs` and floored at `PROTEIN_FAT_MIN_GRAMS` (6 g), so snacks ~6 g, typical meals ~10–15 g, large dinners ~18 g. Hypo-correction carbs use a separate fast pair that peaks faster than meal carbs (glucose tablets / juice).
 
-- **Basal insulin**: Administered once daily. The ideal dose is anchored to `HGO_base × 24h × (body_weight_kg / BODY_WEIGHT_MEAN_KG) × is_base / ICR` — the weight factor mirrors the per-step HGO scaling and the `is_base` factor keeps the HGO-balances-basal invariant across body sizes and baseline insulin needs. Unskilled patients deviate from this ideal more. A daily adjustment mechanism lets the patient nudge their dose based on the previous day's mean BG. Absorption is modeled using a trapezoidal `basal_curve` (ramp-up, plateau, ramp-down) with a total duration of `BASAL_DURATION_HOURS` (28h), which ensures continuous coverage throughout the day and overnight.
+- **Basal insulin**: Long-acting insulin injected on a per-patient cadence. The total 24h-equivalent dose is anchored to `HGO_base × 24h × (body_weight_kg / BODY_WEIGHT_MEAN_KG) × is_base / ICR` — the weight factor mirrors the per-step HGO scaling and the `is_base` factor keeps the HGO-balances-basal invariant across body sizes and baseline insulin needs. Unskilled patients deviate from this ideal more. A daily adjustment mechanism lets the patient nudge their dose based on the previous day's mean BG. Each patient's basal duration of action is sampled uniformly on `[BASAL_DURATION_HOURS_MIN, BASAL_DURATION_HOURS_MAX]` (18–30h), and injections are scheduled at that same cadence (an 18h-duration patient injects every 18h; a 30h-duration patient injects every 30h, often skipping a calendar day). Per-injection amount is scaled by `basal_duration_hours / 24` so the 24h-average delivery is unchanged. Absorption is modeled by a Bateman one-compartment PK curve `f(t) = exp(-ke·t) − exp(-ka·t)` (broad peak at ~6.3h, half-life ~9.9h, no plateau and no slope discontinuity) with a smootherstep tail clip. Each dose's curve is generated with duration `basal_duration_hours × (1 + BASAL_PK_OVERLAP_FRACTION)` — overlap is 1.00 so the PK lasts 2× the cadence, meaning 2–3 doses always contribute simultaneously and a single missed dose is bridged by the previous dose's still-active tail.
 
 - **Bolus insulin**: Dosed per meal based on an estimated carb count (with skill-dependent counting error). Timing is skill-dependent: competent patients pre-bolus, incompetent ones bolus after eating. Snack boluses may be skipped. Bolus PK is dose-dependent: both duration of action and θ scale with `√dose` (centered on a 5U reference), so larger doses act longer and peak slightly later, matching observed subcutaneous insulin behavior. Use the `bolus_pk_for_dose(dose)` helper to retrieve `(k, θ, duration_minutes)`.
 
@@ -177,7 +177,7 @@ sim.inject_curve(curve, sim.state.current_idx, 'carb', 'Custom meal')
 SPACE       Generate next 24 hours
 R           Random reseed
 0           Reseed to 0 (canonical patient)
-1-8         Toggle curve visibility
+1-9, 0      Toggle curve visibility
 A           Toggle all curves
 F           Cycle text size (small / medium / large)
 Left/Right  Scroll timeline
@@ -188,7 +188,9 @@ S           Screenshot (PNG)
 Q/ESC       Quit
 ```
 
-Curves: (1) Blood Glucose, (2) Carb Intake, (3) Insulin, (4) Insulin Resistance (multiplier; >1 = resistant), (5) Exercise, (6) BG Delta, (7) Hepatic Output, (8) Glucose In.
+Curves: (1) Blood Glucose, (2) Carb Intake, (3) Insulin (total), (4) Basal, (5) Bolus, (6) Insulin Resistance (multiplier; >1 = resistant), (7) Exercise, (8) BG Delta, (9) Hepatic Output, (0) Glucose In.
+
+Note: the `0` key both reseeds the simulator (when no curve is hovered) and toggles the Glucose In curve. The Reseed-to-0 behavior is the default action of the digit `0` keypress; if you specifically want to toggle Glucose In, the same key toggles that curve's visibility in the chart.
 
 
 ## Parameters
@@ -200,7 +202,7 @@ All parameters are uppercase constants at the top of `simulator.py`. They are gr
 - Wake/sleep schedule
 - Meal generation (counts, timing, carb amounts, fast/slow mixture, curve shapes)
 - Insulin sensitivity (diurnal pattern, daily drift, noise, illness effects)
-- Basal insulin (sigma around HGO/ICR/weight ideal, trapezoidal `basal_curve` with ramp-up/plateau/ramp-down over `BASAL_DURATION_HOURS`, per-dose injection-site noise, miss probability, daily adjustment)
+- Basal insulin (sigma around HGO/ICR/weight ideal, Bateman one-compartment `basal_curve` with `BASAL_KA_PER_HOUR` / `BASAL_KE_PER_HOUR` rate constants and a smootherstep tail clip, per-patient duration sampled on `[BASAL_DURATION_HOURS_MIN, BASAL_DURATION_HOURS_MAX]`, injection cadence = duration, per-dose injection-site noise damped by `BASAL_SITE_QUALITY_DAMPING`, miss probability, daily adjustment)
 - Bolus insulin (curve shape, timing, carb counting error)
 - Correction behavior (thresholds, patience, CGM check intervals, IOB awareness, trend thresholds)
 - Exercise (probability, duration, carb equivalent, delayed IS effect)

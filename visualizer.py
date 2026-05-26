@@ -9,7 +9,7 @@ Controls:
   HOME        — Jump to start
   END         — Jump to end
   +/-         — Zoom in/out on time axis
-  1-8         — Toggle individual curve visibility
+  1-9, 0      — Toggle individual curve visibility
   A           — Toggle all curves on/off
   F           — Cycle text size (small / medium / large)
   S           — Screenshot (saves PNG)
@@ -18,12 +18,14 @@ Controls:
 Curves (toggle with number keys):
   1 — Blood Glucose (observed)
   2 — Carb intake curve
-  3 — Insulin curve
-  4 — Insulin Resistance (multiplier; >1 = resistant, <1 = sensitive)
-  5 — Exercise curve
-  6 — BG Delta
-  7 — Hepatic Glucose Output
-  8 — Glucose In
+  3 — Insulin (total)
+  4 — Basal insulin
+  5 — Bolus insulin
+  6 — Insulin Resistance (multiplier; >1 = resistant, <1 = sensitive)
+  7 — Exercise curve
+  8 — BG Delta
+  9 — Hepatic Glucose Output
+  0 — Glucose In
 """
 
 import sys

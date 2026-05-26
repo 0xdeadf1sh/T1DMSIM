@@ -541,6 +541,89 @@ class TestHypoCorrectionSkillScaling:
             f"ratio {g_high/g_low:.2f} too small — skill multiplier may be flat")
 
 
+class TestBolusPKForDoseIntegration:
+    """The dose-dependent bolus PK helper is unit-tested above; this verifies
+    the simulator's bolus dispatch *actually routes through it*, rather than
+    the legacy fixed-duration BOLUS_DURATION_HOURS path."""
+
+    def test_meal_boluses_use_bolus_pk_for_dose(self, monkeypatch):
+        """At least a few meal/correction boluses fire through the helper
+        within a 48h run, and the helper's duration response monotonically
+        scales with dose (smallest observed dose ≤ largest observed duration)."""
+        import simulator as sim_module
+        real_helper = sim_module.bolus_pk_for_dose
+        calls = []
+
+        def spy(dose):
+            result = real_helper(dose)
+            calls.append((float(dose), result))
+            return result
+
+        monkeypatch.setattr(sim_module, 'bolus_pk_for_dose', spy)
+
+        sim = sim_module.T1DMSimulator(seed=0)
+        sim.generate_hours(48)
+
+        assert len(calls) >= 3, (
+            f"only {len(calls)} bolus_pk_for_dose calls in 48h — "
+            "simulator may be bypassing the dose-dependent PK helper")
+
+        # If the run produced clearly different doses, the helper must have
+        # responded with non-decreasing duration. (The unit-level monotonicity
+        # is already pinned by TestBolusPKForDose; this catches the case where
+        # the simulator stops calling the helper and falls back to a constant.)
+        by_dose = sorted(calls)
+        if by_dose[-1][0] / max(by_dose[0][0], 1e-9) > 2.0:
+            small_dur = by_dose[0][1][2]
+            large_dur = by_dose[-1][1][2]
+            assert large_dur >= small_dur - 1e-9, (
+                f"larger bolus did not yield equal-or-longer duration: "
+                f"dose={by_dose[0][0]:.2f} dur={small_dur:.1f} vs "
+                f"dose={by_dose[-1][0]:.2f} dur={large_dur:.1f}")
+
+
+class TestBasalInjectionCadence:
+    """Per-patient basal injection cadence must equal patient.basal_duration_hours.
+
+    An 18h-duration patient injects every 18h; a 30h-duration patient every
+    30h (often skipping a calendar day). This invariant keeps the
+    24h-average insulin delivery aligned with `basal_dose` regardless of the
+    sampled duration; if cadence drifts away from duration, the patient is
+    silently over- or under-dosed.
+    """
+
+    def test_basal_cadence_matches_patient_duration(self):
+        for seed in [0, 5, 13, 27]:
+            sim = T1DMSimulator(seed=seed)
+            basal_indices: list = []
+            original_inject = sim.inject_curve
+
+            def capturing_inject(values, start_idx, curve_type, label='',
+                                  _orig=original_inject, _store=basal_indices):
+                if curve_type == 'basal':
+                    _store.append(int(start_idx))
+                return _orig(values, start_idx, curve_type, label)
+
+            sim.inject_curve = capturing_inject
+
+            # 14 days covers ~14 injections for an 18h patient, ~11 for a 30h
+            # patient — plenty of samples for a robust median.
+            sim.generate_hours(14 * 24)
+
+            assert len(basal_indices) >= 8, (
+                f"seed={seed}: only {len(basal_indices)} basals scheduled in "
+                f"14 days (patient duration={sim.patient.basal_duration_hours:.2f}h)")
+
+            spacings_steps = np.diff(sorted(basal_indices))
+            median_spacing_h = float(np.median(spacings_steps)) * DT_MINUTES / 60.0
+            # Per-dose ±30 min jitter + max(current_idx, ...) clamp can drift
+            # individual spacings; the median should still land within 1.5h.
+            assert abs(median_spacing_h - sim.patient.basal_duration_hours) < 1.5, (
+                f"seed={seed}: median basal spacing {median_spacing_h:.2f}h "
+                f"!= patient.basal_duration_hours "
+                f"{sim.patient.basal_duration_hours:.2f}h")
+
+
 class TestInjectCurveUpdatesTotals:
     """CLAUDE.md: 'Use inject_curve() (not state.active_curves.append) whenever
     inserting curves from outside generate().' Raw append leaves the

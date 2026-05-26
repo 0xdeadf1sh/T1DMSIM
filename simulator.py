@@ -850,7 +850,8 @@ def compute_hgo_rate(insulin_per_step: float) -> float:
     """Hill-function HGO rate (g/hr) given current plasma insulin per step.
 
     HGO = SUPPRESSED + (UNSUPPRESSED - SUPPRESSED) / (1 + insulin/HALF_MAX).
-    Tuned so a typical basal level (~0.07 U/step) yields ~9 g/hr.
+    Tuned so a typical basal level (~0.075 U/step) yields exactly HGO_BASE
+    (9 g/hr), preserving the basal-balances-HGO invariant.
     """
     span = HGO_UNSUPPRESSED_GRAMS_PER_HOUR - HGO_SUPPRESSED_FLOOR_GRAMS_PER_HOUR
     suppression = 1.0 / (1.0 + max(0.0, insulin_per_step) / HGO_INSULIN_HALF_MAX)
@@ -1315,7 +1316,7 @@ class T1DMSimulator:
         # patients whose initial basal_dose drew near the lower clamp (5 U)
         # could be stuck 30-40% under the ideal even with maximum drift, leading
         # to multi-day hyper streaks. 2.5× headroom lets them recover within a
-        # reasonable window. Lower bound stays at 0.4 — no symmetric reason
+        # reasonable window. Lower bound stays at 0.5 — no symmetric reason
         # to widen it and it would re-open the sensitive-patient TBR drift.
         s.basal_dose_drift = float(np.clip(
             s.basal_dose_drift + BASAL_DRIFT_ALPHA * (basal_adjustment - 1.0),

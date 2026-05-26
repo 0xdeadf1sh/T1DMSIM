@@ -15,8 +15,32 @@ import simulator
 from simulator import (
     T1DMSimulator, gamma_curve, basal_curve, bolus_pk_for_dose,
     HGO_BASE_GRAMS_PER_HOUR, DT_MINUTES,
-    BASAL_DURATION_HOURS, BASAL_RAMP_UP_HOURS, BASAL_RAMP_DOWN_HOURS,
+    BASAL_DURATION_HOURS,
 )
+
+
+# Measurement window for a single Bateman basal_curve. The curve rises to a
+# broad peak around 6h post-injection (tmax = ln(ka/ke)/(ka-ke) ≈ 6.3h for the
+# default ka=0.30, ke=0.07), so 4h warmup lands inside the rising phase and 8h
+# of measurement straddles the peak — the broadest, flattest region of the
+# unit curve and the natural place to enforce HGO/basal balance.
+_BAL_WARMUP_HOURS = 4.0
+_BAL_MEASURE_HOURS = 8.0
+
+
+def _balanced_basal_total(unit_curve: np.ndarray, hgo_per_step_units: float,
+                          warmup_steps: int, measure_steps: int) -> float:
+    """Total basal dose such that the mean per-step delivery across the
+    measurement window equals ``hgo_per_step_units``.
+
+    basal_curve is normalized so sum(values)=total_amount. The per-step rate
+    varies across a Bateman curve, so "perfect balance" can only be enforced
+    on average over a finite window. Scaling the unit curve by
+    ``hgo_per_step_units / mean(unit_curve[window])`` produces a dose whose
+    mean delivery in the window equals the HGO-cancelling rate.
+    """
+    window_mean_unit = float(np.mean(unit_curve[warmup_steps:warmup_steps + measure_steps]))
+    return hgo_per_step_units / window_mean_unit
 
 
 @pytest.fixture
@@ -71,76 +95,70 @@ def _quiet_sim(seed: int, initial_bg: float = 100.0) -> T1DMSimulator:
 
 class TestPerfectBalance:
     def test_hgo_basal_balance(self, isolated_biology):
-        """A basal at the plateau rate that matches HGO yields ~zero BG delta.
+        """A Bateman basal sized for its broad-peak window yields ~zero BG delta.
 
-        basal_curve produces a trapezoid (ramp-up + plateau + ramp-down) whose
-        plateau height = total_dose / sum_of_unit_trapezoid. We size the dose so
-        the plateau insulin-per-step exactly cancels HGO-per-step, then warm up
-        past ramp-up before measuring deltas. With everything balanced, the
-        residual is just noise (IS jitter, glucotox/glycogen second-order
-        coupling) — small per step, mean-zero.
+        basal_curve is a Bateman one-compartment PK (smooth rise to a broad
+        peak at ~6.3h, exponential decline). Per-step insulin delivery varies
+        across the curve, so "perfect balance" can only be enforced on average
+        over a finite window. We size the dose so the mean insulin delivery
+        across the measurement window equals the HGO-cancelling rate, warm up
+        past the rising phase, then measure across the broad-peak window.
         """
         sim = _quiet_sim(seed=0)
         p = sim.patient
 
         duration_min = BASAL_DURATION_HOURS * 60
-        # Reconstruct the trapezoid sum to size the total dose so the plateau
-        # value equals the HGO-cancelling insulin per step.
-        unit_trap = basal_curve(1.0, duration_min,
-                                ramp_up_hours=BASAL_RAMP_UP_HOURS,
-                                ramp_down_hours=BASAL_RAMP_DOWN_HOURS)
-        trap_sum = float(np.sum(unit_trap))
-        hgo_per_step_units = HGO_BASE_GRAMS_PER_HOUR * (DT_MINUTES / 60.0) / p.icr
-        ideal_total = hgo_per_step_units * trap_sum
+        warmup_steps = int(_BAL_WARMUP_HOURS * 60) // DT_MINUTES
+        measure_steps = int(_BAL_MEASURE_HOURS * 60) // DT_MINUTES
 
-        perfect_basal = basal_curve(ideal_total, duration_min,
-                                    ramp_up_hours=BASAL_RAMP_UP_HOURS,
-                                    ramp_down_hours=BASAL_RAMP_DOWN_HOURS)
+        unit_curve = basal_curve(1.0, duration_min)
+        hgo_per_step_units = HGO_BASE_GRAMS_PER_HOUR * (DT_MINUTES / 60.0) / p.icr
+        ideal_total = _balanced_basal_total(
+            unit_curve, hgo_per_step_units, warmup_steps, measure_steps)
+
+        perfect_basal = basal_curve(ideal_total, duration_min)
         sim.inject_curve(perfect_basal, 0, 'insulin', 'Perfect basal')
 
-        # Warm past ramp-up + insulin-smoothing lag (~30 min) into the plateau.
-        warmup_steps = int((BASAL_RAMP_UP_HOURS + 0.5) * 60) // DT_MINUTES
         for _ in range(warmup_steps):
             sim.generate()
 
-        # Measure across plateau window only — well before ramp-down kicks in.
         deltas = []
-        for _ in range(8 * 60 // DT_MINUTES):
+        for _ in range(measure_steps):
             deltas.append(sim.generate()['bg_delta'])
 
-        mean_delta = np.mean(deltas)
-        # Residual drift comes from diurnal IS variation and HGO Hill curvature
-        # at off-reference ICR; 2.5 mg/dL/step (~240 mg/dL across 96 steps) is
-        # tighter than the legacy 5.0 and still catches a broken balance.
+        mean_delta = float(np.mean(deltas))
+        # Plasma-insulin EMA introduces phase lag against the rising/falling
+        # Bateman curve so per-step deltas don't cancel exactly; ±2.5 mg/dL/step
+        # over 8h still catches a broken balance (the previous trapezoidal
+        # version delivered ~0.06 U total — orders of magnitude below the
+        # HGO-cancelling rate — and silently passed via the BG ceiling clamp).
         assert abs(mean_delta) < 2.5, (
             f"Mean BG delta {mean_delta:.3f} mg/dL/step exceeds 2.5; "
-            "plateau basal should approximately balance HGO")
+            "Bateman basal sized for the broad-peak window should approximately balance HGO")
 
     def test_meal_bolus_balance(self, isolated_biology):
-        """Balanced meal + dose-matched bolus + plateau basal → near-zero net BG.
+        """Balanced meal + dose-matched bolus + balanced basal → near-zero net BG.
 
-        We size the basal so its plateau cancels HGO, warm up past ramp-up, then
-        inject a meal and a bolus computed via bolus_pk_for_dose (the
-        dose-dependent PK helper, not the legacy fixed-duration constants). We
-        measure for long enough that both meal absorption and bolus action
-        complete inside the window.
+        We size the Bateman basal so its broad-peak window cancels HGO, warm up
+        past the rising phase, then inject a meal and a bolus computed via
+        bolus_pk_for_dose (the dose-dependent PK helper, not the legacy fixed-
+        duration constants). We measure for long enough that both meal
+        absorption and bolus action complete inside the window.
         """
         sim = _quiet_sim(seed=1)
         p = sim.patient
 
-        # --- Plateau basal sized as in test_hgo_basal_balance ---
+        # --- Balanced basal sized as in test_hgo_basal_balance ---
         basal_dur_min = BASAL_DURATION_HOURS * 60
-        unit_trap = basal_curve(1.0, basal_dur_min,
-                                ramp_up_hours=BASAL_RAMP_UP_HOURS,
-                                ramp_down_hours=BASAL_RAMP_DOWN_HOURS)
+        warmup_steps = int(_BAL_WARMUP_HOURS * 60) // DT_MINUTES
+        measure_steps = int(_BAL_MEASURE_HOURS * 60) // DT_MINUTES
+        unit_curve = basal_curve(1.0, basal_dur_min)
         hgo_per_step_units = HGO_BASE_GRAMS_PER_HOUR * (DT_MINUTES / 60.0) / p.icr
-        ideal_total = hgo_per_step_units * float(np.sum(unit_trap))
-        perfect_basal = basal_curve(ideal_total, basal_dur_min,
-                                    ramp_up_hours=BASAL_RAMP_UP_HOURS,
-                                    ramp_down_hours=BASAL_RAMP_DOWN_HOURS)
+        ideal_total = _balanced_basal_total(
+            unit_curve, hgo_per_step_units, warmup_steps, measure_steps)
+        perfect_basal = basal_curve(ideal_total, basal_dur_min)
         sim.inject_curve(perfect_basal, 0, 'insulin', 'Perfect basal')
 
-        warmup_steps = int((BASAL_RAMP_UP_HOURS + 0.5) * 60) // DT_MINUTES
         for _ in range(warmup_steps):
             sim.generate()
 
