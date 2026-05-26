@@ -8,6 +8,7 @@ build/
 *.png
 !screenshots/*.png
 !assets/*.png
+!reports/figures/*.png
 *.npz
 .venv/
 venv/
