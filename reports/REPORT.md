@@ -14,6 +14,132 @@ are persisted to `reports/stats.json`; figures live in `reports/figures/`.
 
 ---
 
+## 0. Machine-learning summary
+
+Stats and visuals tailored to designing an ML pipeline against this data.
+The simulator output is positioned for sequence modelling
+(transformer / RNN / state-space) with class-imbalanced classification or
+regression heads on top.
+
+### 0.1 Data volume per cohort
+
+| Cohort | Records | Samples | Hours | CGM-days | Cadence |
+|---|---:|---:|---:|---:|---:|
+| OhioT1DM     |   6 | 85,295 |   7,720 |     322 | 5 min |
+| ShanghaiT1DM |  16 | 15,696 |   3,924 |     164 | 15 min |
+| **T1DMSIM**  | **30** | **604,800** | ** 50,400** | **  2,100** | **5 min** |
+
+T1DMSIM provides **7.1× the sample count of OhioT1DM**
+and **38.5× that of ShanghaiT1DM**.
+
+### 0.2 Normalization statistics
+
+Per-cohort statistics on the pooled BG vector. Use these for input/output
+standardization. For neural-net-friendly z-scoring on the simulator output:
+`bg_z = (bg - 160.4) / 76.0`. For robust scaling
+that is resistant to extreme-hyper outliers: `bg_robust = (bg - 148.9) / 99.3`
+(median / IQR).
+
+| Stat (mg/dL) | Ohio | Shanghai | **Sim** |
+|---|---:|---:|---:|
+| mean    | 162.1  | 164.7  | **160.4**  |
+| median  | 155.2  | 156.6  | **148.9**  |
+| std     | 60.8   | 72.3   | **76.0**   |
+| IQR     | 86.2   | 106.2   | **99.3**   |
+| p1      | 57.0    | 41.3    | **55.2**    |
+| p99     | 325.8   | 349.2   | **395.3**   |
+| min     | 40.0   | 39.6   | **22.1**   |
+| max     | 400.0   | 475.2   | **500.0**   |
+
+### 0.3 Sample-level class balance
+
+For classification heads predicting BG-band membership. Percentages are
+per-record means across each cohort.
+
+![Class balance per cohort](figures/class_balance.png)
+
+| Band | Threshold | Ohio % | Shang % | **Sim %** |
+|---|---|---:|---:|---:|
+| TBR2 | <54     |  0.73 |  2.79 | ** 0.73** |
+| TBR1 | 54-70   |  2.57 |  4.72 | ** 6.63** |
+| TIR  | 70-180  |  60.5  |  54.7  | ** 59.1**  |
+| TAR1 | 180-250 |  27.4 |  25.1 | ** 21.3** |
+| TAR2 | >250    |   8.9 |  12.6 | ** 12.2** |
+
+T1DMSIM is intentionally tuned for *elevated mild-hypo (TBR1) and severe-hyper
+(TAR2) density* relative to OhioT1DM — the shape of those events (durations,
+depths, recovery profiles) still matches real cohorts (see §7), but the rate is
+higher to give a classifier more positive examples of each rare-event class
+per epoch.
+
+### 0.4 Episode-level event counts
+
+For rare-event detection training (e.g. "will hypo in next N minutes" binary
+heads). Each row is a contiguous excursion ≥ 15 min.
+
+| Event class | Ohio | Shanghai | **Sim** | Sim/Ohio | Sim/Shang |
+|---|---:|---:|---:|---:|---:|
+| Hypo (<70) episodes        | 261   | 169   | **3,787**   | 14.5× | 22.4× |
+| Severe-hypo (<54) episodes | 64    | 78    | **591**    | 9.2× | 7.6× |
+| Hyper (>180) episodes      | 840  | 305  | **4,361**  | 5.2× | 14.3× |
+| Severe-hyper (>250) episodes | 338  | 192  | **2,282**  | 6.8× | 11.9× |
+
+### 0.5 Effective context window
+
+Pooled Pearson autocorrelation decays as the lag grows. The lag at which the
+ACF drops below a chosen threshold is a useful order-of-magnitude estimate of
+how long an autoregressive model needs to look back.
+
+| ACF threshold | Ohio | Shanghai | **Sim** |
+|---|---:|---:|---:|
+| 0.5 (50% retained) | 1.9 h | 2.6 h | **2.7 h** |
+| 0.2 (20% retained) | 3.6 h | 4.8 h | **6.8 h** |
+
+A 4-8h context window covers the meaningful autoregressive signal; longer
+contexts add little beyond the half-day BG ACF tail visible in §6.1.
+
+### 0.6 Cross-record heterogeneity
+
+For train/val/test split design. Between-patient variance dominating
+within-patient variance means *patient-stratified* splits are required —
+otherwise a model trained on one patient set will fail to generalize to
+unseen patients. The simulator's between/within ratio is intentionally close
+to the real cohorts' so the same split strategy carries over.
+
+| Cohort | Between-patient mean-BG std | Within-patient BG std | Ratio |
+|---|---:|---:|---:|
+| Ohio     | 16.2 | 58.5 | 0.28 |
+| Shanghai | 31.0 | 62.2 | 0.50 |
+| **Sim**  | **23.7** | **70.7** | **0.33** |
+
+### 0.7 Diurnal shape (clean line overlay)
+
+The diurnal envelope figure in §6.3 includes ±1σ bands that visually overlap
+across cohorts. This clean line overlay isolates the shape comparison.
+
+![Diurnal BG curves — clean line overlay](figures/diurnal_lines.png)
+
+### 0.8 Sim-vs-real domain gap
+
+For models trained on the simulator and evaluated on real CGM, the
+Wasserstein-1 distance between the sim and real pooled distributions is a
+direct measure of the domain gap that needs to close at inference time.
+
+| Pair | KS | Wasserstein-1 (mg/dL) | JS divergence |
+|---|---:|---:|---:|
+| **Sim vs Ohio**     | 0.082 | 11.9 | 0.014 |
+| **Sim vs Shanghai** | 0.061 | 9.1 | 0.010 |
+| Ohio vs Shanghai (real-vs-real baseline) | 0.063 | 10.1 | 0.013 |
+
+The Sim-vs-Ohio Wasserstein-1 of 11.9 mg/dL is
+comparable to the
+Ohio-vs-Shanghai baseline of 10.1 mg/dL — meaning the
+simulator's pooled BG distribution is
+within the same band as the two real cohorts.
+
+
+---
+
 ## 1. Corpora at a glance
 
 | Dataset | Records | Cadence | Total CGM-days | Cohort | Notes |

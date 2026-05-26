@@ -819,6 +819,75 @@ def fig_recovery(cohorts, path):
     plt.close(fig)
 
 
+def fig_diurnal_lines(cohorts, path):
+    """Clean line-overlay of hour-of-day mean BG across cohorts.
+
+    The envelope plot (`diurnal_envelope.png`) shows ±1σ bands that visually
+    overlap and obscure direct shape comparison. This figure plots only the
+    three mean curves so the diurnal shape is the focus.
+    """
+    fig, ax = plt.subplots(figsize=(11, 5.5))
+    ax.axhspan(70, 180, color="lightgreen", alpha=0.18, label="TIR (70-180)")
+    h = np.arange(24)
+    for n in ORDER:
+        m = cohorts[n]["diurnal_mean"]
+        ax.plot(h, m, color=COL[n], lw=2.5, marker="o", ms=5, label=n)
+    ax.set_xticks(np.arange(0, 25, 2))
+    ax.set_xlabel("hour of day")
+    ax.set_ylabel("BG (mg/dL)")
+    ax.set_title("Diurnal BG curves — direct shape comparison "
+                 "(per-record mean, no envelope)")
+    ax.legend(loc="upper left")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+
+
+def fig_class_balance(cohorts, path):
+    """Stacked bar of TBR2/TBR1/TIR/TAR1/TAR2 % per cohort.
+
+    Per-record mean across each cohort. Companion to the
+    `clinical_ranges.png` README chart, but built from the same data as the
+    rest of the report and labelled with absolute percentages on each segment.
+    """
+    band_keys = ["TBR2_pct", "TBR1_pct", "TIR_pct", "TAR1_pct", "TAR2_pct"]
+    band_labels = ["TBR2 <54", "TBR1 54-70", "TIR 70-180",
+                   "TAR1 180-250", "TAR2 >250"]
+    band_colors = ["#7E1416", "#E66767", "#86C893", "#F2C744", "#D87F3E"]
+
+    vals = {n: [] for n in ORDER}
+    for n in ORDER:
+        for k in band_keys:
+            vs = [r[k] for r in cohorts[n]["per"] if k in r]
+            vals[n].append(float(np.mean(vs)) if vs else 0.0)
+
+    fig, ax = plt.subplots(figsize=(10, 5.2))
+    x = np.arange(len(ORDER))
+    bottom = np.zeros(len(ORDER))
+    for i, (label, color) in enumerate(zip(band_labels, band_colors)):
+        heights = np.array([vals[n][i] for n in ORDER])
+        ax.bar(x, heights, bottom=bottom, label=label, color=color,
+               edgecolor="white", linewidth=1.2)
+        for j, v in enumerate(heights):
+            if v >= 2.5:
+                ax.text(x[j], bottom[j] + v / 2, f"{v:.1f}",
+                        ha="center", va="center", fontsize=10,
+                        color="black", fontweight="bold")
+        bottom += heights
+    ax.set_xticks(x)
+    ax.set_xticklabels(ORDER)
+    ax.set_ylabel("% of samples (per-record mean across cohort)")
+    ax.set_ylim(0, 102)
+    ax.set_title("BG class distribution — sample-level class balance per cohort",
+                 fontweight="bold")
+    ax.legend(bbox_to_anchor=(1.02, 1.0), loc="upper left",
+              fontsize=9, title="band")
+    fig.tight_layout()
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+
+
 # ============================================================================
 # Markdown report writer
 # ============================================================================
@@ -848,6 +917,226 @@ def _ms1(summary, key):
 
 def _delta(a, b, fmt="+.1f"):
     return f"{a - b:{fmt}}"
+
+
+def _acf_threshold_lag(acf_dict, threshold):
+    """Lag (in minutes) where ACF first drops below threshold (linear interp).
+
+    `acf_dict` is the per-cohort `pooled_acf` (int-lag → mean ACF). Returns
+    +inf if the curve never crosses, or the smallest sampled lag if already
+    below at the first sample.
+    """
+    pairs = sorted((int(k), v) for k, v in acf_dict.items()
+                   if v is not None and not (isinstance(v, float) and np.isnan(v)))
+    if not pairs:
+        return float("nan")
+    if pairs[0][1] < threshold:
+        return float(pairs[0][0])
+    for i in range(len(pairs) - 1):
+        l1, v1 = pairs[i]
+        l2, v2 = pairs[i + 1]
+        if v1 >= threshold and v2 < threshold:
+            frac = (v1 - threshold) / (v1 - v2) if v1 != v2 else 0.0
+            return l1 + frac * (l2 - l1)
+    return float("inf")
+
+
+def _build_ml_section(cohorts, distances, pooled_moments, pooled_percentiles,
+                     cohort_summaries):
+    """Compose the Section 0 markdown — ML-relevant simulator statistics.
+
+    Numbers come from the same per-cohort structures used elsewhere in the
+    report, so this section stays in sync on every re-run.
+    """
+    O, S, M = "Ohio", "Shanghai", "Sim"
+    pm = pooled_moments
+    pp = pooled_percentiles
+    sm = cohort_summaries
+
+    # Volume
+    def _samples(n):
+        return int(pm[n]["n"])
+
+    def _days(n):
+        return sum(p["days"] for p in cohorts[n]["per"])
+
+    def _records(n):
+        return len(cohorts[n]["per"])
+
+    hours = {n: _days(n) * 24 for n in ORDER}
+
+    # Class balance — per-record means across each cohort
+    class_keys = [("TBR2_pct", "<54"), ("TBR1_pct", "54-70"),
+                  ("TIR_pct", "70-180"), ("TAR1_pct", "180-250"),
+                  ("TAR2_pct", ">250")]
+
+    def _class_pct(n, key):
+        vs = [r[key] for r in cohorts[n]["per"] if key in r]
+        return float(np.mean(vs)) if vs else float("nan")
+
+    # Episode counts
+    n_hypo = {n: len(cohorts[n]["hypo_durs"]) for n in ORDER}
+    n_hyper = {n: len(cohorts[n]["hyper_durs"]) for n in ORDER}
+    n_severe_hypo = {n: len(cohorts[n]["severe_hypo_durs"]) for n in ORDER}
+    n_severe_hyper = {n: len(cohorts[n]["severe_hyper_durs"]) for n in ORDER}
+
+    # Effective decorrelation lag (ACF crossings)
+    decorr_05 = {n: _acf_threshold_lag(cohorts[n]["pooled_acf"], 0.5)
+                 for n in ORDER}
+    decorr_02 = {n: _acf_threshold_lag(cohorts[n]["pooled_acf"], 0.2)
+                 for n in ORDER}
+
+    # Between vs within patient std
+    between_std = {n: float(np.std([r["mean"] for r in cohorts[n]["per"]]))
+                   for n in ORDER}
+    within_std = {n: float(np.mean([r["std"] for r in cohorts[n]["per"]]))
+                  for n in ORDER}
+
+    # Distribution distances
+    d_so = distances["Sim_vs_Ohio"]
+    d_ss = distances["Sim_vs_Shanghai"]
+    d_oo = distances["Ohio_vs_Shanghai"]
+
+    sim_vs_ohio_w = d_so["wasserstein"]
+    ohio_vs_shang_w = d_oo["wasserstein"]
+    closer_than_real = sim_vs_ohio_w < ohio_vs_shang_w
+
+    def _fmt_lag(min_val):
+        if not np.isfinite(min_val):
+            return ">24 h"
+        h = min_val / 60.0
+        return f"{h:.1f} h" if h >= 1.0 else f"{int(round(min_val))} min"
+
+    def _fmt_int(n):
+        return f"{n:,}"
+
+    sim_hypo_ratio_ohio = (n_hypo[M] / max(1, n_hypo[O]))
+    sim_hypo_ratio_shang = (n_hypo[S] and n_hypo[M] / n_hypo[S]) or float("nan")
+
+    md = f"""## 0. Machine-learning summary
+
+Stats and visuals tailored to designing an ML pipeline against this data.
+The simulator output is positioned for sequence modelling
+(transformer / RNN / state-space) with class-imbalanced classification or
+regression heads on top.
+
+### 0.1 Data volume per cohort
+
+| Cohort | Records | Samples | Hours | CGM-days | Cadence |
+|---|---:|---:|---:|---:|---:|
+| OhioT1DM     | {_records(O):>3} | {_fmt_int(_samples(O))} | {hours[O]:>7,.0f} | {_days(O):>7,.0f} | {cohorts[O]['step_min']} min |
+| ShanghaiT1DM | {_records(S):>3} | {_fmt_int(_samples(S))} | {hours[S]:>7,.0f} | {_days(S):>7,.0f} | {cohorts[S]['step_min']} min |
+| **T1DMSIM**  | **{_records(M)}** | **{_fmt_int(_samples(M))}** | **{hours[M]:>7,.0f}** | **{_days(M):>7,.0f}** | **{cohorts[M]['step_min']} min** |
+
+T1DMSIM provides **{_samples(M) / max(1, _samples(O)):.1f}× the sample count of OhioT1DM**
+and **{_samples(M) / max(1, _samples(S)):.1f}× that of ShanghaiT1DM**.
+
+### 0.2 Normalization statistics
+
+Per-cohort statistics on the pooled BG vector. Use these for input/output
+standardization. For neural-net-friendly z-scoring on the simulator output:
+`bg_z = (bg - {pm[M]['mean']:.1f}) / {pm[M]['std']:.1f}`. For robust scaling
+that is resistant to extreme-hyper outliers: `bg_robust = (bg - {pm[M]['median']:.1f}) / {pm[M]['iqr']:.1f}`
+(median / IQR).
+
+| Stat (mg/dL) | Ohio | Shanghai | **Sim** |
+|---|---:|---:|---:|
+| mean    | {pm[O]['mean']:.1f}  | {pm[S]['mean']:.1f}  | **{pm[M]['mean']:.1f}**  |
+| median  | {pm[O]['median']:.1f}  | {pm[S]['median']:.1f}  | **{pm[M]['median']:.1f}**  |
+| std     | {pm[O]['std']:.1f}   | {pm[S]['std']:.1f}   | **{pm[M]['std']:.1f}**   |
+| IQR     | {pm[O]['iqr']:.1f}   | {pm[S]['iqr']:.1f}   | **{pm[M]['iqr']:.1f}**   |
+| p1      | {pp[O]['p1']:.1f}    | {pp[S]['p1']:.1f}    | **{pp[M]['p1']:.1f}**    |
+| p99     | {pp[O]['p99']:.1f}   | {pp[S]['p99']:.1f}   | **{pp[M]['p99']:.1f}**   |
+| min     | {pm[O]['min']:.1f}   | {pm[S]['min']:.1f}   | **{pm[M]['min']:.1f}**   |
+| max     | {pm[O]['max']:.1f}   | {pm[S]['max']:.1f}   | **{pm[M]['max']:.1f}**   |
+
+### 0.3 Sample-level class balance
+
+For classification heads predicting BG-band membership. Percentages are
+per-record means across each cohort.
+
+![Class balance per cohort](figures/class_balance.png)
+
+| Band | Threshold | Ohio % | Shang % | **Sim %** |
+|---|---|---:|---:|---:|
+| TBR2 | <54     | {_class_pct(O,'TBR2_pct'):>5.2f} | {_class_pct(S,'TBR2_pct'):>5.2f} | **{_class_pct(M,'TBR2_pct'):>5.2f}** |
+| TBR1 | 54-70   | {_class_pct(O,'TBR1_pct'):>5.2f} | {_class_pct(S,'TBR1_pct'):>5.2f} | **{_class_pct(M,'TBR1_pct'):>5.2f}** |
+| TIR  | 70-180  | {_class_pct(O,'TIR_pct'):>5.1f}  | {_class_pct(S,'TIR_pct'):>5.1f}  | **{_class_pct(M,'TIR_pct'):>5.1f}**  |
+| TAR1 | 180-250 | {_class_pct(O,'TAR1_pct'):>5.1f} | {_class_pct(S,'TAR1_pct'):>5.1f} | **{_class_pct(M,'TAR1_pct'):>5.1f}** |
+| TAR2 | >250    | {_class_pct(O,'TAR2_pct'):>5.1f} | {_class_pct(S,'TAR2_pct'):>5.1f} | **{_class_pct(M,'TAR2_pct'):>5.1f}** |
+
+T1DMSIM is intentionally tuned for *elevated mild-hypo (TBR1) and severe-hyper
+(TAR2) density* relative to OhioT1DM — the shape of those events (durations,
+depths, recovery profiles) still matches real cohorts (see §7), but the rate is
+higher to give a classifier more positive examples of each rare-event class
+per epoch.
+
+### 0.4 Episode-level event counts
+
+For rare-event detection training (e.g. "will hypo in next N minutes" binary
+heads). Each row is a contiguous excursion ≥ 15 min.
+
+| Event class | Ohio | Shanghai | **Sim** | Sim/Ohio | Sim/Shang |
+|---|---:|---:|---:|---:|---:|
+| Hypo (<70) episodes        | {_fmt_int(n_hypo[O])}   | {_fmt_int(n_hypo[S])}   | **{_fmt_int(n_hypo[M])}**   | {sim_hypo_ratio_ohio:.1f}× | {n_hypo[M]/max(1,n_hypo[S]):.1f}× |
+| Severe-hypo (<54) episodes | {_fmt_int(n_severe_hypo[O])}    | {_fmt_int(n_severe_hypo[S])}    | **{_fmt_int(n_severe_hypo[M])}**    | {n_severe_hypo[M]/max(1,n_severe_hypo[O]):.1f}× | {n_severe_hypo[M]/max(1,n_severe_hypo[S]):.1f}× |
+| Hyper (>180) episodes      | {_fmt_int(n_hyper[O])}  | {_fmt_int(n_hyper[S])}  | **{_fmt_int(n_hyper[M])}**  | {n_hyper[M]/max(1,n_hyper[O]):.1f}× | {n_hyper[M]/max(1,n_hyper[S]):.1f}× |
+| Severe-hyper (>250) episodes | {_fmt_int(n_severe_hyper[O])}  | {_fmt_int(n_severe_hyper[S])}  | **{_fmt_int(n_severe_hyper[M])}**  | {n_severe_hyper[M]/max(1,n_severe_hyper[O]):.1f}× | {n_severe_hyper[M]/max(1,n_severe_hyper[S]):.1f}× |
+
+### 0.5 Effective context window
+
+Pooled Pearson autocorrelation decays as the lag grows. The lag at which the
+ACF drops below a chosen threshold is a useful order-of-magnitude estimate of
+how long an autoregressive model needs to look back.
+
+| ACF threshold | Ohio | Shanghai | **Sim** |
+|---|---:|---:|---:|
+| 0.5 (50% retained) | {_fmt_lag(decorr_05[O])} | {_fmt_lag(decorr_05[S])} | **{_fmt_lag(decorr_05[M])}** |
+| 0.2 (20% retained) | {_fmt_lag(decorr_02[O])} | {_fmt_lag(decorr_02[S])} | **{_fmt_lag(decorr_02[M])}** |
+
+A 4-8h context window covers the meaningful autoregressive signal; longer
+contexts add little beyond the half-day BG ACF tail visible in §6.1.
+
+### 0.6 Cross-record heterogeneity
+
+For train/val/test split design. Between-patient variance dominating
+within-patient variance means *patient-stratified* splits are required —
+otherwise a model trained on one patient set will fail to generalize to
+unseen patients. The simulator's between/within ratio is intentionally close
+to the real cohorts' so the same split strategy carries over.
+
+| Cohort | Between-patient mean-BG std | Within-patient BG std | Ratio |
+|---|---:|---:|---:|
+| Ohio     | {between_std[O]:.1f} | {within_std[O]:.1f} | {between_std[O]/max(1e-6,within_std[O]):.2f} |
+| Shanghai | {between_std[S]:.1f} | {within_std[S]:.1f} | {between_std[S]/max(1e-6,within_std[S]):.2f} |
+| **Sim**  | **{between_std[M]:.1f}** | **{within_std[M]:.1f}** | **{between_std[M]/max(1e-6,within_std[M]):.2f}** |
+
+### 0.7 Diurnal shape (clean line overlay)
+
+The diurnal envelope figure in §6.3 includes ±1σ bands that visually overlap
+across cohorts. This clean line overlay isolates the shape comparison.
+
+![Diurnal BG curves — clean line overlay](figures/diurnal_lines.png)
+
+### 0.8 Sim-vs-real domain gap
+
+For models trained on the simulator and evaluated on real CGM, the
+Wasserstein-1 distance between the sim and real pooled distributions is a
+direct measure of the domain gap that needs to close at inference time.
+
+| Pair | KS | Wasserstein-1 (mg/dL) | JS divergence |
+|---|---:|---:|---:|
+| **Sim vs Ohio**     | {d_so['ks_stat']:.3f} | {d_so['wasserstein']:.1f} | {d_so['js_div']:.3f} |
+| **Sim vs Shanghai** | {d_ss['ks_stat']:.3f} | {d_ss['wasserstein']:.1f} | {d_ss['js_div']:.3f} |
+| Ohio vs Shanghai (real-vs-real baseline) | {d_oo['ks_stat']:.3f} | {d_oo['wasserstein']:.1f} | {d_oo['js_div']:.3f} |
+
+The Sim-vs-Ohio Wasserstein-1 of {sim_vs_ohio_w:.1f} mg/dL is
+{'*smaller* than' if closer_than_real else 'comparable to'} the
+Ohio-vs-Shanghai baseline of {ohio_vs_shang_w:.1f} mg/dL — meaning the
+simulator's pooled BG distribution is
+{'closer to OhioT1DM than the two real cohorts are to each other' if closer_than_real else 'within the same band as the two real cohorts'}.
+"""
+    return md
 
 
 def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
@@ -940,6 +1229,10 @@ def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
         r["delta_std"] for r in cohorts[x]["per"] if "delta_std" in r
     ])) for x in ORDER}
 
+    # ML-friendly section (volume, normalization, class balance, autocorr, ...)
+    ml_section_md = _build_ml_section(cohorts, distances, pooled_moments,
+                                       pooled_percentiles, cohort_summaries)
+
     md = f"""# T1DMSIM vs OhioT1DM vs ShanghaiT1DM — Statistical Comparison Report
 
 Comprehensive statistical comparison of the synthetic blood-glucose traces
@@ -953,6 +1246,10 @@ expanded excursion-level metrics.
 
 This file is regenerated end-to-end by `reports/build_report.py`. Raw stats
 are persisted to `reports/stats.json`; figures live in `reports/figures/`.
+
+---
+
+{ml_section_md}
 
 ---
 
@@ -1340,6 +1637,8 @@ def main():
     fig_pct_table_figure(cohorts, os.path.join(FIGS, "percentile_curves.png"))
     fig_qq(cohorts, os.path.join(FIGS, "qq.png"))
     fig_recovery(cohorts, os.path.join(FIGS, "recovery_time.png"))
+    fig_diurnal_lines(cohorts, os.path.join(FIGS, "diurnal_lines.png"))
+    fig_class_balance(cohorts, os.path.join(FIGS, "class_balance.png"))
 
     # Recovery-time summary per cohort
     recov_summaries = {n: recovery_summary(cohorts[n]["recov_times"]) for n in ORDER}
