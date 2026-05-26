@@ -115,14 +115,16 @@ STEPS_PER_DAY = 24 * 60 // DT_MINUTES  # 288
 # ============================================================================
 
 CURVES = [
-    {'key': 'bg_observed', 'name': 'Blood Glucose',     'color': COLOR_BG_OBS,  'unit': 'mg/dL', 'y_min': 30,  'y_max': 400, 'toggle_key': pygame.K_1},
+    {'key': 'bg_observed', 'name': 'Blood Glucose',     'color': COLOR_BG_OBS,  'unit': 'mg/dL', 'y_min': 20,  'y_max': 500, 'toggle_key': pygame.K_1},
     {'key': 'total_carb',  'name': 'Carb Intake',       'color': COLOR_CARB,    'unit': 'g/step','y_min': 0,   'y_max': 20,   'toggle_key': pygame.K_2},
-    {'key': 'total_insulin','name': 'Insulin',           'color': COLOR_INSULIN, 'unit': 'U/step','y_min': 0,   'y_max': 2,   'toggle_key': pygame.K_3},
-    {'key': 'insulin_resistance','name': 'Insulin Resistance','color': COLOR_IS,'unit': '×',  'y_min': 0,   'y_max': 3,   'toggle_key': pygame.K_4},
-    {'key': 'total_exercise','name': 'Exercise',         'color': COLOR_EXERCISE,'unit': 'g/step','y_min': 0,   'y_max': 10,   'toggle_key': pygame.K_5},
-    {'key': 'bg_delta',    'name': 'BG Delta',           'color': COLOR_DELTA,   'unit': 'mg/dL', 'y_min': -20, 'y_max': 10,  'toggle_key': pygame.K_6},
-    {'key': 'hgo',          'name': 'Hepatic Output', 'color': (200, 200, 50), 'unit': 'g/step', 'y_min': 0, 'y_max': 1.5, 'toggle_key': pygame.K_7},
-    {'key': 'glucose_in', 'name': 'Glucose In', 'color': (255, 100, 100), 'unit': 'g/step', 'y_min': 0, 'y_max': 20, 'toggle_key': pygame.K_8},
+    {'key': 'total_insulin','name': 'Insulin (total)',  'color': COLOR_INSULIN, 'unit': 'U/step','y_min': 0,   'y_max': 2,   'toggle_key': pygame.K_3},
+    {'key': 'basal_insulin','name': 'Basal',             'color': (140, 200, 255), 'unit': 'U/step','y_min': 0, 'y_max': 0.3, 'toggle_key': pygame.K_4},
+    {'key': 'bolus_insulin','name': 'Bolus',             'color': (100, 160, 255), 'unit': 'U/step','y_min': 0, 'y_max': 2,   'toggle_key': pygame.K_5},
+    {'key': 'insulin_resistance','name': 'Insulin Resistance','color': COLOR_IS,'unit': '×',  'y_min': 0,   'y_max': 3,   'toggle_key': pygame.K_6},
+    {'key': 'total_exercise','name': 'Exercise',        'color': COLOR_EXERCISE,'unit': 'g/step','y_min': 0,   'y_max': 10,   'toggle_key': pygame.K_7},
+    {'key': 'bg_delta',    'name': 'BG Delta',          'color': COLOR_DELTA,   'unit': 'mg/dL', 'y_min': -20, 'y_max': 10,  'toggle_key': pygame.K_8},
+    {'key': 'hgo',          'name': 'Hepatic Output',   'color': (200, 200, 50), 'unit': 'g/step', 'y_min': 0, 'y_max': 1.5, 'toggle_key': pygame.K_9},
+    {'key': 'glucose_in', 'name': 'Glucose In',         'color': (255, 100, 100), 'unit': 'g/step', 'y_min': 0, 'y_max': 20, 'toggle_key': pygame.K_0},
 ]
 
 
@@ -192,7 +194,11 @@ class Visualizer:
         # Initial zoom: fit DEFAULT_ZOOM_HOURS into the available chart width
         steps_per_hour = 60 // DT_MINUTES
         self.pixels_per_step = self._chart_rect().width / (DEFAULT_ZOOM_HOURS * steps_per_hour)
-        self.curve_visible = [True, True, True, True, False, False, False, False]  # Which curves are shown
+        # One visibility flag per entry in CURVES, in the same order. Defaults:
+        # BG (1), carbs (2), total insulin (3), basal (4), IR (6) visible; the
+        # rest hidden but toggleable via the digit keys bound in each CURVES
+        # entry's `toggle_key` field.
+        self.curve_visible = [True, True, True, True, False, True, False, False, False, False]
         self.hovered_step = None     # Step under mouse cursor
 
         # Burn off the first day so display starts after dynamics settle, then
@@ -323,11 +329,13 @@ class Visualizer:
 
         summary = self.sim.get_patient_summary()
         param_keys = ['is_base', 'icr', 'correction_factor', 'basal_dose',
-                      'cgm_check_interval', 'patience_time', 'exercise_prob',
-                      'basal_miss_prob', 'slow_carb_pref', 'panic_factor']
+                      'basal_duration', 'cgm_check_interval', 'patience_time',
+                      'exercise_prob', 'basal_miss_prob', 'slow_carb_pref',
+                      'panic_factor']
         param_labels = ['IS Base', 'ICR', 'Correction Factor', 'Basal Dose',
-                        'CGM Check Interval', 'Patience Time', 'Exercise Prob',
-                        'Basal Miss Prob', 'Slow Carb Pref', 'Panic Factor']
+                        'Basal Duration', 'CGM Check Interval', 'Patience Time',
+                        'Exercise Prob', 'Basal Miss Prob', 'Slow Carb Pref',
+                        'Panic Factor']
 
         param_col_x = x + self._s(150)
         for label, key in zip(param_labels, param_keys):
@@ -373,15 +381,22 @@ class Visualizer:
                 draw_text(self.buffer, self.font_sm, val, stats_col_x, y, color)
                 y += line_sm
 
-        # Curve legend / toggles
+        # Curve legend / toggles. Each row shows the actual digit key bound
+        # to that curve via its `toggle_key` field — not its position in the
+        # CURVES list — so the on-screen label matches what the keyboard
+        # handler does (otherwise inserting a curve in the middle of CURVES
+        # would silently drift labels off of the bindings).
         y += self._s(15)
-        draw_text(self.buffer, self.font_md, "— Curves (1-8) —", x, y, TEXT_DIM)
+        draw_text(self.buffer, self.font_md, "— Curves (0-9) —", x, y, TEXT_DIM)
         y += line_md + self._s(4)
 
         for i, curve in enumerate(CURVES):
             prefix = "●" if self.curve_visible[i] else "○"
             color = curve['color'] if self.curve_visible[i] else TEXT_DIM
-            draw_text(self.buffer, self.font_sm, f"[{i+1}] {prefix} {curve['name']}", x, y, color)
+            tk = curve.get('toggle_key')
+            digit = (tk - pygame.K_0) if tk is not None else None
+            label = f"[{digit}]" if digit is not None else "[ ]"
+            draw_text(self.buffer, self.font_sm, f"{label} {prefix} {curve['name']}", x, y, color)
             y += line_sm
 
         # Controls
@@ -391,7 +406,7 @@ class Visualizer:
         controls = [
             "SPACE  Generate +24h",
             "R      Random reseed",
-            "0-9    Seed by digit",
+            "0-9    Toggle curves",
             "←→     Scroll time",
             "+−     Zoom",
             "HOME   Jump to start",
@@ -729,11 +744,12 @@ class Visualizer:
                         self._reseed(np.random.randint(0, 100000))
 
                     elif event.key in range(pygame.K_0, pygame.K_9 + 1):
-                        digit = event.key - pygame.K_0
-                        if digit >= 1 and digit <= 8:
-                            self.curve_visible[digit - 1] = not self.curve_visible[digit - 1]
-                        elif digit == 0:
-                            self._reseed(0)
+                        # Toggle the CURVES entry whose toggle_key matches.
+                        # Keys not bound to any curve fall through (no-op).
+                        for i, c in enumerate(CURVES):
+                            if c.get('toggle_key') == event.key:
+                                self.curve_visible[i] = not self.curve_visible[i]
+                                break
 
                     elif event.key == pygame.K_a:
                         all_on = all(self.curve_visible)

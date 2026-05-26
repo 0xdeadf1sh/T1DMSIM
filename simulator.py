@@ -163,23 +163,61 @@ ILLNESS_IS_RAMP_RATE = 0.4  # How fast illness IS factor changes per day (0 to 1
 # Basal insulin (long-acting)
 # Note: ideal basal dose is derived from HGO and ICR in generate_patient().
 BASAL_DOSE_SIGMA = 4.5  # Sigma around the HGO/ICR-derived ideal dose (inter-patient)
-BASAL_DOSE_COMPETENCE_NOISE = 0.15  # Day-to-day relative noise on basal dose, scaled by 1/s3.
-                                    # Modest — larger noise produces low-skill day-to-day basal
-                                    # swings around 20% that push TBR1 above the real-cohort band.
-BASAL_DURATION_HOURS = 28.0  # Duration of action
-BASAL_MISS_PROB_BASE = 0.10  # Base probability of missing basal dose
+BASAL_DOSE_COMPETENCE_NOISE = 0.05  # Day-to-day relative noise on basal dose, scaled by 1/s3.
+                                    # Tightened from 0.15: real intra-individual basal CV is 5-15%
+                                    # for modern long-acting analogues (glargine ~12%, degludec ~6%),
+                                    # not 20-30%. Larger values produced visible "uneven hill" basal
+                                    # traces from dose-to-dose magnitude swings.
+BASAL_DURATION_HOURS = 28.0  # Population reference duration of action (kept for
+                              # tests and as the basal_curve default). Real per-patient
+                              # duration is sampled in generate_patient from the
+                              # [BASAL_DURATION_HOURS_MIN, BASAL_DURATION_HOURS_MAX] range
+                              # below, and the patient's injection cadence matches it
+                              # (e.g. an 18h-duration patient injects every 18h).
+BASAL_DURATION_HOURS_MIN = 18.0   # Shortest plausible long-acting basal duration (per patient)
+BASAL_DURATION_HOURS_MAX = 30.0   # Longest plausible long-acting basal duration (per patient)
+BASAL_MISS_PROB_BASE = 0.02  # Base probability of fully skipping a basal dose. Lowered from
+                              # 0.10: at the legacy rate even high-skill patients missed ~1%, and
+                              # low-skill patients missed ~35%, producing long full-cadence zero
+                              # gaps in the basal trace. Real T1D MDI patients fully skip <3% of
+                              # long-acting doses; "missed" doses are usually delayed by a few
+                              # hours, not skipped (the PK overlap below absorbs short delays).
 BASAL_MISS_SKILL_SCALE = 5.0  # How much skills reduce miss probability
 BASAL_CORRECTION_MAX_ADJUSTMENT = 0.22  # Max % a patient will adjust basal vs base dose in one day.
                                         # Set wide enough that under-dosed IR patients can break out of
                                         # stuck-high streaks (lower caps left mean BG > 200 mg/dL for
                                         # weeks at a time even averaging over 7 days).
-BASAL_KA_PER_HOUR = 0.6   # Absorption rate (1/h). Governs onset/time-to-peak.
-                          # tmax = ln(ka/ke)/(ka-ke) ≈ 3.7h for ka=0.6, ke=0.09 — glargine-like.
-BASAL_KE_PER_HOUR = 0.09  # Elimination rate (1/h). Half-life ≈ 7.7h; produces a
-                          # long, smooth post-peak decline rather than a flat plateau.
+BASAL_KA_PER_HOUR = 0.30  # Absorption rate (1/h). Governs onset/time-to-peak.
+                          # tmax = ln(ka/ke)/(ka-ke) ≈ 6.3h for ka=0.30, ke=0.07 —
+                          # broader-peak long-acting profile sitting between glargine
+                          # (peak ~4h) and degludec (peak ~9h). The flatter shape is
+                          # required so consecutive doses at cadence = basal_duration_hours
+                          # produce a near-flat cumulative basal trace rather than a
+                          # peak-and-trough hill pattern.
+BASAL_KE_PER_HOUR = 0.07  # Elimination rate (1/h). Half-life ≈ 9.9h; produces a
+                          # broad peak and slow decline so the unit dose stays
+                          # within ~50% of peak for the full cadence window.
 BASAL_TAIL_CLIP_HOURS = 5.0  # Smootherstep window at the end of the curve that
                              # tapers the late residual to zero, so consecutive
                              # daily doses join without a tail-step discontinuity.
+# Each scheduled basal dose generates a curve of duration
+#   patient.basal_duration_hours * (1 + BASAL_PK_OVERLAP_FRACTION)
+# so consecutive doses overlap. With the overlap at 1.0 the PK lasts twice
+# the cadence — two-to-three doses always contribute simultaneously, so the
+# trace stays smooth across normal handoffs AND a single missed dose is
+# bridged by the previous dose's still-active tail. The 24h-integral of
+# delivered insulin is unchanged (per-dose amount scales with the cadence,
+# see `_generate_day_events`); overlap only redistributes per-step amplitude.
+BASAL_PK_OVERLAP_FRACTION = 1.00
+
+# Per-basal-dose damping of the lipohypertrophy site-quality multiplier.
+# `_site_quality` returns a per-injection absorption factor whose variance
+# is calibrated for rapid-acting bolus into abdomen (the dominant rotation
+# site). Long-acting basal goes into larger, less-frequently-used depots
+# (thigh, buttock) and has much more consistent dose-to-dose absorption.
+# We contract the per-basal site multiplier toward 1.0 by this factor so
+# the basal trace doesn't inherit bolus-grade per-dose noise.
+BASAL_SITE_QUALITY_DAMPING = 0.30
 # Legacy aliases kept for tests / warmup math. With the Bateman PK these no
 # longer represent literal trapezoid ramps — interpret as "approx time-to-peak"
 # and "tail-clip duration" respectively.
@@ -423,9 +461,9 @@ SEVERE_HYPO_REFRACTORY_MIN = 10.0      # Shorter refractory for severe hypo (<55
                                        # the CGM-check bypass let the patient eat every 5 min, stacking
                                        # 3-5 rage doses (60+ g) and producing visible sawtooth as BG
                                        # bounced between severe hypo and post-overcorrection peaks.
-POST_HYPO_BASAL_SUSPEND_DURATION_HOURS = 2.0  # Scale-down window after any hypo correction. Widened from 1.5 — basal kept pulling BG back down before the rescue + follow-up tail had fully cleared.
-POST_HYPO_BASAL_SUSPEND_FACTOR = 0.35          # Basal contribution multiplier at the plateau of the suspend window.
-POST_HYPO_BASAL_SUSPEND_RAMP_MIN = 20.0        # Smootherstep ramp-in and ramp-out width (minutes) at each edge of the suspend window — eliminates the on/off step discontinuity in total_insulin.
+POST_HYPO_BASAL_SUSPEND_DURATION_HOURS = 6.0  # Scale-down window after any hypo correction. The sin² envelope below has max slope π/window, so a 6h window with depth 0.35 caps the worst single-envelope 10-min change at ~3%, and even at multi-envelope crossover points the per-10-min change stays under ~6%. Widened from the legacy 2h trapezoidal window after the user observed ~56% 10-min drops in total_insulin.
+POST_HYPO_BASAL_SUSPEND_FACTOR = 0.65          # Basal contribution multiplier at the peak of the suspend window. Shallower than the legacy 0.35 — the integrated suspend stays close to the original (0.35 × 0.5 × 360 ≈ 63 unit-minutes vs legacy ~65) but spread over a wider window so per-step changes are gentle.
+POST_HYPO_BASAL_SUSPEND_RAMP_MIN = 20.0        # Legacy constant from the previous smootherstep-plus-plateau implementation. The active envelope is now a single sin² profile over the full duration window (no separate ramp/plateau), so this constant is unused — kept only for backward compatibility with anything that imports it.
 
 # Rage behavior
 RAGE_EAT_BG_THRESHOLD = 50.0       # Below this, patient may rage eat
@@ -547,6 +585,9 @@ class PatientProfile:
     icr: float = 10.0
     correction_factor: float = 40.0
     basal_dose: float = 20.0
+    basal_duration_hours: float = BASAL_DURATION_HOURS  # Per-patient action duration
+                                                         # AND injection cadence (patient
+                                                         # boluses every basal_duration_hours).
     dawn_hgo_amplitude: float = DAWN_HGO_AMPLITUDE_MEAN
     night_hgo_dip_amplitude: float = NIGHT_HGO_DIP_AMPLITUDE_MEAN
     exercise_duration_mean_min: float = EXERCISE_DURATION_MEAN_MIN
@@ -617,8 +658,16 @@ class SimulatorState:
     glucotox_bg_ema: float = 120.0  # 6h EMA of true BG, drives glucotoxic IR
     # Hypo correction tracking (see HYPO_CORRECTION_REFRACTORY_MIN).
     last_hypo_correction_idx: int = -9999
-    post_hypo_basal_suspend_until_idx: int = -1
-    post_hypo_basal_suspend_start_idx: int = -1
+    # Active post-hypo basal-suspend envelopes — each entry is
+    # (start_idx, until_idx). Multiple can overlap when corrections fire in
+    # close succession; the effective factor is the min across active
+    # envelopes, which keeps the per-step transition smooth (an extra
+    # correction can deepen the suspend but never jumps the factor upward).
+    post_hypo_basal_suspend_windows: list = field(default_factory=list)
+    # Time index of the next scheduled basal injection. -1 = uninitialised
+    # (anchored to the first day's wake_idx on the first _generate_day_events
+    # call). Advanced by patient.basal_duration_hours after each schedule.
+    next_basal_due_idx: int = -1
 
 
 # ============================================================================
@@ -655,10 +704,13 @@ def basal_curve(total_amount: float, duration_minutes: float,
 
     Models subcutaneous basal as first-order absorption + first-order
     elimination: ``f(t) = exp(-ke·t) - exp(-ka·t)``. The result is a smooth
-    rise from zero, a broad peak at ``tmax = ln(ka/ke)/(ka-ke)`` (~3.7h for
-    the default rates), and a long exponential-like decline matching real
-    long-acting analogues (glargine, detemir). There is no flat plateau and
-    no slope discontinuity anywhere.
+    rise from zero, a broad peak at ``tmax = ln(ka/ke)/(ka-ke)`` (~6.3h for
+    the default rates), and a long, gentle post-peak decline matching real
+    long-acting analogues (between glargine and degludec). There is no flat
+    plateau and no slope discontinuity anywhere. The shape is intentionally
+    flatter than glargine PK so that doses scheduled at a cadence of one
+    duration-of-action — and thus not overlapping in their high-amplitude
+    middles — still produce a near-flat cumulative basal trace.
 
     A smootherstep window over the last ``tail_clip_hours`` tapers the late
     residual to zero so consecutive daily doses join without a tail-step.
@@ -806,6 +858,15 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     # Clamp widened from [5, 40] to [5, 80] — heavy IR patients can legitimately
     # need 60+ U basal/day (e.g., 110kg patient with IR=1.8).
     profile.basal_dose = float(np.clip(rng.normal(ideal_basal, noise_scale), 5.0, 80.0))
+
+    # Per-patient long-acting basal duration of action. The patient also
+    # injects at this same cadence (an 18h-duration patient injects every
+    # 18h; a 30h-duration patient injects every 30h, often skipping a
+    # calendar day). basal_dose stays as the 24h-equivalent total need so
+    # the HGO/ICR balance invariant is unchanged; the per-injection amount
+    # is scaled by basal_duration_hours/24 at scheduling time.
+    profile.basal_duration_hours = float(rng.uniform(
+        BASAL_DURATION_HOURS_MIN, BASAL_DURATION_HOURS_MAX))
 
     # Behavioral parameters derived from skills
     wake_sigma = WAKE_TIME_SIGMA_BASE / (0.3 + 0.7 * s4)
@@ -1122,7 +1183,6 @@ class T1DMSimulator:
         anomalous_applied = False  # Only apply to first eligible event
 
         # --- Basal insulin ---
-        basal_time_idx = max(self.state.current_idx, wake_idx + int(self.rng.normal(0, 30) / DT_MINUTES))
         # Slow basal adjustment based on recent BG history (patient learns over days).
         # Uses a 3-day rolling mean so single bad days don't whipsaw the dose,
         # but persistent over- or under-dosing self-corrects within a couple
@@ -1198,16 +1258,50 @@ class T1DMSimulator:
             s.basal_dose_drift + BASAL_DRIFT_ALPHA * (basal_adjustment - 1.0),
             0.5, 1.6))
 
-        if self.rng.random() > p.basal_miss_prob:
-            # Administer basal — multiplied by injection-site quality for the day
-            dose_noise = 1.0 + self.rng.normal(0, BASAL_DOSE_COMPETENCE_NOISE * (1.2 - eff_s3))
-            site_q = self._site_quality(eff_s4)
-            actual_dose = max(1.0, p.basal_dose * s.basal_dose_drift * dose_noise * basal_adjustment * site_q)
-            duration = BASAL_DURATION_HOURS * 60
-            curve = basal_curve(float(actual_dose), duration)
-            self._pending_events.append((basal_time_idx, 'basal', {
-                'curve': curve, 'label': f'Basal {actual_dose:.1f}U'
-            }))
+        # --- Schedule all basals that fall inside today's window ---
+        # Cadence between consecutive injections = patient.basal_duration_hours
+        # (the patient is aware of their basal's duration of action and
+        # re-doses on that schedule). For an 18h-duration patient this means
+        # ~4 injections every 3 days; for a 30h-duration patient ~4 every 5
+        # days. Some days will have zero injections (long duration) and some
+        # will have two (short duration, schedule alignment) — both fine.
+        day_end_idx = day_start_idx + STEPS_PER_DAY
+        basal_duration_steps = max(1, int(p.basal_duration_hours * 60 / DT_MINUTES))
+        # Per-injection amount scales with cadence so 24h-average insulin
+        # delivery stays at p.basal_dose / 24h regardless of duration:
+        # a 30h-cadence dose is larger because it has to last longer.
+        per_dose_factor = p.basal_duration_hours / 24.0
+
+        if s.next_basal_due_idx < 0:
+            # First-ever basal — anchor at today's wake_idx (un-jittered;
+            # the per-iteration jitter below adds the ±30 min noise).
+            s.next_basal_due_idx = wake_idx
+
+        while s.next_basal_due_idx < day_end_idx:
+            jitter_steps = int(self.rng.normal(0, 30) / DT_MINUTES)
+            dose_idx = max(self.state.current_idx, s.next_basal_due_idx + jitter_steps)
+
+            if self.rng.random() > p.basal_miss_prob:
+                # Administer basal — multiplied by injection-site quality
+                dose_noise = 1.0 + self.rng.normal(0, BASAL_DOSE_COMPETENCE_NOISE * (1.2 - eff_s3))
+                # Contract site-quality deviation toward 1.0: long-acting basal
+                # sites are more absorption-consistent than rapid-acting sites.
+                raw_site_q = self._site_quality(eff_s4)
+                site_q = 1.0 + (raw_site_q - 1.0) * BASAL_SITE_QUALITY_DAMPING
+                actual_dose = max(0.5, p.basal_dose * per_dose_factor
+                                  * s.basal_dose_drift * dose_noise
+                                  * basal_adjustment * site_q)
+                duration = p.basal_duration_hours * (1.0 + BASAL_PK_OVERLAP_FRACTION) * 60
+                curve = basal_curve(float(actual_dose), duration)
+                self._pending_events.append((dose_idx, 'basal', {
+                    'curve': curve,
+                    'label': f'Basal {actual_dose:.1f}U ({p.basal_duration_hours:.1f}h)',
+                }))
+
+            # Advance whether or not the injection was missed — patient still
+            # intended to inject at this slot, so the next attempt is one
+            # full duration of action later.
+            s.next_basal_due_idx = dose_idx + basal_duration_steps
 
         # --- Meals ---
         if s.is_rare_event_day:
@@ -1667,11 +1761,12 @@ class T1DMSimulator:
             # keeps clearing glucose as fast as the patient eats, producing a
             # sawtooth of repeated snacks that never bring BG back to range.
             suspend_steps = int(POST_HYPO_BASAL_SUSPEND_DURATION_HOURS * 60 / DT_MINUTES)
-            if time_idx >= s.post_hypo_basal_suspend_until_idx:
-                # No active suspend — start a fresh one (anchor the ramp-in).
-                s.post_hypo_basal_suspend_start_idx = time_idx
-            s.post_hypo_basal_suspend_until_idx = max(
-                s.post_hypo_basal_suspend_until_idx, time_idx + suspend_steps)
+            # Each correction adds a fresh sin² envelope anchored at the
+            # current step. Overlapping envelopes are combined by taking the
+            # min factor at each step, so the transition stays smooth no
+            # matter how often corrections fire.
+            s.post_hypo_basal_suspend_windows.append(
+                (time_idx, time_idx + suspend_steps))
 
             # After a SEVERE hypo correction, recheck soon (don't wait the full
             # CGM interval). Mild hypos keep the normal cadence so they linger
@@ -1811,27 +1906,30 @@ class T1DMSimulator:
         bolus_step = float(self._bolus_totals[idx]) if idx < len(self._bolus_totals) else 0.0
         # Post-hypo basal stand-down (set by _check_cgm_and_correct after any
         # hypo correction). Represents pump suspend / next-basal skip behavior.
-        # Apply via a smootherstep envelope: ramp 1.0 → factor over the first
-        # POST_HYPO_BASAL_SUSPEND_RAMP_MIN at the start of the window, plateau
-        # at factor through the middle, ramp factor → 1.0 over the last
-        # POST_HYPO_BASAL_SUSPEND_RAMP_MIN at the end. A hard step (the
-        # previous behaviour) created two visible discontinuities in
-        # total_insulin per hypo correction.
-        if (s.post_hypo_basal_suspend_start_idx <= idx
-                < s.post_hypo_basal_suspend_until_idx):
-            ramp_steps = max(1, int(POST_HYPO_BASAL_SUSPEND_RAMP_MIN / DT_MINUTES))
-            progress_in = idx - s.post_hypo_basal_suspend_start_idx
-            progress_out = s.post_hypo_basal_suspend_until_idx - idx
-            factor = POST_HYPO_BASAL_SUSPEND_FACTOR
-            if progress_in < ramp_steps:
-                t = progress_in / ramp_steps
-                w = t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
-                factor = 1.0 + w * (POST_HYPO_BASAL_SUSPEND_FACTOR - 1.0)
-            elif progress_out <= ramp_steps:
-                t = (ramp_steps - progress_out) / ramp_steps
-                w = t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
-                factor = POST_HYPO_BASAL_SUSPEND_FACTOR + w * (1.0 - POST_HYPO_BASAL_SUSPEND_FACTOR)
-            basal_step *= factor
+        # Each correction queues a sin² envelope over the suspend window;
+        # multiple overlapping envelopes are combined by taking the minimum
+        # factor at each step. The sin² profile is C∞-smooth (no slope
+        # discontinuities anywhere) with max slope π / window — over a 4h
+        # window with depth 0.50 the worst 10-min change is ~6.5%. The
+        # min-over-envelopes combiner means a fresh correction during an
+        # ongoing suspend deepens or extends the dip without ever jumping
+        # the factor upward.
+        if s.post_hypo_basal_suspend_windows:
+            min_factor = 1.0
+            still_active = []
+            for start, until in s.post_hypo_basal_suspend_windows:
+                if idx >= until:
+                    continue  # expired — drop it
+                still_active.append((start, until))
+                if idx < start:
+                    continue
+                total = until - start
+                envelope = np.sin(np.pi * (idx - start) / total) ** 2
+                factor = 1.0 - envelope * (1.0 - POST_HYPO_BASAL_SUSPEND_FACTOR)
+                if factor < min_factor:
+                    min_factor = factor
+            s.post_hypo_basal_suspend_windows = still_active
+            basal_step *= min_factor
         total_insulin = basal_step + bolus_step
         total_exercise = float(self._exercise_totals[idx]) if idx < len(self._exercise_totals) else 0.0
 
@@ -1846,7 +1944,10 @@ class T1DMSimulator:
         if total_carb > 0.0:
             total_carb = max(0.0, total_carb * (1.0 + self._ar_carb))
         if total_insulin > 0.0:
-            total_insulin = max(0.0, total_insulin * (1.0 + self._ar_insulin))
+            insulin_noise = 1.0 + self._ar_insulin
+            total_insulin = max(0.0, total_insulin * insulin_noise)
+            basal_step = max(0.0, basal_step * insulin_noise)
+            bolus_step = max(0.0, bolus_step * insulin_noise)
 
         # --- HGO with insulin-mediated suppression (Hill function) ---
         # Plasma insulin lags subcutaneous absorption, so feed an EMA-smoothed
@@ -2017,6 +2118,8 @@ class T1DMSimulator:
             'bg_delta': bg_delta,
             'total_carb': total_carb,
             'total_insulin': total_insulin,
+            'basal_insulin': basal_step,
+            'bolus_insulin': bolus_step,
             'total_exercise': total_exercise,
             'insulin_resistance': insulin_resistance_factor,
             'hgo': hgo_value,
@@ -2035,7 +2138,8 @@ class T1DMSimulator:
         results: dict = {
             'index': [], 'time_hours': [], 'day': [], 'hour_of_day': [],
             'bg': [], 'bg_observed': [], 'bg_delta': [],
-            'total_carb': [], 'total_insulin': [], 'total_exercise': [],
+            'total_carb': [], 'total_insulin': [], 'basal_insulin': [],
+            'bolus_insulin': [], 'total_exercise': [],
             'insulin_resistance': [], 'hgo': [], 'glucose_in': [], 'glucose_out': [],
             'is_sick': [], 'is_rare_day': [], 'is_weekend': [], 'is_holiday': [],
             'alcohol_hgo_factor': [],
@@ -2059,6 +2163,7 @@ class T1DMSimulator:
             'icr': f'{p.icr:.1f}',
             'correction_factor': f'{p.correction_factor:.1f}',
             'basal_dose': f'{p.basal_dose:.1f}U',
+            'basal_duration': f'{p.basal_duration_hours:.1f}h',
             'cgm_check_interval': f'{p.cgm_check_interval_min:.0f}min',
             'patience_time': f'{p.patience_time_min:.0f}min',
             'exercise_prob': f'{p.exercise_probability:.2f}',
