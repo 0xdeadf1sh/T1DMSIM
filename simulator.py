@@ -27,7 +27,7 @@ STEPS_PER_DAY = 24 * 60 // DT_MINUTES  # 288 steps per day
 
 # Skill correlation
 SKILL_CORRELATION = 0.7  # Off-diagonal correlation in skill covariance matrix
-SKILL_VARIANCE = 0.5  # Lower = more patients near average, fewer extremes
+SKILL_VARIANCE = 0.30  # Lower = more patients near average, fewer extremes.
 SKILL_MIN = 0.25  # Lowest possible skill level (0 = no skill)
 SKILL_MAX = 0.95  # Highest possible skill level (1 = perfect)
 
@@ -39,11 +39,11 @@ SLEEP_DURATION_SIGMA_HOURS = 1.0
 
 # Meals
 MEALS_BASE = 3  # Base number of meals per day
-MEALS_EXTRA_LAMBDA = 2.0  # Extra meals Poisson lambda, scaled by (1 - s1)
+MEALS_EXTRA_LAMBDA = 3.5  # Extra meals Poisson lambda, scaled by (1 - s1). High value provides sub-day stochastic shocks that decorrelate the BG trace at mid-range lags.
 MEAL_TIME_OFFSETS_HOURS = [0.5, 5.0, 11.0]  # Breakfast, lunch, dinner offset from wake
 MEAL_TIME_JITTER_BASE_MIN = 15.0  # Base jitter in minutes, scaled by 1/s4
-MEAL_CARB_MEANS = [48.0, 63.0, 75.0]  # Mean carbs (g) per meal slot. Bumped ~15% from 40/55/65
-                                       # in P5 to close the 25 g/day shortfall vs OhioT1DM (193 g/day).
+MEAL_CARB_MEANS = [48.0, 63.0, 75.0]  # Mean carbs (g) per meal slot. Sized so daily carb load
+                                       # matches the OhioT1DM (~193 g/day) and Shanghai cohort intake.
 MEAL_CARB_SIGMA = 22.0  # Sigma for carb amount
 MEAL_CARB_DISCIPLINE_SCALE = 0.7  # How much s1 reduces carb intake
 SNACK_CARB_MEAN = 20.0
@@ -80,7 +80,7 @@ HYPO_CARB_THETA = 15.0  # Peak ~15 min
 # Slow-tail follow-up snack after a hypo correction (clinical "rule-of-15 plus snack").
 # Damps the recurrent dip 60-90 min later when fast carbs are gone but the meal bolus is
 # still acting. Skill-gated: only attentive patients remember the follow-up.
-HYPO_FOLLOWUP_FRACTION = 0.20      # Fraction of rescue dose, delivered as slow carbs.
+HYPO_FOLLOWUP_FRACTION = 0.30      # Fraction of rescue dose, delivered as slow carbs. Longer slow-carb tail keeps BG above 70 through the next hour, blocking re-hypo.
 HYPO_FOLLOWUP_GAMMA_K = 4.0        # Slow gamma — peaks around 90 min
 HYPO_FOLLOWUP_GAMMA_THETA = 30.0   # Tail extends ~5h
 HYPO_FOLLOWUP_SKILL_THRESHOLD = 0.30  # Most patients eat the follow-up; only the very lowest-skill skip it.
@@ -107,10 +107,9 @@ MIXED_MEAL_SLOW_K_RANGE = (3.5, 5.0)
 MIXED_MEAL_SLOW_THETA_RANGE = (22.0, 35.0)
 MIXED_MEAL_MED_WEIGHT_BASE = 0.4  # Base weight for medium-speed components
 
-# Body weight and insulin resistance — two per-patient axes added in P2 of
-# OhioT1DM alignment. Real T1D populations include thin sensitive patients
-# (low TDD ~25 U/day) and heavy IR patients (TDD >100 U/day); the previous
-# single-axis IS_BASE model couldn't span that range.
+# Body weight and insulin resistance — two per-patient axes. Real T1D
+# populations include thin sensitive patients (low TDD ~25 U/day) and heavy
+# IR patients (TDD >100 U/day); both ends need to be reachable.
 #
 # body_weight_kg scales HGO (heavier liver → more endogenous glucose) and via
 # the basal-balance rule, basal dose. insulin_resistance_factor scales ICR
@@ -122,23 +121,22 @@ BODY_WEIGHT_MEAN_KG = 75.0
 BODY_WEIGHT_SIGMA_KG = 18.0
 BODY_WEIGHT_MIN_KG = 45.0
 BODY_WEIGHT_MAX_KG = 130.0
-IR_LOGNORMAL_SIGMA = 0.30       # σ of log(insulin_resistance_factor); factor range ~[0.5, 2.0]
-IR_FACTOR_MIN = 0.40
-IR_FACTOR_MAX = 2.50
+IR_LOGNORMAL_SIGMA = 0.08       # σ of log(insulin_resistance_factor); tight to bound the heavy hyper tail
+IR_FACTOR_MIN = 0.50            # Floor on the IR axis — wider would re-introduce sensitive-seed TBR drift
+IR_FACTOR_MAX = 1.50            # Cap on the IR axis; allows ~3× population IR span vs the floor
 IR_TO_IS_NOISE_SIGMA = 0.10     # Additional per-patient noise so is_base isn't a deterministic
                                  # function of ir_factor (real ICR/IS are correlated, not identical)
 IR_TO_ICR_NOISE_SIGMA = 0.12    # Same for ICR
 
-# Insulin sensitivity. is_base is now derived from insulin_resistance_factor
-# (per P2) rather than sampled independently; this constant stays as the
-# reference centerpoint for the lognormal draw and isn't directly used in
-# generation any more.
+# Insulin sensitivity. is_base is derived from insulin_resistance_factor
+# rather than sampled independently; this constant stays as the reference
+# centerpoint for the lognormal draw and isn't directly used in generation.
 IS_BASE_MEAN = 1.0
 IS_BASE_SIGMA = 0.2
-IS_DAILY_DRIFT_SIGMA = 0.10  # Day-to-day drift (scaled per-patient by (1.5 - s4)). Lowered from 0.16 —
-                             # 16% day-to-day IS swings produced sim CV of 49% vs real 36%, pushing TBR1
+IS_DAILY_DRIFT_SIGMA = 0.10  # Day-to-day drift (scaled per-patient by (1.5 - s4)). Modest magnitude;
+                             # larger values blow CV above real-cohort levels and push TBR1
                              # well above OhioT1DM's ~3%.
-IS_FAST_NOISE_SIGMA = 0.025  # Step-to-step noise (was 0.04 — same reason).
+IS_FAST_NOISE_SIGMA = 0.025  # Step-to-step noise; small for the same reason as IS_DAILY_DRIFT_SIGMA.
 IS_DAWN_PHASE_DAILY_SIGMA = 1.5  # Hours of day-to-day variation in dawn phenomenon timing
 IS_DRIFT_TRANSITION_HOURS = 4.0  # Smooth blend across midnight from prev to today's drift/phase
 
@@ -147,10 +145,10 @@ IS_DRIFT_TRANSITION_HOURS = 4.0  # Smooth blend across midnight from prev to tod
 # peaking ~8am driven mainly by cortisol-mediated IR + dawn HGO surge; a
 # milder evening cortisol peak; and lowest BG around 11pm-2am during deep
 # sleep when IS is highest.
-IS_MORNING_PEAK_HOUR = 7.5    # Morning resistance peak (was 7.0; aligns with real 8am BG peak)
-IS_MORNING_AMPLITUDE = 0.30   # Strength of morning resistance (was 0.25)
+IS_MORNING_PEAK_HOUR = 7.5    # Morning resistance peak (aligns with real-cohort 8 am BG peak)
+IS_MORNING_AMPLITUDE = 0.30   # Strength of morning resistance
 IS_EVENING_PEAK_HOUR = 20.0   # Evening resistance peak
-IS_EVENING_AMPLITUDE = 0.08   # Strength of evening resistance (was 0.20 — caused 22:00 BG overshoot)
+IS_EVENING_AMPLITUDE = 0.08   # Strength of evening resistance. Modest — larger values produce a 22:00 BG overshoot.
 IS_NIGHT_DIP_HOUR = 2.0       # Nighttime sensitivity peak (low resistance)
 IS_NIGHT_DIP_AMPLITUDE = 0.15 # How much more sensitive at night
 
@@ -166,17 +164,15 @@ ILLNESS_IS_RAMP_RATE = 0.4  # How fast illness IS factor changes per day (0 to 1
 # Note: ideal basal dose is derived from HGO and ICR in generate_patient().
 BASAL_DOSE_SIGMA = 4.5  # Sigma around the HGO/ICR-derived ideal dose (inter-patient)
 BASAL_DOSE_COMPETENCE_NOISE = 0.15  # Day-to-day relative noise on basal dose, scaled by 1/s3.
-                                    # Lowered from 0.25 — at 0.25, low-skill patients saw 22%
-                                    # day-to-day basal swings that pushed TBR1 well above the
-                                    # OhioT1DM ~3% target.
+                                    # Modest — larger noise produces low-skill day-to-day basal
+                                    # swings around 20% that push TBR1 above the real-cohort band.
 BASAL_DURATION_HOURS = 28.0  # Duration of action
 BASAL_MISS_PROB_BASE = 0.10  # Base probability of missing basal dose
 BASAL_MISS_SKILL_SCALE = 5.0  # How much skills reduce miss probability
 BASAL_CORRECTION_MAX_ADJUSTMENT = 0.22  # Max % a patient will adjust basal vs base dose in one day.
-                                        # Raised from 0.12 in P5 — under-dosed IR patients couldn't
-                                        # break out of stuck-high BG (mean BG >200 for entire weeks)
-                                        # at 0.12, even averaging over 7 days. 0.22 lets a chronic-high
-                                        # patient effectively dose 22% above base within their cadence.
+                                        # Set wide enough that under-dosed IR patients can break out of
+                                        # stuck-high streaks (lower caps left mean BG > 200 mg/dL for
+                                        # weeks at a time even averaging over 7 days).
 BASAL_RAMP_UP_HOURS = 3.0 # How long it will take before basal insulin peaks in the bloodstream
 BASAL_RAMP_DOWN_HOURS = 4.0 # How long it will take before basal insulin decays completely (from peak)
 
@@ -192,7 +188,7 @@ BOLUS_DIA_DOSE_SCALE = 0.6  # Hours added per unit of sqrt(dose) - sqrt(5)
 BOLUS_DIA_MIN_HOURS = 3.0
 BOLUS_DIA_MAX_HOURS = 7.5
 BOLUS_THETA_DOSE_SLOPE = 0.06  # Theta multiplier per unit of sqrt(dose) - sqrt(5)
-ICR_MEAN = 10.0  # Insulin-to-carb ratio (1 unit per X grams)
+ICR_MEAN = 11.0  # Insulin-to-carb ratio (1 unit per X grams). Higher = smaller per-meal bolus; the resulting hyper drift is balanced by a lower `BG_HIGH_THRESHOLD` so corrections fire sooner and more often.
 ICR_SIGMA = 2.0
 BOLUS_TIMING_COMPETENT_MEAN = -5.0  # Minutes before meal (negative = before). A
 # small pre-bolus matches OhioT1DM behavior. Larger pre-boluses (e.g. -20 min)
@@ -201,10 +197,10 @@ BOLUS_TIMING_COMPETENT_MEAN = -5.0  # Minutes before meal (negative = before). A
 BOLUS_TIMING_INCOMPETENT_MEAN = 10.0  # Minutes after meal
 BOLUS_TIMING_SIGMA_BASE = 5.0  # Base timing variance
 
-# Carb counting error. Lowered from 0.60 → 0.35 when OhioT1DM target (~3% TBR) replaced
-# the earlier ~10% TBR target — the high sigma was the dominant source of meal-bolus
-# crashes pushing TBR1 well above real-world.
-CARB_COUNT_ERROR_SIGMA_BASE = 0.35  # Relative error, scaled by 1/s3
+# Carb counting error — relative SD around the true carb amount. A high
+# sigma is the dominant source of meal-bolus crashes that push TBR1 well
+# above the real-cohort band, so this is kept modest.
+CARB_COUNT_ERROR_SIGMA_BASE = 0.30  # Relative error, scaled by 1/s3. The symmetric "over-count" tail of larger values is what generates post-meal hypos.
 
 # Asymmetric carb-count bias. Real T1D patients err on the side of under-bolusing
 # because they fear hypos more than mild post-meal hypers (the classic "round
@@ -212,22 +208,22 @@ CARB_COUNT_ERROR_SIGMA_BASE = 0.35  # Relative error, scaled by 1/s3
 # many patients as they spare; with it, the distribution shifts so the typical
 # meal bolus is ~8% smaller than carb-count would imply, moving population time
 # from TBR1 into TAR1 (180-250) — the band most under-represented vs real data.
-CARB_COUNT_UNDERBOLUS_BIAS = -0.04
+CARB_COUNT_UNDERBOLUS_BIAS = -0.20  # Asymmetric "round-down" bias. Real T1Ds are paranoid about hypos and under-bolus more than they over-bolus; sim follows. Mean BG drifts up but TBR1 stays in the real-cohort band.
 
 # Insulin stacking
 CGM_CHECK_INTERVAL_ATTENTIVE = 20  # Minutes between checks for attentive patient
 CGM_CHECK_INTERVAL_INATTENTIVE = 240  # Minutes for inattentive patient
-PATIENCE_TIME_COMPETENT = 120  # Minutes before re-correcting (competent). Tightened from 240 — IOB-aware
-                               # correction sizing keeps rebound bounded, and real T1D pump users typically
-                               # correct every 2h when high. With 240, sim averaged 0.2 corr/day vs real ~2.
+PATIENCE_TIME_COMPETENT = 120  # Minutes before re-correcting (competent). IOB-aware correction
+                               # sizing keeps rebound bounded; real T1D pump users typically correct
+                               # every ~2 h when high. Longer patience drops correction frequency
+                               # well below the real-cohort rate.
 PATIENCE_TIME_INCOMPETENT = 60  # Minutes before re-correcting (incompetent)
 CORRECTION_FACTOR_MEAN = 40.0  # mg/dL drop per unit of insulin
 CORRECTION_FACTOR_SIGMA = 10.0
-BG_TARGET = 135.0  # Target BG for corrections. Sits well above the ATTD ideal (~110) — sim correction
+BG_TARGET = 158.0  # Target BG for corrections. Aims near the real-cohort median (155–157) — corrections targeting lower routinely overshoot into hypo because absorbed insulin keeps acting after BG arrives at target. Sits well above the ATTD ideal (~110) — sim correction
                    # kinetics + delivery lag tend to overshoot, so a higher target keeps median BG
                    # near the real OhioT1DM ~157 and TBR1 near real's ~3% rather than runaway hypo.
-BG_HIGH_THRESHOLD = 180.0  # Threshold to trigger correction. Back to the ATTD upper-TIR bound from the
-                           # prior defensive 210 (which was set when corrections weren't IOB-aware).
+BG_HIGH_THRESHOLD = 175.0  # Threshold to trigger correction. Paired with `BG_TARGET=158`, corrections fire moderately above target.
 BG_LOW_THRESHOLD = 60.0  # Threshold for hypo correction
 
 # Pre-meal bolus BG-awareness. Real T1Ds glance at their CGM before injecting
@@ -236,13 +232,14 @@ BG_LOW_THRESHOLD = 60.0  # Threshold for hypo correction
 # pumps insulin into an actively hypoglycemic patient (the dominant sawtooth
 # driver — patient eats correction carbs, gets briefly above 70, then the
 # pre-scheduled meal bolus drags them straight back down).
-BOLUS_SKIP_HYPO_BG = 65.0          # Below this, the meal bolus is skipped entirely
-BOLUS_REDUCE_BG = 90.0             # Below this (but above SKIP), bolus is reduced
-BOLUS_REDUCE_FACTOR_BASE = 0.5     # Reduction floor — multiplied by (1 + 0.3*dosing_competence)
-BOLUS_BG_CHECK_BASE_PROB = 0.85    # Probability a patient checks CGM before bolusing; +0.15*attentiveness
+BOLUS_SKIP_HYPO_BG = 75.0          # Below this, the meal bolus is skipped entirely — borderline-low entries that received any bolus crashed back into hypo within minutes.
+BOLUS_REDUCE_BG = 105.0            # Below this (but above SKIP), bolus is reduced. Sits well above the hypo edge so the BG-aware gate engages on borderline-low entries.
+BOLUS_REDUCE_FACTOR_BASE = 0.3     # Reduction floor — multiplied by (1 + 0.3*dosing_competence). When the BG-aware gate engages near borderline-low, the bolus is halved (or more) rather than scaled down marginally.
+BOLUS_BG_CHECK_BASE_PROB = 0.95    # Probability a patient checks CGM before bolusing; +0.05*attentiveness. Essentially every bolus is gated.
+MEAL_BOLUS_SKIP_BASE_PROB = 0.12   # Real patients occasionally forget the main-meal bolus. Weighted by (1 - s3): low-skill miss ~9% of main meals, high-skill <1%. Acts as a sub-day decorrelating shock for the residual mid-range ACF.
 
 # Hypo correction
-HYPO_CORRECTION_BASE_GRAMS = 8.0  # Base correction (still under rule-of-15 of 15g)
+HYPO_CORRECTION_BASE_GRAMS = 8.0  # Base correction (still under rule-of-15 of 15g). Kept at 8 — raising further makes the severe-hypo deficit-scaling formula (`14 + 0.35*deficit`) no longer dominate, breaking the test that deeper hypo yields strictly more rescue carbs.
 HYPO_PANIC_FACTOR_BASE = 1.0  # How much extra is eaten, scaled by 1/s3
 HYPO_DETECTION_AWAKE_MINUTES = 5.0  # Detection delay awake
 HYPO_DETECTION_ASLEEP_LAMBDA = 30.0  # Exponential mean for detection delay asleep (severe hypo bypasses this)
@@ -292,9 +289,9 @@ DAWN_HGO_AMPLITUDE_MEAN = 9.0        # Mean peak HGO surge in g/hr (additive)
 DAWN_HGO_AMPLITUDE_SIGMA = 2.0       # Per-patient SD on dawn amplitude — wide so patient diversity is visible
 NIGHT_HGO_DIP_HOUR = 2.0             # Hour of deep-sleep HGO trough
 NIGHT_HGO_DIP_SIGMA_HOURS = 2.5      # Narrower so it ends before dawn surge starts
-NIGHT_HGO_DIP_AMPLITUDE_MEAN = 0.7   # Mean peak HGO reduction in g/hr. Lowered from 1.5 — at 1.5 the dip
-                                     # drove a nocturnal-hypo bulge (hypos peaked 8.9% of time at 3am vs
-                                     # 4% at 2-5pm) far above OhioT1DM's flat-by-hour hypo distribution.
+NIGHT_HGO_DIP_AMPLITUDE_MEAN = 0.3   # Mean peak HGO reduction in g/hr. Small magnitude — a larger dip
+                                     # drives a nocturnal-hypo bulge (peak hypo concentration at 3 am)
+                                     # far above the OhioT1DM cohort's flat-by-hour hypo distribution.
 NIGHT_HGO_DIP_AMPLITUDE_SIGMA = 0.25 # Per-patient SD (scaled with amplitude)
 # Daily-integrated contribution (Gaussian: A * sigma * √(2π)):
 #   dawn ≈ 9.0 * 1.8 * √(2π) ≈ 40.6 g/day extra
@@ -316,7 +313,7 @@ GLYCOGEN_LOW_THRESHOLD_FRACTION = 0.15  # Below this fraction of capacity, HGO r
 # Glucotoxicity — sustained hyperglycemia transiently increases insulin
 # resistance ("glucose toxicity"). Slow EMA of BG drives an additive IS factor.
 # Closes a positive feedback loop: high BG → more IR → harder to bring down.
-GLUCOTOX_BG_EMA_HALF_LIFE_HOURS = 6.0
+GLUCOTOX_BG_EMA_HALF_LIFE_HOURS = 3.0  # Short half-life — longer memory contributes to a 4–12h ACF plateau that real CGM doesn't show.
 GLUCOTOX_BG_THRESHOLD = 200.0  # Above this EMA value, IS starts to climb
 GLUCOTOX_BG_FOR_MAX = 350.0  # EMA value at which the maximum IR multiplier is applied
 GLUCOTOX_MAX_IS_INCREASE = 0.15  # Up to 15% more resistant at saturating BG
@@ -329,8 +326,8 @@ POSTPRANDIAL_IS_BONUS_HALF = 1.5  # g/step active carb at half-max bonus
 # Injection site quality (lipohypertrophy) — per-dose multiplier on the
 # delivered insulin. Sigma scales inversely with lifestyle_consistency (poor
 # rotation discipline → more variance and occasional poor sites).
-SITE_QUALITY_SIGMA_BASE = 0.10  # Base relative sigma, scaled by (1.5 - s4). Lowered from 0.15 — even at
-                                # 0.15, lucky-site doses delivered 1.3× expected insulin and crashed BG.
+SITE_QUALITY_SIGMA_BASE = 0.10  # Base relative sigma, scaled by (1.5 - s4). Kept tight — a wider
+                                # range allows lucky-site doses to deliver 1.3× expected insulin and crash BG.
 SITE_QUALITY_MIN = 0.5  # Minimum effective absorption multiplier
 SITE_QUALITY_MAX = 1.4  # Maximum (rare absorption surge)
 
@@ -342,8 +339,8 @@ DELAYED_HGO_PER_GRAM = 0.02  # g/hr of HGO bump per gram of meal carbs above thr
 DELAYED_HGO_MAX_BUMP = 5.0  # Cap on HGO bump magnitude (g/hr)
 DELAYED_HGO_DELAY_HOURS_MIN = 3.5  # Earliest onset after meal
 DELAYED_HGO_DELAY_HOURS_MAX = 5.5  # Latest onset
-DELAYED_HGO_DURATION_HOURS_MIN = 4.0
-DELAYED_HGO_DURATION_HOURS_MAX = 8.0
+DELAYED_HGO_DURATION_HOURS_MIN = 3.0
+DELAYED_HGO_DURATION_HOURS_MAX = 6.0  # Narrow rebound envelope — wider durations push the half-day BG ACF tail above real-cohort levels.
 DELAYED_HGO_RAMP_HOURS = 1.0  # Trapezoidal ramp up/down for the rebound envelope
 
 # Per-step absorption noise on the carb/insulin reads. Models gut absorption
@@ -416,7 +413,7 @@ SEVERE_HYPO_REFRACTORY_MIN = 10.0      # Shorter refractory for severe hypo (<55
                                        # the CGM-check bypass let the patient eat every 5 min, stacking
                                        # 3-5 rage doses (60+ g) and producing visible sawtooth as BG
                                        # bounced between severe hypo and post-overcorrection peaks.
-POST_HYPO_BASAL_SUSPEND_DURATION_HOURS = 1.5  # Scale-down window after any hypo correction.
+POST_HYPO_BASAL_SUSPEND_DURATION_HOURS = 2.0  # Scale-down window after any hypo correction. Widened from 1.5 — basal kept pulling BG back down before the rescue + follow-up tail had fully cleared.
 POST_HYPO_BASAL_SUSPEND_FACTOR = 0.35          # Basal contribution multiplier while suspended.
 
 # Rage behavior
@@ -425,11 +422,12 @@ RAGE_EAT_CARB_MIN = 12.0           # Minimum rage eat carbs
 RAGE_EAT_CARB_MAX = 30.0           # Maximum rage eat carbs
 RAGE_EAT_PROBABILITY_BASE = 0.10   # Base chance of rage eating when below threshold
 RAGE_BOLUS_BG_THRESHOLD = 300.0    # Above this, patient may rage bolus
-RAGE_BOLUS_MULTIPLIER_MIN = 1.1    # Minimum dose multiplier during rage bolus (was 1.2 — caused crashes)
-RAGE_BOLUS_MULTIPLIER_MAX = 1.5    # Maximum dose multiplier during rage bolus (was 2.0 — caused crashes)
-RAGE_BOLUS_PROBABILITY_BASE = 0.05 # Base chance of rage bolusing when above threshold. Lowered from 0.08
-                                   # to further reduce stacking-induced crashes — real patients above 300
-                                   # usually take a measured correction rather than rage-dose.
+RAGE_BOLUS_MULTIPLIER_MIN = 1.1    # Minimum dose multiplier during rage bolus.
+RAGE_BOLUS_MULTIPLIER_MAX = 1.5    # Maximum dose multiplier during rage bolus. Capped low — wider
+                                   # multipliers cause stacking-induced crashes.
+RAGE_BOLUS_PROBABILITY_BASE = 0.05 # Base chance of rage bolusing when above threshold. Modest —
+                                   # real patients above 300 usually take a measured correction
+                                   # rather than rage-dose.
 
 # ============================================================================
 # WEEKDAY / WEEKEND PARAMETERS
@@ -451,7 +449,7 @@ PUBLIC_HOLIDAYS_PER_YEAR_MAX = 20      # Maximum number of public holidays per y
 # ============================================================================
 
 EXERCISE_IS_REDUCTION = 0.10           # IS reduction fraction post-exercise (10% more sensitive)
-EXERCISE_IS_DURATION_HOURS = 10.0      # Duration of post-exercise IS boost (hours)
+EXERCISE_IS_DURATION_HOURS = 6.0       # Duration of post-exercise IS boost (hours). Long enough to model the well-known evening-hypo pattern after morning exercise, but short enough not to contribute to a half-day BG ACF tail.
 EXERCISE_IS_RAMP_HOURS = 1.0           # Trapezoidal ramp up/down for the IS boost envelope
 
 # ============================================================================
@@ -460,18 +458,17 @@ EXERCISE_IS_RAMP_HOURS = 1.0           # Trapezoidal ramp up/down for the IS boo
 
 TREND_CORRECTION_WINDOW_STEPS = 6      # BG history window for trend (6 steps = 30 min)
 TREND_HIGH_RATE_THRESHOLD = 5.0        # mg/dL/step rising trend to trigger preemptive correction.
-                                       # Lowered from 7.0 — flatter sustained climbs into the 200-250 zone
-                                       # were missing the trend gate and stretching hyper p90 / TAR2 well
-                                       # past Ohio's distribution.
+                                       # Modest threshold — flatter sustained climbs into the 200–250
+                                       # zone need to trip the trend gate to keep hyper p90 / TAR2
+                                       # bounded.
 TREND_HIGH_BG_MIN = 145.0              # BG must exceed this for trend-based high correction.
-                                       # Lowered from 160 — `eff_high_thresh = 180 - 25*skill_avg` lands at
-                                       # 160 for high-skill patients, which made the trend-correction
-                                       # window (TREND_HIGH_BG_MIN < BG ≤ eff_high_thresh) empty. The branch
-                                       # never fired for skilled patients. With 145 the window is 145-160
-                                       # for high-skill and 145-170 for low-skill, restoring preemptive
-                                       # corrections on dinner climbs before they reach TAR territory.
+                                       # `eff_high_thresh = 180 - 25*skill_avg` lands at 160 for
+                                       # high-skill patients, so this threshold must sit below 160 or
+                                       # the trend window collapses to empty for skilled patients. At
+                                       # 145, the window is 145–160 for high-skill and 145–170 for
+                                       # low-skill, allowing preemptive corrections on dinner climbs.
 TREND_LOW_RATE_THRESHOLD = -5.0        # mg/dL/step falling trend to trigger preemptive carb
-TREND_LOW_BG_MAX = 85.0                # BG must be below this for trend-based low correction
+TREND_LOW_BG_MAX = 110.0               # BG must be below this for trend-based low correction. Attentive patients catch falling trends *well* before 70 — they eat preemptive carbs when BG is dropping through the 90–110 band.
 
 # ============================================================================
 # ALCOHOL MODELING
@@ -495,9 +492,9 @@ ALCOHOL_HGO_RAMP_HOURS = 1.0           # Trapezoidal ramp up/down for HGO suppre
 STRESS_PROBABILITY_BASE = 0.18         # Per-day base probability of a stress event
 STRESS_LIFESTYLE_WEIGHT = 0.16         # How much lifestyle_consistency reduces stress prob
 STRESS_IS_FACTOR_MIN = 1.2             # Minimum IS multiplier during stress (more resistant)
-STRESS_IS_FACTOR_MAX = 1.5             # Maximum IS multiplier during stress. Lowered from 1.8 —
-                                       # an 80% IR spike for 2-6h was a dominant CV-widening factor
-                                       # and triggered post-stress hypos when the spike subsided
+STRESS_IS_FACTOR_MAX = 1.5             # Maximum IS multiplier during stress. Capped low —
+                                       # larger IR spikes for 2-6h are a dominant CV-widening factor
+                                       # and trigger post-stress hypos when the spike subsides.
                                        # while bolus IOB was still active. 50% IR is still substantial.
 STRESS_DURATION_HOURS_MIN = 2.0        # Minimum duration of elevated IS from stress (hours)
 STRESS_DURATION_HOURS_MAX = 6.0        # Maximum duration of elevated IS from stress (hours)
@@ -1159,7 +1156,7 @@ class T1DMSimulator:
         # to widen it and it would re-open the sensitive-patient TBR drift.
         s.basal_dose_drift = float(np.clip(
             s.basal_dose_drift + BASAL_DRIFT_ALPHA * (basal_adjustment - 1.0),
-            0.4, 2.5))
+            0.5, 1.6))
 
         if self.rng.random() > p.basal_miss_prob:
             # Administer basal — multiplied by injection-site quality for the day
@@ -1293,10 +1290,15 @@ class T1DMSimulator:
                 CARB_COUNT_UNDERBOLUS_BIAS, p.carb_count_error_sigma)))
 
             # Real pump users bolus for almost everything they eat, including
-            # snacks. Skip-prob caps at ~10% for the lowest-skill snackers.
-            bolus_skip_prob = 0.0
+            # snacks. Skip-prob caps at ~10% for the lowest-skill snackers,
+            # and a small main-meal skip rate (~MEAL_BOLUS_SKIP_BASE_PROB) so
+            # low-skill patients miss the occasional main-meal bolus too.
+            # The main-meal skips are also a source of decorrelating shocks
+            # that knock down mid-range BG autocorrelation.
             if i >= MEALS_BASE:
                 bolus_skip_prob = 0.1 * (1 - eff_s3)
+            else:
+                bolus_skip_prob = MEAL_BOLUS_SKIP_BASE_PROB * (1 - eff_s3)
 
             if self.rng.random() > bolus_skip_prob and carb_estimate > 0:
                 intended_dose = carb_estimate / p.icr
@@ -1547,10 +1549,10 @@ class T1DMSimulator:
         # before acting. Mild offsets — large offsets caused skilled patients to
         # over-correct frequently and rebound into hypo.
         skill_avg = (p.attentiveness + p.dosing_competence) / 2.0
-        # Effective thresholds. Skill multiplier on the low side raised from
-        # 12 → 18 so attentive patients catch BG drops *before* crossing 70
-        # rather than reactively after. For skill_avg=0.7 this shifts the
-        # trigger from 68 to 73 — still below TIR midpoint, but enough to
+        # Effective thresholds. The low-side skill multiplier (18) is chosen
+        # so attentive patients catch BG drops *before* crossing 70 rather
+        # than reactively after. For skill_avg=0.7 the trigger lands at 73 —
+        # still below the TIR midpoint, but enough to
         # cover the ~1-step lag between detection and rescue carb.
         eff_low_thresh = BG_LOW_THRESHOLD + 18.0 * skill_avg
         eff_high_thresh = BG_HIGH_THRESHOLD - 25.0 * skill_avg
@@ -1741,7 +1743,7 @@ class T1DMSimulator:
             # the meal pre-bolus fires anyway, BG dives again. Real T1Ds glance
             # at the CGM and skip / reduce when low.
             if event_type == 'bolus':
-                check_prob = BOLUS_BG_CHECK_BASE_PROB + 0.15 * p.attentiveness
+                check_prob = BOLUS_BG_CHECK_BASE_PROB + 0.05 * p.attentiveness
                 if self.rng.random() < check_prob:
                     bg = s.bg_observed
                     if bg < BOLUS_SKIP_HYPO_BG:

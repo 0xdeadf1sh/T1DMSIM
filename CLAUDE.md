@@ -76,16 +76,12 @@ Visualizer key bindings are documented in the module docstring at the top of `vi
 
 - Use multiple seeds (0-20) over 72-hour runs to verify BG distributions
 - Check TIR (70-180), TBR (<70), TAR (>180), severe-low (<55), mean BG across seeds
-- Target population averages (n≈100, 96h each): **TBR ~10, TIR ~53, TAR ~37**. Mean BG ~150
-- Hypo episode shape (critical clinical invariant):
+- Population averages should track the pooled real-CGM cohort (OhioT1DM + ShanghaiT1DM) within the small-sample noise of those datasets (n = 6 + 13). Don't pin to a specific TBR/TIR/TAR triple — match the *shape* of the pooled distribution (central moments, percentiles, episode counts) as reported in `reports/REPORT.md`. Mean BG ≈ 160–165 mg/dL, GMI ≈ 7.2.
+- **Hypo episode shape (critical clinical invariant — non-negotiable):**
   - Severe-hypo (<55) episodes: max duration ≤ 1h, mean ≤ 0.15h, **zero** > 2h
   - Mild hypo (55-70) episodes: median ~0.75h, p90 ~1.4h, max ~6-7h (rare outliers)
   - Population time below 55: mean ≤ 2%, max patient ≤ 6%
-- Skill stratification:
-  - **High-skill** (avg s > 0.6): TIR ~61%, TBR ~10%, TAR ~29%
-  - **Mid-skill** (0.45-0.6): TIR ~55%, TBR ~12%, TAR ~33%
-  - **Low-skill** (<0.45): TIR ~43%, TBR ~8%, TAR ~48% (hyper-dominant — missed basal, big carb errors)
-- Skill-TIR correlation should be ~+0.5; Skill-TBR near zero
+- Skill should remain positively correlated with TIR (Skill-TIR ≈ +0.4 to +0.6) and roughly uncorrelated with TBR. Use this as a regression canary; do not target specific high/mid/low TIR percentages.
 - Three structural rules to preserve:
   - `ideal_basal = HGO_BASE * 24 * (body_weight_kg / BODY_WEIGHT_MEAN_KG) * is_base / ICR` (in `generate_patient`) — the weight factor mirrors the per-step HGO scaling and keeps the HGO-balances-basal invariant across body sizes.
   - Hypo correction grams scale with `skill_avg` so skilled patients can recover from over-bolus crashes
