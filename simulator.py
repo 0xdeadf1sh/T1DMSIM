@@ -424,7 +424,8 @@ SEVERE_HYPO_REFRACTORY_MIN = 10.0      # Shorter refractory for severe hypo (<55
                                        # 3-5 rage doses (60+ g) and producing visible sawtooth as BG
                                        # bounced between severe hypo and post-overcorrection peaks.
 POST_HYPO_BASAL_SUSPEND_DURATION_HOURS = 2.0  # Scale-down window after any hypo correction. Widened from 1.5 — basal kept pulling BG back down before the rescue + follow-up tail had fully cleared.
-POST_HYPO_BASAL_SUSPEND_FACTOR = 0.35          # Basal contribution multiplier while suspended.
+POST_HYPO_BASAL_SUSPEND_FACTOR = 0.35          # Basal contribution multiplier at the plateau of the suspend window.
+POST_HYPO_BASAL_SUSPEND_RAMP_MIN = 20.0        # Smootherstep ramp-in and ramp-out width (minutes) at each edge of the suspend window — eliminates the on/off step discontinuity in total_insulin.
 
 # Rage behavior
 RAGE_EAT_BG_THRESHOLD = 50.0       # Below this, patient may rage eat
@@ -617,6 +618,7 @@ class SimulatorState:
     # Hypo correction tracking (see HYPO_CORRECTION_REFRACTORY_MIN).
     last_hypo_correction_idx: int = -9999
     post_hypo_basal_suspend_until_idx: int = -1
+    post_hypo_basal_suspend_start_idx: int = -1
 
 
 # ============================================================================
@@ -1665,6 +1667,9 @@ class T1DMSimulator:
             # keeps clearing glucose as fast as the patient eats, producing a
             # sawtooth of repeated snacks that never bring BG back to range.
             suspend_steps = int(POST_HYPO_BASAL_SUSPEND_DURATION_HOURS * 60 / DT_MINUTES)
+            if time_idx >= s.post_hypo_basal_suspend_until_idx:
+                # No active suspend — start a fresh one (anchor the ramp-in).
+                s.post_hypo_basal_suspend_start_idx = time_idx
             s.post_hypo_basal_suspend_until_idx = max(
                 s.post_hypo_basal_suspend_until_idx, time_idx + suspend_steps)
 
@@ -1806,8 +1811,27 @@ class T1DMSimulator:
         bolus_step = float(self._bolus_totals[idx]) if idx < len(self._bolus_totals) else 0.0
         # Post-hypo basal stand-down (set by _check_cgm_and_correct after any
         # hypo correction). Represents pump suspend / next-basal skip behavior.
-        if idx < s.post_hypo_basal_suspend_until_idx:
-            basal_step *= POST_HYPO_BASAL_SUSPEND_FACTOR
+        # Apply via a smootherstep envelope: ramp 1.0 → factor over the first
+        # POST_HYPO_BASAL_SUSPEND_RAMP_MIN at the start of the window, plateau
+        # at factor through the middle, ramp factor → 1.0 over the last
+        # POST_HYPO_BASAL_SUSPEND_RAMP_MIN at the end. A hard step (the
+        # previous behaviour) created two visible discontinuities in
+        # total_insulin per hypo correction.
+        if (s.post_hypo_basal_suspend_start_idx <= idx
+                < s.post_hypo_basal_suspend_until_idx):
+            ramp_steps = max(1, int(POST_HYPO_BASAL_SUSPEND_RAMP_MIN / DT_MINUTES))
+            progress_in = idx - s.post_hypo_basal_suspend_start_idx
+            progress_out = s.post_hypo_basal_suspend_until_idx - idx
+            factor = POST_HYPO_BASAL_SUSPEND_FACTOR
+            if progress_in < ramp_steps:
+                t = progress_in / ramp_steps
+                w = t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+                factor = 1.0 + w * (POST_HYPO_BASAL_SUSPEND_FACTOR - 1.0)
+            elif progress_out <= ramp_steps:
+                t = (ramp_steps - progress_out) / ramp_steps
+                w = t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+                factor = POST_HYPO_BASAL_SUSPEND_FACTOR + w * (1.0 - POST_HYPO_BASAL_SUSPEND_FACTOR)
+            basal_step *= factor
         total_insulin = basal_step + bolus_step
         total_exercise = float(self._exercise_totals[idx]) if idx < len(self._exercise_totals) else 0.0
 
