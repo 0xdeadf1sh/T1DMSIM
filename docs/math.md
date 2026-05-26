@@ -49,7 +49,11 @@ Bolus (rapid-acting): gamma curve. Both duration and theta scale with dose, cent
 
 Larger doses act longer and peak slightly later, matching observed subcutaneous insulin PK. Helper: `bolus_pk_for_dose(dose) -> (k, theta, duration_minutes)`. The legacy `BOLUS_DURATION_HOURS` constant is kept for tests but not used by new code.
 
-Basal (long-acting): trapezoidal curve from `basal_curve()` with `BASAL_RAMP_UP_HOURS` ramp-in, `BASAL_RAMP_DOWN_HOURS` ramp-out, plateau in between, normalized so the area equals the dose.
+Basal (long-acting): Bateman one-compartment PK curve from `basal_curve()` —
+
+    f(t) = exp(-BASAL_KE_PER_HOUR · t) − exp(-BASAL_KA_PER_HOUR · t)
+
+modelling subcutaneous depot absorption (rate `ka`) followed by first-order elimination (rate `ke`). With the default `ka = 0.6/h` and `ke = 0.09/h` the curve rises smoothly from zero, peaks at `tmax = ln(ka/ke)/(ka − ke) ≈ 3.7 h` post-injection, and then decays with a ~7.7 h elimination half-life, matching the long-acting glargine-like profile. There is no flat plateau and no slope discontinuity. A smootherstep window over the last `BASAL_TAIL_CLIP_HOURS` tapers the late residual to zero so consecutive daily doses join without a tail-step. Normalized so the area equals the dose.
 
 ### Injection site quality (lipohypertrophy)
 
@@ -329,4 +333,4 @@ All curve values are in "amount per step" units:
 - HGO: grams per step (rate g/hr converted via DT_MINUTES / 60)
 - Exercise: grams-equivalent per step
 
-Both `gamma_curve` and `basal_curve` normalize so that `sum(values) = total_amount`. There is no `flat_curve` — the trapezoidal `basal_curve` replaced it. Never pass a rate where total_amount is expected.
+Both `gamma_curve` and `basal_curve` normalize so that `sum(values) = total_amount`. There is no `flat_curve` — `basal_curve` (Bateman PK, smooth onset/peak/decline) replaced it. Never pass a rate where total_amount is expected.

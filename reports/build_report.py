@@ -1,8 +1,9 @@
 """Comprehensive statistical comparison of T1DMSIM vs OhioT1DM vs ShanghaiT1DM.
 
 Produces:
-  reports/stats.json        — all computed numbers (used by REPORT.md)
+  reports/stats.json        — all computed numbers
   reports/figures/*.png     — figure set referenced from REPORT.md
+  reports/REPORT.md         — templated markdown report (regenerated from stats)
 
 The analysis intentionally goes beyond scripts/compare_all_datasets.py and the
 existing README comparison block:
@@ -332,6 +333,9 @@ def assemble_cohort(name, items, regularize_fn, step_min):
         rec["hyper_p90_min"] = float(np.percentile(H, 90)) if H else 0.0
         rec.update({"lag_acf": autocorr_lags(bg, step_min, lags_min)})
         rec["sample_entropy"] = sample_entropy(bg)
+        diff_rec = np.diff(bg)
+        diff_rec = diff_rec[~np.isnan(diff_rec)]
+        rec["delta_std"] = float(np.std(diff_rec)) if len(diff_rec) else float("nan")
         per.append(rec)
         pooled.append(bg_clean)
         for L in lags_min:
@@ -419,6 +423,27 @@ def distribution_distances(a, b, bins=None):
     js = jensen_shannon(ha, hb)
     return {"ks_stat": float(ks_stat), "ks_p": float(ks_p),
             "wasserstein": w, "js_div": js}
+
+
+# ============================================================================
+# Aux summaries (per-record deltas, recovery times)
+# ============================================================================
+def recovery_summary(times):
+    """Median / p75 / p90 / p99 / max / n for a recovery-time array (minutes)."""
+    if not times:
+        return {"n": 0, "median": float("nan"), "p75": float("nan"),
+                "p90": float("nan"), "p99": float("nan"), "max": float("nan")}
+    arr = np.asarray(times, dtype=float)
+    return {
+        "n": int(len(arr)),
+        "median": float(np.median(arr)),
+        "p75": float(np.percentile(arr, 75)),
+        "p90": float(np.percentile(arr, 90)),
+        "p99": float(np.percentile(arr, 99)),
+        "max": float(np.max(arr)),
+    }
+
+
 
 
 # ============================================================================
@@ -740,6 +765,449 @@ def fig_recovery(cohorts, path):
 
 
 # ============================================================================
+# Markdown report writer
+# ============================================================================
+def _sci(p, sig=1):
+    """Format a (small) p-value like '3.5 × 10⁻⁴⁶' or '< 10⁻³⁰⁰'."""
+    if not np.isfinite(p) or p <= 0:
+        return "< 10⁻³⁰⁰"
+    e = int(np.floor(np.log10(p)))
+    m = p / (10 ** e)
+    if e <= -300:
+        return "< 10⁻³⁰⁰"
+    sup = str(e).translate(str.maketrans("-0123456789", "⁻⁰¹²³⁴⁵⁶⁷⁸⁹"))
+    return f"{m:.{sig}f} × 10{sup}"
+
+
+def _ms(summary, key, fmt=".2f"):
+    """summary[key] -> 'mean ± std' (returns '—' if key missing)."""
+    if key not in summary:
+        return "—"
+    s = summary[key]
+    return f"{s['mean']:{fmt}} ± {s['std']:{fmt}}"
+
+
+def _ms1(summary, key):
+    return _ms(summary, key, ".1f")
+
+
+def _delta(a, b, fmt="+.1f"):
+    return f"{a - b:{fmt}}"
+
+
+def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
+                    pooled_risk, cohort_summaries, recov_summaries, path):
+    """Template the full markdown report from computed stats.
+
+    Tables are filled programmatically from the same numbers that go into
+    stats.json. Prose is kept neutral and observational (raw deltas, no
+    "matches"/"diverges" verdicts) so re-runs after simulator changes do not
+    require hand-editing the report.
+    """
+    n = {x: cohorts[x] for x in ORDER}
+    pm = pooled_moments
+    pp = pooled_percentiles
+    pr = pooled_risk
+    sm = cohort_summaries
+    rec = recov_summaries
+
+    # Convenience handles
+    O, S, M = "Ohio", "Shanghai", "Sim"
+
+    # Per-record TIR IQR + mean-BG std across records (Section 8)
+    def _per_records_field(cohort_name, key):
+        return [r[key] for r in cohorts[cohort_name]["per"]
+                if key in r and not np.isnan(r[key])]
+
+    tir_iqr = {x: float(np.percentile(_per_records_field(x, "TIR_pct"), 75)
+                        - np.percentile(_per_records_field(x, "TIR_pct"), 25))
+               for x in ORDER}
+    tir_lo = {x: float(np.min(_per_records_field(x, "TIR_pct"))) for x in ORDER}
+    tir_hi = {x: float(np.max(_per_records_field(x, "TIR_pct"))) for x in ORDER}
+    mean_bg_std = {x: float(np.std(_per_records_field(x, "mean"))) for x in ORDER}
+
+    # ACF lag rows that exist for both Ohio and Sim (5-min cadence) and for
+    # Shanghai (15-min cadence). 5-min row is absent for Shanghai.
+    acf = {x: cohorts[x]["pooled_acf"] for x in ORDER}
+
+    def _acf_cell(name, lag_min):
+        v = acf[name].get(lag_min, acf[name].get(str(lag_min), float("nan")))
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            return "(n/a)"
+        return f"{v:.3f}"
+
+    # Δ vs Ohio / Δ vs Shanghai column generators
+    def pct_row(pkey):
+        po = pp[O][pkey]; ps = pp[S][pkey]; psim = pp[M][pkey]
+        return (f"| {pkey} | {po:.1f} | {ps:.1f} | {psim:.1f} | "
+                f"{psim-po:+.1f} | {psim-ps:+.1f} |")
+
+    pct_rows = "\n".join(pct_row(f"p{p}") for p in (1, 5, 10, 25, 50, 75, 90, 95, 99))
+
+    # Diurnal hourly means
+    dm = {x: cohorts[x]["diurnal_mean"] for x in ORDER}
+
+    def hour_row(name):
+        return " | ".join(f"{dm[name][h]:.0f}" for h in range(24))
+
+    # Distances table
+    dist_rows = []
+    for pair_key, label in [("Ohio_vs_Shanghai", "Ohio vs Shanghai"),
+                            ("Sim_vs_Ohio",      "Sim vs Ohio"),
+                            ("Sim_vs_Shanghai",  "Sim vs Shanghai")]:
+        d = distances[pair_key]
+        dist_rows.append(
+            f"| {label} | {d['ks_stat']:.3f} | {_sci(d['ks_p'])} | "
+            f"{d['wasserstein']:.1f} | {d['js_div']:.3f} |"
+        )
+    dist_table = "\n".join(dist_rows)
+
+    # Recovery table
+    def rec_row(name):
+        r = rec[name]
+        return (f"| {name:8} | {r['n']:>5,} | {r['median']:.0f} | "
+                f"{r['p75']:.0f} | {r['p90']:.0f} | {r['p99']:.0f} | {r['max']:.0f} |")
+
+    rec_table = "\n".join(rec_row(x) for x in ORDER)
+
+    # Synthesis tables — produce neutral side-by-side rows with Δ columns.
+    def syn_row(label, sim_val, ohio_val, shang_val, fmt=".1f", unit=""):
+        return (f"| {label} | {sim_val:{fmt}}{unit} | {ohio_val:{fmt}}{unit} | "
+                f"{shang_val:{fmt}}{unit} | {sim_val-ohio_val:+{fmt}} | "
+                f"{sim_val-shang_val:+{fmt}} |")
+
+    # Per-record delta std (mean across records)
+    pr_delta_std = {x: float(np.nanmean([
+        r["delta_std"] for r in cohorts[x]["per"] if "delta_std" in r
+    ])) for x in ORDER}
+
+    md = f"""# T1DMSIM vs OhioT1DM vs ShanghaiT1DM — Statistical Comparison Report
+
+Comprehensive statistical comparison of the synthetic blood-glucose traces
+produced by `simulator.py` against two non-redistributable real-world CGM
+corpora. Goes well beyond the summary panel in `README.md`: full
+percentile tables, distribution-distance statistics (Kolmogorov–Smirnov,
+Wasserstein, Jensen–Shannon), Kovatchev risk indices, MAGE / CONGA / MODD /
+sample entropy, autocorrelation across nine lags, rate-of-change distributions,
+hour-of-day envelopes, weekday × hour heatmaps, per-record TIR/TBR scatter, and
+expanded excursion-level metrics.
+
+This file is regenerated end-to-end by `reports/build_report.py`. Raw stats
+are persisted to `reports/stats.json`; figures live in `reports/figures/`.
+
+---
+
+## 1. Corpora at a glance
+
+| Dataset | Records | Cadence | Total CGM-days | Cohort | Notes |
+|---|---:|---:|---:|---|---|
+| OhioT1DM | {len(n[O]['per'])} records (file pairs) | {n[O]['step_min']} min Dexcom | {sum(p['days'] for p in n[O]['per']):.1f} | US adults, pump + announced meals | training + testing periods concatenated per patient |
+| ShanghaiT1DM | {len(n[S]['per'])} records | **{n[S]['step_min']} min** | {sum(p['days'] for p in n[S]['per']):.1f} | CN adults, mixed CSII + MDI (incl. regular Novolin R), BMI ≈ 21 | shorter individual records (~10 d) |
+| T1DMSIM | {len(n[M]['per'])} seeds × {int(round(np.mean([p['days'] for p in n[M]['per']])))} days | {n[M]['step_min']} min | {sum(p['days'] for p in n[M]['per']):.1f} | synthetic, seeds 0–{len(n[M]['per'])-1}, 24 h warm-up discarded | `initial_bg = 120 mg/dL`, `bg_observed` (sensor-noised) |
+
+Both real datasets are gitignored. The simulator is exercised as in
+`scripts/compare_all_datasets.py`: 24 h warm-up to clear the `initial_bg = 120`
+transient, then the next 70 days are captured.
+
+---
+
+## 2. Methodology
+
+- **Resampling.** Ohio CGM is irregular Dexcom samples; it is linearly
+  interpolated onto a 5 min grid with gaps > 30 min NaN-bridged. Shanghai is
+  similarly resampled to a 15 min grid with > 60 min gaps as NaN. The simulator
+  is already on a 5 min grid. All statistics ignore NaN.
+- **Cadence-aware comparison.** Rate-of-change Δ-BG, ACF, CONGA, MAGE, and MODD
+  are computed at each cohort's **native** cadence. Cross-cadence comparison is
+  flagged where it materially affects interpretation (notably Δ-BG std and
+  sample entropy).
+- **Distribution distances.** KS statistic, KS p-value, Wasserstein-1 distance,
+  and Jensen–Shannon divergence (5 mg/dL bins, 40–400 mg/dL) computed on the
+  pooled per-cohort CGM-value vector.
+- **Risk indices.** LBGI / HBGI per Kovatchev (1997), J-index = 10⁻³·(μ+σ)²,
+  M-value with reference 120 mg/dL.
+- **MAGE.** Mean amplitude of peak-trough swings exceeding 1·σ_BG.
+- **CONGA-h.** Standard deviation of `bg[t+h] − bg[t]`.
+- **MODD.** Mean of `|bg[t+24h] − bg[t]|`.
+- **Sample entropy.** SampEn(m=2, r=0.2·σ); to bound cost on long traces,
+  records are uniformly subsampled to 2,500 points with a fixed RNG seed (0)
+  before computation.
+- **Episodes.** Contiguous runs across a threshold lasting ≥ 15 min, NaN
+  gaps treated as in-range so a sensor dropout does not split an episode.
+
+---
+
+## 3. Headline numbers
+
+### 3.1 Pooled central moments
+
+| Metric (mg/dL) | OhioT1DM | ShanghaiT1DM | T1DMSIM | Sim − Ohio | Sim − Shang |
+|---|---:|---:|---:|---:|---:|
+| n (samples) | {pm[O]['n']:,} | {pm[S]['n']:,} | {pm[M]['n']:,} | — | — |
+| **mean** | {pm[O]['mean']:.1f} | {pm[S]['mean']:.1f} | {pm[M]['mean']:.1f} | {pm[M]['mean']-pm[O]['mean']:+.1f} | {pm[M]['mean']-pm[S]['mean']:+.1f} |
+| **median** | {pm[O]['median']:.1f} | {pm[S]['median']:.1f} | {pm[M]['median']:.1f} | {pm[M]['median']-pm[O]['median']:+.1f} | {pm[M]['median']-pm[S]['median']:+.1f} |
+| std | {pm[O]['std']:.1f} | {pm[S]['std']:.1f} | {pm[M]['std']:.1f} | {pm[M]['std']-pm[O]['std']:+.1f} | {pm[M]['std']-pm[S]['std']:+.1f} |
+| IQR | {pm[O]['iqr']:.1f} | {pm[S]['iqr']:.1f} | {pm[M]['iqr']:.1f} | {pm[M]['iqr']-pm[O]['iqr']:+.1f} | {pm[M]['iqr']-pm[S]['iqr']:+.1f} |
+| CV (%) | {pm[O]['cv_pct']:.1f} | {pm[S]['cv_pct']:.1f} | {pm[M]['cv_pct']:.1f} | {pm[M]['cv_pct']-pm[O]['cv_pct']:+.1f} pp | {pm[M]['cv_pct']-pm[S]['cv_pct']:+.1f} pp |
+| skewness | {pm[O]['skew']:.2f} | {pm[S]['skew']:.2f} | {pm[M]['skew']:.2f} | {pm[M]['skew']-pm[O]['skew']:+.2f} | {pm[M]['skew']-pm[S]['skew']:+.2f} |
+| excess kurtosis | {pm[O]['excess_kurt']:.2f} | {pm[S]['excess_kurt']:.2f} | {pm[M]['excess_kurt']:.2f} | {pm[M]['excess_kurt']-pm[O]['excess_kurt']:+.2f} | {pm[M]['excess_kurt']-pm[S]['excess_kurt']:+.2f} |
+| min | {pm[O]['min']:.1f} | {pm[S]['min']:.1f} | {pm[M]['min']:.1f} | — | — |
+| max | {pm[O]['max']:.1f} | {pm[S]['max']:.1f} | {pm[M]['max']:.1f} | — | — |
+
+### 3.2 Percentiles of the pooled distribution
+
+| Percentile | OhioT1DM | ShanghaiT1DM | T1DMSIM | Sim − Ohio | Sim − Shang |
+|---|---:|---:|---:|---:|---:|
+{pct_rows}
+
+![Percentile curves](figures/percentile_curves.png)
+
+![Pooled PDF](figures/pdf_pooled.png)
+
+![Pooled empirical CDF](figures/cdf_pooled.png)
+
+![Q-Q vs Ohio and Shanghai](figures/qq.png)
+
+### 3.3 Distribution-distance statistics
+
+| Pair | KS statistic | KS p-value | Wasserstein-1 (mg/dL) | JS divergence (5 mg/dL bins) |
+|---|---:|---:|---:|---:|
+{dist_table}
+
+KS p-values fall to numerical zero in the right tail at these sample sizes
+(Ohio ~85k, Sim ~600k); the magnitudes of the KS statistic and the
+Wasserstein-1 distance are the meaningful quantities, not p.
+
+---
+
+## 4. Clinical glycemic indices
+
+Per-record means ± std across each cohort.
+
+| Index | OhioT1DM | ShanghaiT1DM | T1DMSIM |
+|---|---|---|---|
+| GMI / eA1c proxy | {_ms(sm[O], 'GMI')} | {_ms(sm[S], 'GMI')} | {_ms(sm[M], 'GMI')} |
+| **LBGI** (low-BG risk) | {_ms(sm[O], 'LBGI')} | {_ms(sm[S], 'LBGI')} | **{_ms(sm[M], 'LBGI')}** |
+| **HBGI** (high-BG risk) | {_ms(sm[O], 'HBGI')} | {_ms(sm[S], 'HBGI')} | **{_ms(sm[M], 'HBGI')}** |
+| J-index | {_ms1(sm[O], 'j_index')} | {_ms1(sm[S], 'j_index')} | {_ms1(sm[M], 'j_index')} |
+| M-value (ref 120) | {_ms1(sm[O], 'm_value')} | {_ms1(sm[S], 'm_value')} | {_ms1(sm[M], 'm_value')} |
+
+Pooled (not per-record) risk indices, for reference:
+
+| | Ohio | Shanghai | Sim |
+|---|---:|---:|---:|
+| LBGI (pooled) | {pr[O]['LBGI_pooled']:.2f} | {pr[S]['LBGI_pooled']:.2f} | {pr[M]['LBGI_pooled']:.2f} |
+| HBGI (pooled) | {pr[O]['HBGI_pooled']:.2f} | {pr[S]['HBGI_pooled']:.2f} | {pr[M]['HBGI_pooled']:.2f} |
+| J-index (pooled) | {pr[O]['J_index_pooled']:.1f} | {pr[S]['J_index_pooled']:.1f} | {pr[M]['J_index_pooled']:.1f} |
+| M-value (pooled) | {pr[O]['M_value_pooled']:.1f} | {pr[S]['M_value_pooled']:.1f} | {pr[M]['M_value_pooled']:.1f} |
+
+### 4.1 Time-in-range, per-record cohort summary
+
+| Range | OhioT1DM | ShanghaiT1DM | T1DMSIM |
+|---|---|---|---|
+| TBR2 (<54)        | {_ms(sm[O], 'TBR2_pct')} | {_ms(sm[S], 'TBR2_pct')} | {_ms(sm[M], 'TBR2_pct')} |
+| TBR1 (54–70)      | {_ms(sm[O], 'TBR1_pct')} | {_ms(sm[S], 'TBR1_pct')} | {_ms(sm[M], 'TBR1_pct')} |
+| **TIR (70–180)**  | **{_ms1(sm[O], 'TIR_pct')}** | **{_ms1(sm[S], 'TIR_pct')}** | **{_ms1(sm[M], 'TIR_pct')}** |
+| TAR1 (180–250)    | {_ms1(sm[O], 'TAR1_pct')} | {_ms1(sm[S], 'TAR1_pct')} | {_ms1(sm[M], 'TAR1_pct')} |
+| TAR2 (>250)       | {_ms(sm[O], 'TAR2_pct')} | {_ms(sm[S], 'TAR2_pct')} | {_ms(sm[M], 'TAR2_pct')} |
+
+![Clinical-range cohort comparison](../assets/clinical_ranges.png)
+
+(The bar chart from the README is included here for direct reference; the
+figure is produced by `scripts/generate_comparison_figures.py`.)
+
+---
+
+## 5. Variability and complexity
+
+Per-record mean ± std.
+
+| Metric (native cadence) | OhioT1DM | ShanghaiT1DM | T1DMSIM |
+|---|---|---|---|
+| CV (%)              | {_ms1(sm[O], 'cv_pct')}   | {_ms1(sm[S], 'cv_pct')}   | **{_ms1(sm[M], 'cv_pct')}**   |
+| MAGE (mg/dL)        | {_ms1(sm[O], 'mage')}     | {_ms1(sm[S], 'mage')}     | {_ms1(sm[M], 'mage')}     |
+| CONGA-1h (mg/dL)    | {_ms1(sm[O], 'conga_1h')} | {_ms1(sm[S], 'conga_1h')} | {_ms1(sm[M], 'conga_1h')} |
+| CONGA-4h (mg/dL)    | {_ms1(sm[O], 'conga_4h')} | {_ms1(sm[S], 'conga_4h')} | {_ms1(sm[M], 'conga_4h')} |
+| MODD (mg/dL)        | {_ms1(sm[O], 'modd')}     | {_ms1(sm[S], 'modd')}     | **{_ms1(sm[M], 'modd')}**     |
+| Sample entropy      | {_ms(sm[O], 'sample_entropy')} | {_ms(sm[S], 'sample_entropy')}¹ | {_ms(sm[M], 'sample_entropy')} |
+
+¹ Shanghai SampEn is computed on 15-min samples, which collapses the
+  fine-scale jitter that drives SampEn at 5 min — the lower value is mostly a
+  cadence artefact, not a real complexity difference.
+
+![Variability and complexity panel](figures/variability_metrics.png)
+
+---
+
+## 6. Temporal dynamics
+
+### 6.1 Autocorrelation
+
+Pooled (mean across records) Pearson autocorrelation at the indicated lag.
+
+| Lag         | OhioT1DM | ShanghaiT1DM | T1DMSIM |
+|---|---|---|---|
+| 5 min   | {_acf_cell(O, 5)} | {_acf_cell(S, 5)}  | {_acf_cell(M, 5)} |
+| 15 min  | {_acf_cell(O, 15)} | {_acf_cell(S, 15)}  | {_acf_cell(M, 15)} |
+| 30 min  | {_acf_cell(O, 30)} | {_acf_cell(S, 30)}  | {_acf_cell(M, 30)} |
+| 1 h     | {_acf_cell(O, 60)} | {_acf_cell(S, 60)}  | {_acf_cell(M, 60)} |
+| 2 h     | {_acf_cell(O, 120)} | {_acf_cell(S, 120)}  | {_acf_cell(M, 120)} |
+| 4 h     | {_acf_cell(O, 240)} | {_acf_cell(S, 240)}  | {_acf_cell(M, 240)} |
+| **8 h**     | **{_acf_cell(O, 480)}** | **{_acf_cell(S, 480)}** | **{_acf_cell(M, 480)}** |
+| **12 h**    | **{_acf_cell(O, 720)}** | **{_acf_cell(S, 720)}** | **{_acf_cell(M, 720)}** |
+| 24 h    | {_acf_cell(O, 1440)} | {_acf_cell(S, 1440)}  | **{_acf_cell(M, 1440)}** |
+
+![Autocorrelation across lag](figures/acf.png)
+
+### 6.2 Rate-of-change (Δ-BG)
+
+![Δ-BG distribution at native cadence](figures/delta_distribution.png)
+
+Per-record Δ-BG standard deviation (mean across records, native cadence):
+Ohio {pr_delta_std[O]:.2f} mg/dL · Shanghai {pr_delta_std[S]:.2f} mg/dL ·
+Sim {pr_delta_std[M]:.2f} mg/dL. Shanghai's value is at 15-min cadence and
+is not directly comparable to the 5-min values from Ohio and the simulator.
+
+### 6.3 Diurnal pattern (hour-of-day mean ± 1σ across records)
+
+![Hour-of-day mean with ±1σ envelope](figures/diurnal_envelope.png)
+
+Hour-by-hour mean BG (mg/dL):
+
+|   | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Ohio | {hour_row(O)} |
+| Shanghai | {hour_row(S)} |
+| Sim | {hour_row(M)} |
+
+![Weekday × hour heatmap](figures/weekday_heatmap.png)
+
+---
+
+## 7. Excursion-level dynamics
+
+### 7.1 Episode counts and durations
+
+Per-record means ± std.
+
+| Metric | OhioT1DM | ShanghaiT1DM | T1DMSIM |
+|---|---|---|---|
+| Hypo (<70) episodes / day      | {_ms(sm[O], 'hypo_count_per_day')} | {_ms(sm[S], 'hypo_count_per_day')} | **{_ms(sm[M], 'hypo_count_per_day')}** |
+| Severe-hypo (<54) eps / day   | {_ms(sm[O], 'severe_hypo_count_per_day')} | {_ms(sm[S], 'severe_hypo_count_per_day')} | {_ms(sm[M], 'severe_hypo_count_per_day')} |
+| Hyper (>180) episodes / day   | {_ms(sm[O], 'hyper_count_per_day')} | {_ms(sm[S], 'hyper_count_per_day')} | {_ms(sm[M], 'hyper_count_per_day')} |
+| Severe-hyper (>250) eps / day | {_ms(sm[O], 'severe_hyper_count_per_day')} | {_ms(sm[S], 'severe_hyper_count_per_day')} | {_ms(sm[M], 'severe_hyper_count_per_day')} |
+| Hypo median duration (min)    | {sm[O]['hypo_median_min']['mean']:.1f} | {sm[S]['hypo_median_min']['mean']:.1f} | {sm[M]['hypo_median_min']['mean']:.1f} |
+| Hypo p90 duration (min)       | {sm[O]['hypo_p90_min']['mean']:.1f} | {sm[S]['hypo_p90_min']['mean']:.1f} | **{sm[M]['hypo_p90_min']['mean']:.1f}** |
+| Hyper median duration (min)   | {sm[O]['hyper_median_min']['mean']:.1f} | {sm[S]['hyper_median_min']['mean']:.1f} | {sm[M]['hyper_median_min']['mean']:.1f} |
+| Hyper p90 duration (min)      | {sm[O]['hyper_p90_min']['mean']:.1f} | {sm[S]['hyper_p90_min']['mean']:.1f} | **{sm[M]['hyper_p90_min']['mean']:.1f}** |
+
+![Episode duration boxplots](figures/episode_durations.png)
+
+### 7.2 Hypo recovery time
+
+![Hypo recovery time from BG<70 to BG≥80](figures/recovery_time.png)
+
+Time from the first sub-70 sample to the next ≥ 80 sample:
+
+| Cohort | n events | median (min) | p75 (min) | p90 (min) | p99 (min) | max (min) |
+|---|---:|---:|---:|---:|---:|---:|
+{rec_table}
+
+---
+
+## 8. Per-record (per-patient) heterogeneity
+
+![Per-record TIR vs TBR scatter](figures/per_patient_scatter.png)
+
+| Cohort | TIR IQR (pp) | TIR min–max (pp) | Mean-BG std across records |
+|---|---:|---|---:|
+| Ohio     | {tir_iqr[O]:.1f} | {tir_lo[O]:.1f} – {tir_hi[O]:.1f} | {mean_bg_std[O]:.1f} |
+| Shanghai | {tir_iqr[S]:.1f} | {tir_lo[S]:.1f} – {tir_hi[S]:.1f} | {mean_bg_std[S]:.1f} |
+| Sim      | {tir_iqr[M]:.1f} | {tir_lo[M]:.1f} – {tir_hi[M]:.1f} | {mean_bg_std[M]:.1f} |
+
+![LBGI and HBGI per-record boxplots](figures/risk_indices.png)
+
+---
+
+## 9. Side-by-side summary
+
+Raw deltas only — no qualitative verdicts. See sections 3–8 for context.
+
+| Quantity | T1DMSIM | OhioT1DM | ShanghaiT1DM | Sim − Ohio | Sim − Shang |
+|---|---:|---:|---:|---:|---:|
+{syn_row("Pooled mean BG (mg/dL)",       pm[M]['mean'],     pm[O]['mean'],     pm[S]['mean'])}
+{syn_row("Pooled median BG (mg/dL)",     pm[M]['median'],   pm[O]['median'],   pm[S]['median'])}
+{syn_row("Pooled std (mg/dL)",           pm[M]['std'],      pm[O]['std'],      pm[S]['std'])}
+{syn_row("Pooled CV (%)",                pm[M]['cv_pct'],   pm[O]['cv_pct'],   pm[S]['cv_pct'])}
+{syn_row("Pooled skewness",              pm[M]['skew'],     pm[O]['skew'],     pm[S]['skew'], fmt=".2f")}
+{syn_row("Pooled excess kurtosis",       pm[M]['excess_kurt'], pm[O]['excess_kurt'], pm[S]['excess_kurt'], fmt=".2f")}
+{syn_row("Pooled p99 (mg/dL)",           pp[M]['p99'],      pp[O]['p99'],      pp[S]['p99'])}
+{syn_row("GMI (per-record mean)",        sm[M]['GMI']['mean'],     sm[O]['GMI']['mean'],     sm[S]['GMI']['mean'], fmt=".2f")}
+{syn_row("LBGI (per-record mean)",       sm[M]['LBGI']['mean'],    sm[O]['LBGI']['mean'],    sm[S]['LBGI']['mean'], fmt=".2f")}
+{syn_row("HBGI (per-record mean)",       sm[M]['HBGI']['mean'],    sm[O]['HBGI']['mean'],    sm[S]['HBGI']['mean'], fmt=".2f")}
+{syn_row("TIR % (per-record mean)",      sm[M]['TIR_pct']['mean'], sm[O]['TIR_pct']['mean'], sm[S]['TIR_pct']['mean'])}
+{syn_row("TBR1 % (per-record mean)",     sm[M]['TBR1_pct']['mean'], sm[O]['TBR1_pct']['mean'], sm[S]['TBR1_pct']['mean'], fmt=".2f")}
+{syn_row("TBR2 % (per-record mean)",     sm[M]['TBR2_pct']['mean'], sm[O]['TBR2_pct']['mean'], sm[S]['TBR2_pct']['mean'], fmt=".2f")}
+{syn_row("TAR1 % (per-record mean)",     sm[M]['TAR1_pct']['mean'], sm[O]['TAR1_pct']['mean'], sm[S]['TAR1_pct']['mean'])}
+{syn_row("TAR2 % (per-record mean)",     sm[M]['TAR2_pct']['mean'], sm[O]['TAR2_pct']['mean'], sm[S]['TAR2_pct']['mean'])}
+{syn_row("MAGE (mg/dL)",                 sm[M]['mage']['mean'],    sm[O]['mage']['mean'],    sm[S]['mage']['mean'])}
+{syn_row("CONGA-1h (mg/dL)",             sm[M]['conga_1h']['mean'],sm[O]['conga_1h']['mean'],sm[S]['conga_1h']['mean'])}
+{syn_row("CONGA-4h (mg/dL)",             sm[M]['conga_4h']['mean'],sm[O]['conga_4h']['mean'],sm[S]['conga_4h']['mean'])}
+{syn_row("MODD (mg/dL)",                 sm[M]['modd']['mean'],    sm[O]['modd']['mean'],    sm[S]['modd']['mean'])}
+{syn_row("Hypo episodes / day",          sm[M]['hypo_count_per_day']['mean'], sm[O]['hypo_count_per_day']['mean'], sm[S]['hypo_count_per_day']['mean'], fmt=".2f")}
+{syn_row("Severe-hypo eps / day",        sm[M]['severe_hypo_count_per_day']['mean'], sm[O]['severe_hypo_count_per_day']['mean'], sm[S]['severe_hypo_count_per_day']['mean'], fmt=".2f")}
+{syn_row("Hyper episodes / day",         sm[M]['hyper_count_per_day']['mean'], sm[O]['hyper_count_per_day']['mean'], sm[S]['hyper_count_per_day']['mean'], fmt=".2f")}
+{syn_row("Severe-hyper eps / day",       sm[M]['severe_hyper_count_per_day']['mean'], sm[O]['severe_hyper_count_per_day']['mean'], sm[S]['severe_hyper_count_per_day']['mean'], fmt=".2f")}
+{syn_row("Hypo p90 duration (min)",      sm[M]['hypo_p90_min']['mean'],   sm[O]['hypo_p90_min']['mean'],   sm[S]['hypo_p90_min']['mean'])}
+{syn_row("Hyper p90 duration (min)",     sm[M]['hyper_p90_min']['mean'],  sm[O]['hyper_p90_min']['mean'],  sm[S]['hyper_p90_min']['mean'])}
+{syn_row("Hypo recovery median (min)",   rec[M]['median'],    rec[O]['median'],    rec[S]['median'])}
+{syn_row("Wasserstein-1 vs Ohio (mg/dL)",   distances['Sim_vs_Ohio']['wasserstein'],   distances['Ohio_vs_Shanghai']['wasserstein'], distances['Sim_vs_Shanghai']['wasserstein'])}
+{syn_row("KS statistic vs Ohio",            distances['Sim_vs_Ohio']['ks_stat'],       distances['Ohio_vs_Shanghai']['ks_stat'],     distances['Sim_vs_Shanghai']['ks_stat'], fmt=".3f")}
+
+---
+
+## 10. Limitations of this comparison
+
+- **Cohort size.** Ohio (n = {len(n[O]['per'])}) and Shanghai (n = {len(n[S]['per'])}) are small enough that
+  cohort means have non-trivial sampling error; the "real" distribution should
+  be taken as a band, not a point. With {len(n[M]['per'])} simulator seeds the sim cohort is
+  intentionally larger to bound its own sampling error tightly.
+- **Cadence asymmetry.** Shanghai's 15-min cadence collapses Δ-BG std and
+  sample entropy relative to 5-min cohorts. Cross-cadence ACF below 30 min is
+  not directly comparable.
+- **No glucose-controller benchmark.** The simulator output is compared to two
+  real human cohorts but not to UVA/Padova `simglucose` here.
+- **No external behaviour event matching.** Meal and bolus event distributions
+  exist in both Ohio XML and Shanghai sheets, but this report compares CGM
+  output only — not the carb-bolus pairing distribution, time-to-meal-peak
+  alignment, or exercise/sleep co-occurrence.
+- **Sample entropy subsampling.** Records longer than 2,500 points are
+  subsampled with `np.random.default_rng(0)` so the metric is reproducible but
+  is a Monte-Carlo estimate, not the exact value over the full trace.
+
+---
+
+## 11. Reproduction
+
+```bash
+# regenerates reports/stats.json + reports/REPORT.md + reports/figures/*.png
+python reports/build_report.py
+```
+
+`scripts/compare_all_datasets.py` is reused for the dataset loaders and grid
+regularisation. `OhioT1DM/` and `ShanghaiT1DM/` must be placed at the repo root
+(both gitignored, both subject to data-use agreements).
+
+Numbers in this file come from one run of `build_report.py`
+({len(n[M]['per'])} seeds, {int(round(np.mean([p['days'] for p in n[M]['per']])))} days each, 24 h warm-up discarded). Re-running reproduces
+them exactly because the simulator is seed-deterministic and the real-data
+side is fixed.
+"""
+    with open(path, "w") as f:
+        f.write(md)
+
+
+# ============================================================================
 # Main
 # ============================================================================
 def main():
@@ -800,6 +1268,9 @@ def main():
     fig_qq(cohorts, os.path.join(FIGS, "qq.png"))
     fig_recovery(cohorts, os.path.join(FIGS, "recovery_time.png"))
 
+    # Recovery-time summary per cohort
+    recov_summaries = {n: recovery_summary(cohorts[n]["recov_times"]) for n in ORDER}
+
     # Persist computed stats
     payload = {
         "datasets": {n: {
@@ -817,6 +1288,7 @@ def main():
             "n_hyper": len(cohorts[n]["hyper_durs"]),
             "n_severe_hypo": len(cohorts[n]["severe_hypo_durs"]),
             "n_severe_hyper": len(cohorts[n]["severe_hyper_durs"]),
+            "recovery": recov_summaries[n],
         } for n in ORDER},
         "distances": distances,
     }
@@ -824,6 +1296,13 @@ def main():
     with open(out, "w") as f:
         json.dump(payload, f, indent=2, default=float)
     print(f"Wrote {out}")
+
+    # Templated markdown report
+    report_path = os.path.join(REPORTS, "REPORT.md")
+    write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
+                    pooled_risk, cohort_summaries, recov_summaries,
+                    report_path)
+    print(f"Wrote {report_path}")
     print(f"Figures in {FIGS}")
 
 

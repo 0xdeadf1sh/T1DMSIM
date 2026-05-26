@@ -173,8 +173,18 @@ BASAL_CORRECTION_MAX_ADJUSTMENT = 0.22  # Max % a patient will adjust basal vs b
                                         # Set wide enough that under-dosed IR patients can break out of
                                         # stuck-high streaks (lower caps left mean BG > 200 mg/dL for
                                         # weeks at a time even averaging over 7 days).
-BASAL_RAMP_UP_HOURS = 3.0 # How long it will take before basal insulin peaks in the bloodstream
-BASAL_RAMP_DOWN_HOURS = 4.0 # How long it will take before basal insulin decays completely (from peak)
+BASAL_KA_PER_HOUR = 0.6   # Absorption rate (1/h). Governs onset/time-to-peak.
+                          # tmax = ln(ka/ke)/(ka-ke) ≈ 3.7h for ka=0.6, ke=0.09 — glargine-like.
+BASAL_KE_PER_HOUR = 0.09  # Elimination rate (1/h). Half-life ≈ 7.7h; produces a
+                          # long, smooth post-peak decline rather than a flat plateau.
+BASAL_TAIL_CLIP_HOURS = 5.0  # Smootherstep window at the end of the curve that
+                             # tapers the late residual to zero, so consecutive
+                             # daily doses join without a tail-step discontinuity.
+# Legacy aliases kept for tests / warmup math. With the Bateman PK these no
+# longer represent literal trapezoid ramps — interpret as "approx time-to-peak"
+# and "tail-clip duration" respectively.
+BASAL_RAMP_UP_HOURS = 4.0
+BASAL_RAMP_DOWN_HOURS = BASAL_TAIL_CLIP_HOURS
 
 # Bolus insulin (rapid-acting)
 # Duration of action scales with dose: BASE + SCALE * (sqrt(dose) - sqrt(5)).
@@ -633,24 +643,52 @@ def gamma_curve(total_amount: float, k: float, theta: float,
 
 
 def basal_curve(total_amount: float, duration_minutes: float,
-                ramp_up_hours: float = 2.0, ramp_down_hours: float = 2.0,
-                dt: float = DT_MINUTES) -> np.ndarray:
-    """Generate a trapezoidal basal insulin curve."""
+                ka_per_hour: float = BASAL_KA_PER_HOUR,
+                ke_per_hour: float = BASAL_KE_PER_HOUR,
+                tail_clip_hours: float = BASAL_TAIL_CLIP_HOURS,
+                dt: float = DT_MINUTES,
+                ramp_up_hours: Optional[float] = None,
+                ramp_down_hours: Optional[float] = None) -> np.ndarray:
+    """Long-acting basal insulin curve (Bateman one-compartment PK).
+
+    Models subcutaneous basal as first-order absorption + first-order
+    elimination: ``f(t) = exp(-ke·t) - exp(-ka·t)``. The result is a smooth
+    rise from zero, a broad peak at ``tmax = ln(ka/ke)/(ka-ke)`` (~3.7h for
+    the default rates), and a long exponential-like decline matching real
+    long-acting analogues (glargine, detemir). There is no flat plateau and
+    no slope discontinuity anywhere.
+
+    A smootherstep window over the last ``tail_clip_hours`` tapers the late
+    residual to zero so consecutive daily doses join without a tail-step.
+    Normalized so ``sum(values) = total_amount``.
+
+    ``ramp_up_hours`` / ``ramp_down_hours`` are accepted for backward
+    compatibility with the legacy trapezoid signature and ignored — the
+    shape is now controlled by the PK rate constants.
+    """
+    del ramp_up_hours, ramp_down_hours  # accepted for legacy callers; not used
+
     n_steps = int(duration_minutes / dt)
     if n_steps <= 0:
         return np.array([0.0])
-    
-    ramp_up_steps = int((ramp_up_hours * 60) / dt)
-    ramp_down_steps = int((ramp_down_hours * 60) / dt)
-    
-    curve = np.ones(n_steps)
-    if ramp_up_steps > 0:
-        curve[:ramp_up_steps] = np.linspace(0, 1, ramp_up_steps)
-    if ramp_down_steps > 0:
-        curve[-ramp_down_steps:] = np.linspace(1, 0, ramp_down_steps)
-        
-    # Normalize so the area under the curve equals the total dose
-    return curve * (total_amount / np.sum(curve))
+
+    ka = max(ke_per_hour + 1e-3, float(ka_per_hour))
+    ke = float(ke_per_hour)
+
+    t_h = np.arange(n_steps) * (dt / 60.0)
+    curve = np.exp(-ke * t_h) - np.exp(-ka * t_h)
+    np.maximum(curve, 0.0, out=curve)
+
+    tail_steps = int(tail_clip_hours * 60 / dt)
+    if 0 < tail_steps < n_steps:
+        s = np.linspace(1.0, 0.0, tail_steps)
+        window = s * s * s * (s * (s * 6.0 - 15.0) + 10.0)
+        curve[-tail_steps:] *= window
+
+    area = float(np.sum(curve))
+    if area > 0.0:
+        curve *= total_amount / area
+    return curve
 
 
 def bolus_pk_for_dose(dose_units: float) -> tuple:
@@ -1164,7 +1202,7 @@ class T1DMSimulator:
             site_q = self._site_quality(eff_s4)
             actual_dose = max(1.0, p.basal_dose * s.basal_dose_drift * dose_noise * basal_adjustment * site_q)
             duration = BASAL_DURATION_HOURS * 60
-            curve = basal_curve(float(actual_dose), duration, ramp_up_hours=BASAL_RAMP_UP_HOURS, ramp_down_hours=BASAL_RAMP_DOWN_HOURS)
+            curve = basal_curve(float(actual_dose), duration)
             self._pending_events.append((basal_time_idx, 'basal', {
                 'curve': curve, 'label': f'Basal {actual_dose:.1f}U'
             }))
