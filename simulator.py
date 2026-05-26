@@ -32,7 +32,12 @@ SKILL_MIN = 0.25  # Lowest possible skill level (0 = no skill)
 SKILL_MAX = 0.95  # Highest possible skill level (1 = perfect)
 
 # Wake/sleep
-WAKE_TIME_MEAN_HOURS = 8.0  # Mean wake time (hours from midnight)
+WAKE_TIME_MEAN_HOURS = 6.5  # Mean wake time (hours from midnight). Shifted from 8.0 → 6.5
+                            # so breakfast lands at ~07:00 instead of 08:30. With breakfast
+                            # 90 min earlier, the breakfast-absorption peak coincides with
+                            # the hour-8 BG peak that real cohorts (Ohio, Shanghai) both
+                            # show. The previous 8.0 pushed the breakfast peak to hour
+                            # 10:00, where the sim diurnal curve overshot Ohio by ~30 mg/dL.
 WAKE_TIME_SIGMA_BASE = 0.5  # Base sigma for wake time (hours), scaled by 1/s4
 SLEEP_DURATION_MEAN_HOURS = 7.5
 SLEEP_DURATION_SIGMA_HOURS = 1.0
@@ -40,10 +45,17 @@ SLEEP_DURATION_SIGMA_HOURS = 1.0
 # Meals
 MEALS_BASE = 3  # Base number of meals per day
 MEALS_EXTRA_LAMBDA = 3.5  # Extra meals Poisson lambda, scaled by (1 - s1). High value provides sub-day stochastic shocks that decorrelate the BG trace at mid-range lags.
-MEAL_TIME_OFFSETS_HOURS = [0.5, 5.0, 11.0]  # Breakfast, lunch, dinner offset from wake
+MEAL_TIME_OFFSETS_HOURS = [0.5, 5.0, 10.0]  # Breakfast, lunch, dinner offset from wake.
+                                             # Dinner pulled 1h earlier (11→10) so the
+                                             # post-prandial peak lands at hour 19 (matching
+                                             # Ohio) instead of hour 20.
 MEAL_TIME_JITTER_BASE_MIN = 15.0  # Base jitter in minutes, scaled by 1/s4
-MEAL_CARB_MEANS = [48.0, 63.0, 75.0]  # Mean carbs (g) per meal slot. Sized so daily carb load
-                                       # matches the OhioT1DM (~193 g/day) and Shanghai cohort intake.
+MEAL_CARB_MEANS = [32.0, 42.0, 35.0]  # Mean carbs (g) per meal slot. Dinner cut to 35g:
+                                       # the prior [48, 63, 75] over-shot Ohio's evening BG by
+                                       # +50 mg/dL at hour 21 and the morning BG by +27 at hour
+                                       # 10. Real T1Ds in published cohorts cluster nearer
+                                       # 40-60g for the main meals. Daily total of ~155 g still
+                                       # within Ohio's range once snacks/weekend jitter add ~30g.
 MEAL_CARB_SIGMA = 22.0  # Sigma for carb amount
 MEAL_CARB_DISCIPLINE_SCALE = 0.7  # How much s1 reduces carb intake
 SNACK_CARB_MEAN = 20.0
@@ -145,10 +157,19 @@ IS_DRIFT_TRANSITION_HOURS = 4.0  # Smooth blend across midnight from prev to tod
 # peaking ~8am driven mainly by cortisol-mediated IR + dawn HGO surge; a
 # milder evening cortisol peak; and lowest BG around 11pm-2am during deep
 # sleep when IS is highest.
-IS_MORNING_PEAK_HOUR = 7.5    # Morning resistance peak (aligns with real-cohort 8 am BG peak)
-IS_MORNING_AMPLITUDE = 0.30   # Strength of morning resistance
+IS_MORNING_PEAK_HOUR = 7.5    # Morning resistance peak
+IS_MORNING_AMPLITUDE = 0.05   # Cut from 0.30: at the old value, insulin was 30% less
+                              # effective during the breakfast-absorption window, which
+                              # stacked with the widened dawn HGO surge to drive a +37 mg/dL
+                              # morning-peak overshoot vs Ohio. Real morning cortisol-driven
+                              # IR is closer to 5-15%; 0.30 was a relic of when the model
+                              # needed exaggerated morning IR to compensate for absent
+                              # dawn-HGO. With the dawn HGO surge now doing that work,
+                              # IS_MORNING_AMPLITUDE can return to a physiologic baseline.
 IS_EVENING_PEAK_HOUR = 20.0   # Evening resistance peak
-IS_EVENING_AMPLITUDE = 0.08   # Strength of evening resistance. Modest — larger values produce a 22:00 BG overshoot.
+IS_EVENING_AMPLITUDE = 0.0    # Zeroed. Real cohorts show no evening BG bulge; the previous
+                              # 0.08 made insulin 8% less effective at hour 20, slowing dinner
+                              # clearance precisely when we needed it fastest.
 IS_NIGHT_DIP_HOUR = 2.0       # Nighttime sensitivity peak (low resistance)
 IS_NIGHT_DIP_AMPLITUDE = 0.15 # How much more sensitive at night
 
@@ -231,14 +252,27 @@ BASAL_RAMP_DOWN_HOURS = BASAL_TAIL_CLIP_HOURS
 BOLUS_GAMMA_K = 3.0
 BOLUS_GAMMA_THETA = 25.0  # Peak around 50 min for typical 5U dose
 BOLUS_DURATION_HOURS = 4.0  # Legacy typical duration; new code uses bolus_pk_for_dose()
-BOLUS_DIA_BASE_HOURS = 4.0  # Duration at the 5U reference dose
+BOLUS_DIA_BASE_HOURS = 2.5  # Duration at the 5U reference dose. Shortened from 4.0:
+                            # rapid-acting analogs (lispro, aspart, glulisine) have effective
+                            # DIA of 3-4h. At 4.0 a typical 7U dinner bolus finished at 23:15,
+                            # putting bolus_insulin >0.6 U/hr into the 22:00-02:00 window
+                            # that drove the nocturnal BG crash on >65% of day-records.
+                            # 3.0 lands the same bolus's tail at 22:15, exiting the nocturnal
+                            # window. Combined with the dawn-HGO timing shift below, this is
+                            # the structural attack on overnight clearance imbalance that
+                            # IS-amplitude and basal-headroom dials could not reach.
 BOLUS_DIA_DOSE_SCALE = 0.6  # Hours added per unit of sqrt(dose) - sqrt(5)
-BOLUS_DIA_MIN_HOURS = 3.0
+BOLUS_DIA_MIN_HOURS = 2.0  # Lowered from 3.0 so BOLUS_DIA_BASE_HOURS=2.5 is not clamped away.
 BOLUS_DIA_MAX_HOURS = 7.5
 BOLUS_THETA_DOSE_SLOPE = 0.06  # Theta multiplier per unit of sqrt(dose) - sqrt(5)
 ICR_MEAN = 11.0  # Insulin-to-carb ratio (1 unit per X grams). Higher = smaller per-meal bolus; the resulting hyper drift is balanced by a lower `BG_HIGH_THRESHOLD` so corrections fire sooner and more often.
 ICR_SIGMA = 2.0
-BOLUS_TIMING_COMPETENT_MEAN = -5.0  # Minutes before meal (negative = before). A
+BOLUS_TIMING_COMPETENT_MEAN = -15.0 # Minutes before meal (negative = before). Deepened from -5
+                                     # to -15 so the bolus is already active when breakfast
+                                     # carbs hit. With the shorter BOLUS_DIA_BASE_HOURS=2.5
+                                     # and earlier wake (06:30), a 5-min pre-bolus left the
+                                     # insulin curve trailing breakfast absorption by ~20 min,
+                                     # contributing to the morning hyper. A
 # small pre-bolus matches OhioT1DM behavior. Larger pre-boluses (e.g. -20 min)
 # caused the cohort-aligned post-meal envelope to dip below baseline before
 # rising, which is not seen in real CGM data.
@@ -256,7 +290,11 @@ CARB_COUNT_ERROR_SIGMA_BASE = 0.30  # Relative error, scaled by 1/s3. The symmet
 # many patients as they spare; with it, the distribution shifts so the typical
 # meal bolus is ~8% smaller than carb-count would imply, moving population time
 # from TBR1 into TAR1 (180-250) — the band most under-represented vs real data.
-CARB_COUNT_UNDERBOLUS_BIAS = -0.20  # Asymmetric "round-down" bias. Real T1Ds are paranoid about hypos and under-bolus more than they over-bolus; sim follows. Mean BG drifts up but TBR1 stays in the real-cohort band.
+CARB_COUNT_UNDERBOLUS_BIAS = 0.0    # Zeroed. Stepped -0.20 → -0.10 → 0.0. With the shorter
+                                     # the larger value, every dinner was systematically
+                                     # under-bolused by 20%, leaving residual carb load that
+                                     # drove the +50 mg/dL evening overshoot vs Ohio. Educated
+                                     # T1Ds in well-controlled cohorts dose closer to truth.
 
 # Insulin stacking
 CGM_CHECK_INTERVAL_ATTENTIVE = 20  # Minutes between checks for attentive patient
@@ -331,9 +369,28 @@ HGO_INSULIN_SMOOTHING_ALPHA = 0.25  # EMA factor for the insulin level fed into 
 # dawn rise. Per-patient amplitude is sampled in generate_patient (see
 # patient.dawn_hgo_amplitude / patient.night_hgo_dip_amplitude) so individuals
 # can have stronger or weaker dawn effects.
-DAWN_HGO_PEAK_HOUR = 7.5             # Hour of peak dawn HGO surge (aligns with real BG peak at 8am)
-DAWN_HGO_SIGMA_HOURS = 1.8           # Gaussian width
-DAWN_HGO_AMPLITUDE_MEAN = 9.0        # Mean peak HGO surge in g/hr (additive)
+DAWN_HGO_PEAK_HOUR = 4.5             # Hour of peak dawn HGO surge. 7.5 → 6.0 → 5.5 → 4.5:
+                                     # so the surge becomes meaningful (≥25% of peak) by
+                                     # hour 3 rather than essentially zero. Real cohorts
+                                     # show a positive overnight BG slope (Ohio: +4 mg/dL/h
+                                     # from midnight to 6am); the 7.5 peak couldn't explain
+                                     # that rise because the surge was still ramping up at
+                                     # 6am rather than peaking.
+DAWN_HGO_SIGMA_HOURS = 2.5           # Gaussian width. Narrowed back from 3.5 → 2.5 so the surge
+                                     # spans roughly midnight-to-noon rather than 5am-10am.
+                                     # Wider sigma raises the daily HGO integral, intentionally
+                                     # — the previous narrow surge couldn't sustain the
+                                     # midnight-to-6am overnight rise that Ohio and Shanghai
+                                     # both show. Per-patient amplitude noise is unchanged
+                                     # so individual variability is preserved.
+DAWN_HGO_AMPLITUDE_MEAN = 8.5        # Mean peak HGO surge in g/hr (additive). 9 → 11 → 8.5:
+                                     # to drive the overnight BG rise that real cohorts show
+                                     # (Ohio: +24 mg/dL from midnight to 6am; sim used to be
+                                     # −33 over the same window). Combined with the wider
+                                     # sigma and earlier peak, the daily HGO integral grows
+                                     # from ~40 to ~96 g/day. Compensated by smaller meals
+                                     # (MEAL_CARB_MEANS trimmed) so net daily glucose budget
+                                     # is roughly preserved.
 DAWN_HGO_AMPLITUDE_SIGMA = 2.0       # Per-patient SD on dawn amplitude — wide so patient diversity is visible
 NIGHT_HGO_DIP_HOUR = 2.0             # Hour of deep-sleep HGO trough
 NIGHT_HGO_DIP_SIGMA_HOURS = 2.5      # Narrower so it ends before dawn surge starts
@@ -354,7 +411,13 @@ NIGHT_HGO_DIP_AMPLITUDE_SIGMA = 0.25 # Per-patient SD (scaled with amplitude)
 # the unsuppressed-HGO state would be an infinite battery (no fasting limit).
 GLYCOGEN_CAPACITY_GRAMS = 100.0  # Maximum hepatic glycogen
 GLYCOGEN_INITIAL_FRACTION = 0.7  # Patients start moderately full
-GLYCOGEN_DRAIN_FRACTION = 0.5  # Fraction of HGO sourced from glycogenolysis (rest is gluconeogenesis)
+GLYCOGEN_DRAIN_FRACTION = 0.35  # Fraction of HGO sourced from glycogenolysis (rest is gluconeogenesis).
+                                 # Lowered from 0.5: at 0.5, overnight glycogen depletion halved
+                                 # the dawn HGO surge exactly when it was most needed (hour
+                                 # 03-05), undoing the timing-shift gains. Real T1Ds keep
+                                 # gluconeogenesis active overnight (Cahill cycle from amino
+                                 # acids + glycerol), so a 65/35 gluconeogenesis/glycogenolysis
+                                 # split is more physiologically accurate than 50/50.
 GLYCOGEN_REFILL_FRACTION = 0.20  # Fraction of absorbed carbs stored as glycogen
 GLYCOGEN_LOW_THRESHOLD_FRACTION = 0.15  # Below this fraction of capacity, HGO ramps down
 

@@ -61,13 +61,13 @@ transient, then the next 70 days are captured.
 | Metric (mg/dL) | OhioT1DM | ShanghaiT1DM | T1DMSIM | Sim − Ohio | Sim − Shang |
 |---|---:|---:|---:|---:|---:|
 | n (samples) | 85,295 | 15,696 | 604,800 | — | — |
-| **mean** | 162.1 | 164.7 | 170.1 | +8.1 | +5.4 |
-| **median** | 155.2 | 156.6 | 151.2 | -4.0 | -5.4 |
-| std | 60.8 | 72.3 | 91.1 | +30.3 | +18.8 |
-| IQR | 86.2 | 106.2 | 119.2 | +33.0 | +13.0 |
-| CV (%) | 37.5 | 43.9 | 53.6 | +16.0 pp | +9.7 pp |
-| skewness | 0.58 | 0.51 | 1.13 | +0.54 | +0.61 |
-| excess kurtosis | 0.15 | -0.14 | 1.13 | +0.98 | +1.27 |
+| **mean** | 162.1 | 164.7 | 160.4 | -1.7 | -4.3 |
+| **median** | 155.2 | 156.6 | 148.9 | -6.3 | -7.7 |
+| std | 60.8 | 72.3 | 76.0 | +15.1 | +3.6 |
+| IQR | 86.2 | 106.2 | 99.3 | +13.1 | -6.9 |
+| CV (%) | 37.5 | 43.9 | 47.4 | +9.8 pp | +3.5 pp |
+| skewness | 0.58 | 0.51 | 1.07 | +0.49 | +0.56 |
+| excess kurtosis | 0.15 | -0.14 | 1.44 | +1.29 | +1.58 |
 | min | 40.0 | 39.6 | 22.1 | — | — |
 | max | 400.0 | 475.2 | 500.0 | — | — |
 
@@ -75,15 +75,15 @@ transient, then the next 70 days are captured.
 
 | Percentile | OhioT1DM | ShanghaiT1DM | T1DMSIM | Sim − Ohio | Sim − Shang |
 |---|---:|---:|---:|---:|---:|
-| p1 | 57.0 | 41.3 | 54.7 | -2.3 | +13.4 |
-| p5 | 76.0 | 61.2 | 63.7 | -12.3 | +2.5 |
-| p10 | 88.0 | 75.6 | 72.8 | -15.2 | -2.8 |
-| p25 | 115.4 | 108.0 | 98.4 | -17.0 | -9.6 |
-| p50 | 155.2 | 156.6 | 151.2 | -4.0 | -5.4 |
-| p75 | 201.6 | 214.2 | 217.6 | +16.0 | +3.4 |
-| p90 | 244.6 | 264.6 | 297.0 | +52.4 | +32.4 |
-| p95 | 271.0 | 291.6 | 350.7 | +79.7 | +59.1 |
-| p99 | 325.8 | 349.2 | 466.0 | +140.2 | +116.8 |
+| p1 | 57.0 | 41.3 | 55.2 | -1.8 | +13.9 |
+| p5 | 76.0 | 61.2 | 65.3 | -10.7 | +4.1 |
+| p10 | 88.0 | 75.6 | 74.9 | -13.1 | -0.7 |
+| p25 | 115.4 | 108.0 | 101.4 | -14.0 | -6.6 |
+| p50 | 155.2 | 156.6 | 148.9 | -6.3 | -7.7 |
+| p75 | 201.6 | 214.2 | 200.7 | -0.9 | -13.5 |
+| p90 | 244.6 | 264.6 | 262.9 | +18.3 | -1.7 |
+| p95 | 271.0 | 291.6 | 305.4 | +34.4 | +13.8 |
+| p99 | 325.8 | 349.2 | 395.3 | +69.5 | +46.1 |
 
 ![Percentile curves](figures/percentile_curves.png)
 
@@ -98,8 +98,8 @@ transient, then the next 70 days are captured.
 | Pair | KS statistic | KS p-value | Wasserstein-1 (mg/dL) | JS divergence (5 mg/dL bins) |
 |---|---:|---:|---:|---:|
 | Ohio vs Shanghai | 0.063 | 3.5 × 10⁻⁴⁶ | 10.1 | 0.013 |
-| Sim vs Ohio | 0.099 | < 10⁻³⁰⁰ | 21.3 | 0.026 |
-| Sim vs Shanghai | 0.058 | 2.0 × 10⁻⁴⁵ | 13.0 | 0.014 |
+| Sim vs Ohio | 0.082 | < 10⁻³⁰⁰ | 11.9 | 0.014 |
+| Sim vs Shanghai | 0.061 | 3.2 × 10⁻⁴⁹ | 9.1 | 0.010 |
 
 KS p-values fall to numerical zero in the right tail at these sample sizes
 (Ohio ~85k, Sim ~600k); the magnitudes of the KS statistic and the
@@ -113,30 +113,30 @@ Per-record means ± std across each cohort.
 
 | Index | OhioT1DM | ShanghaiT1DM | T1DMSIM |
 |---|---|---|---|
-| GMI / eA1c proxy | 7.19 ± 0.39 | 7.22 ± 0.74 | 7.38 ± 0.77 |
-| **LBGI** (low-BG risk) | 0.86 ± 0.49 | 1.82 ± 1.76 | **1.70 ± 0.73** |
-| **HBGI** (high-BG risk) | 7.60 ± 2.53 | 8.58 ± 4.28 | **10.65 ± 5.61** |
-| J-index | 49.2 ± 9.2 | 52.6 ± 17.1 | 66.4 ± 24.4 |
-| M-value (ref 120) | 11.1 ± 3.8 | 15.8 ± 6.2 | 21.9 ± 12.0 |
+| GMI / eA1c proxy | 7.19 ± 0.39 | 7.22 ± 0.74 | 7.15 ± 0.57 |
+| **LBGI** (low-BG risk) | 0.86 ± 0.49 | 1.82 ± 1.76 | **1.54 ± 0.62** |
+| **HBGI** (high-BG risk) | 7.60 ± 2.53 | 8.58 ± 4.28 | **8.35 ± 3.85** |
+| J-index | 49.2 ± 9.2 | 52.6 ± 17.1 | 54.6 ± 16.3 |
+| M-value (ref 120) | 11.1 ± 3.8 | 15.8 ± 6.2 | 15.5 ± 7.2 |
 
 Pooled (not per-record) risk indices, for reference:
 
 | | Ohio | Shanghai | Sim |
 |---|---:|---:|---:|
-| LBGI (pooled) | 0.85 | 1.87 | 1.70 |
-| HBGI (pooled) | 7.54 | 8.87 | 10.65 |
-| J-index (pooled) | 49.7 | 56.2 | 68.2 |
-| M-value (pooled) | 11.0 | 16.5 | 21.9 |
+| LBGI (pooled) | 0.85 | 1.87 | 1.54 |
+| HBGI (pooled) | 7.54 | 8.87 | 8.35 |
+| J-index (pooled) | 49.7 | 56.2 | 55.9 |
+| M-value (pooled) | 11.0 | 16.5 | 15.5 |
 
 ### 4.1 Time-in-range, per-record cohort summary
 
 | Range | OhioT1DM | ShanghaiT1DM | T1DMSIM |
 |---|---|---|---|
-| TBR2 (<54)        | 0.73 ± 0.68 | 2.79 ± 3.77 | 0.83 ± 0.47 |
-| TBR1 (54–70)      | 2.57 ± 1.61 | 4.72 ± 3.97 | 7.56 ± 3.38 |
-| **TIR (70–180)**  | **60.5 ± 10.2** | **54.7 ± 14.5** | **54.0 ± 12.3** |
-| TAR1 (180–250)    | 27.4 ± 6.1 | 25.1 ± 11.7 | 20.2 ± 4.6 |
-| TAR2 (>250)       | 8.88 ± 6.11 | 12.64 ± 8.91 | 17.41 ± 11.62 |
+| TBR2 (<54)        | 0.73 ± 0.68 | 2.79 ± 3.77 | 0.73 ± 0.36 |
+| TBR1 (54–70)      | 2.57 ± 1.61 | 4.72 ± 3.97 | 6.63 ± 3.19 |
+| **TIR (70–180)**  | **60.5 ± 10.2** | **54.7 ± 14.5** | **59.1 ± 11.7** |
+| TAR1 (180–250)    | 27.4 ± 6.1 | 25.1 ± 11.7 | 21.3 ± 6.0 |
+| TAR2 (>250)       | 8.88 ± 6.11 | 12.64 ± 8.91 | 12.19 ± 8.26 |
 
 ![Clinical-range cohort comparison](../assets/clinical_ranges.png)
 
@@ -151,12 +151,12 @@ Per-record mean ± std.
 
 | Metric (native cadence) | OhioT1DM | ShanghaiT1DM | T1DMSIM |
 |---|---|---|---|
-| CV (%)              | 36.2 ± 4.5   | 38.6 ± 6.8   | **49.6 ± 6.6**   |
-| MAGE (mg/dL)        | 103.9 ± 15.4     | 123.4 ± 30.0     | 154.9 ± 19.9     |
-| CONGA-1h (mg/dL)    | 39.4 ± 5.6 | 34.2 ± 7.2 | 47.7 ± 4.6 |
-| CONGA-4h (mg/dL)    | 76.1 ± 11.4 | 75.1 ± 17.7 | 99.2 ± 12.2 |
-| MODD (mg/dL)        | 61.1 ± 8.9     | 53.3 ± 12.8     | **74.0 ± 14.0**     |
-| Sample entropy      | 0.87 ± 0.10 | 0.44 ± 0.08¹ | 0.74 ± 0.10 |
+| CV (%)              | 36.2 ± 4.5   | 38.6 ± 6.8   | **44.1 ± 6.8**   |
+| MAGE (mg/dL)        | 103.9 ± 15.4     | 123.4 ± 30.0     | 129.1 ± 20.4     |
+| CONGA-1h (mg/dL)    | 39.4 ± 5.6 | 34.2 ± 7.2 | 39.3 ± 4.7 |
+| CONGA-4h (mg/dL)    | 76.1 ± 11.4 | 75.1 ± 17.7 | 80.3 ± 9.8 |
+| MODD (mg/dL)        | 61.1 ± 8.9     | 53.3 ± 12.8     | **64.2 ± 11.9**     |
+| Sample entropy      | 0.87 ± 0.10 | 0.44 ± 0.08¹ | 0.80 ± 0.12 |
 
 ¹ Shanghai SampEn is computed on 15-min samples, which collapses the
   fine-scale jitter that drives SampEn at 5 min — the lower value is mostly a
@@ -177,12 +177,12 @@ Pooled (mean across records) Pearson autocorrelation at the indicated lag.
 | 5 min   | 0.995 | (n/a)  | 0.997 |
 | 15 min  | 0.969 | 0.984  | 0.982 |
 | 30 min  | 0.911 | 0.946  | 0.943 |
-| 1 h     | 0.765 | 0.840  | 0.825 |
-| 2 h     | 0.484 | 0.606  | 0.563 |
-| 4 h     | 0.137 | 0.254  | 0.269 |
-| **8 h**     | **-0.004** | **-0.028** | **0.113** |
-| **12 h**    | **-0.010** | **-0.050** | **0.099** |
-| 24 h    | 0.116 | 0.378  | **0.291** |
+| 1 h     | 0.765 | 0.840  | 0.833 |
+| 2 h     | 0.484 | 0.606  | 0.599 |
+| 4 h     | 0.137 | 0.254  | 0.326 |
+| **8 h**     | **-0.004** | **-0.028** | **0.144** |
+| **12 h**    | **-0.010** | **-0.050** | **0.072** |
+| 24 h    | 0.116 | 0.378  | **0.276** |
 
 ![Autocorrelation across lag](figures/acf.png)
 
@@ -192,7 +192,7 @@ Pooled (mean across records) Pearson autocorrelation at the indicated lag.
 
 Per-record Δ-BG standard deviation (mean across records, native cadence):
 Ohio 5.55 mg/dL · Shanghai 10.65 mg/dL ·
-Sim 6.36 mg/dL. Shanghai's value is at 15-min cadence and
+Sim 5.61 mg/dL. Shanghai's value is at 15-min cadence and
 is not directly comparable to the 5-min values from Ohio and the simulator.
 
 ### 6.3 Diurnal pattern (hour-of-day across records)
@@ -207,7 +207,7 @@ Hour-by-hour mean BG (mg/dL):
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Ohio | 149 | 151 | 155 | 160 | 164 | 169 | 173 | 179 | 186 | 178 | 164 | 153 | 154 | 161 | 166 | 165 | 163 | 160 | 162 | 162 | 157 | 158 | 156 | 151 |
 | Shanghai | 166 | 164 | 163 | 159 | 156 | 158 | 165 | 169 | 192 | 175 | 144 | 137 | 149 | 143 | 147 | 157 | 166 | 179 | 184 | 175 | 170 | 169 | 168 | 167 |
-| Sim | 156 | 137 | 127 | 122 | 123 | 128 | 138 | 151 | 169 | 186 | 193 | 189 | 182 | 182 | 188 | 192 | 187 | 175 | 170 | 182 | 203 | 213 | 206 | 183 |
+| Sim | 130 | 133 | 140 | 151 | 163 | 173 | 178 | 178 | 176 | 171 | 167 | 165 | 167 | 169 | 169 | 165 | 162 | 163 | 167 | 168 | 163 | 154 | 144 | 134 |
 
 Hour-by-hour median BG (mg/dL):
 
@@ -215,7 +215,7 @@ Hour-by-hour median BG (mg/dL):
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Ohio | 144 | 137 | 139 | 139 | 142 | 157 | 160 | 166 | 180 | 164 | 147 | 148 | 152 | 162 | 163 | 160 | 159 | 155 | 156 | 160 | 154 | 149 | 143 | 148 |
 | Shanghai | 156 | 159 | 152 | 144 | 145 | 144 | 150 | 161 | 192 | 164 | 126 | 138 | 149 | 135 | 147 | 165 | 158 | 176 | 199 | 170 | 170 | 175 | 171 | 166 |
-| Sim | 136 | 110 | 93 | 94 | 93 | 100 | 110 | 122 | 146 | 167 | 179 | 176 | 162 | 158 | 163 | 172 | 165 | 151 | 146 | 162 | 184 | 198 | 185 | 165 |
+| Sim | 108 | 105 | 106 | 118 | 129 | 139 | 151 | 164 | 167 | 162 | 159 | 151 | 149 | 152 | 150 | 146 | 150 | 152 | 155 | 157 | 152 | 146 | 136 | 122 |
 
 ![Weekday × hour mean heatmap](figures/weekday_heatmap.png)
 
@@ -231,14 +231,14 @@ Per-record means ± std.
 
 | Metric | OhioT1DM | ShanghaiT1DM | T1DMSIM |
 |---|---|---|---|
-| Hypo (<70) episodes / day      | 0.81 ± 0.40 | 1.02 ± 0.74 | **1.99 ± 0.87** |
-| Severe-hypo (<54) eps / day   | 0.20 ± 0.20 | 0.51 ± 0.47 | 0.31 ± 0.18 |
-| Hyper (>180) episodes / day   | 2.61 ± 0.26 | 1.87 ± 0.71 | 2.02 ± 0.29 |
-| Severe-hyper (>250) eps / day | 1.06 ± 0.38 | 1.12 ± 0.68 | 1.31 ± 0.50 |
-| Hypo median duration (min)    | 33.3 | 69.4 | 48.7 |
-| Hypo p90 duration (min)       | 89.8 | 179.2 | **100.5** |
-| Hyper median duration (min)   | 131.2 | 213.3 | 185.3 |
-| Hyper p90 duration (min)      | 422.8 | 622.6 | **561.0** |
+| Hypo (<70) episodes / day      | 0.81 ± 0.40 | 1.02 ± 0.74 | **1.80 ± 0.73** |
+| Severe-hypo (<54) eps / day   | 0.20 ± 0.20 | 0.51 ± 0.47 | 0.28 ± 0.16 |
+| Hyper (>180) episodes / day   | 2.61 ± 0.26 | 1.87 ± 0.71 | 2.08 ± 0.43 |
+| Severe-hyper (>250) eps / day | 1.06 ± 0.38 | 1.12 ± 0.68 | 1.09 ± 0.49 |
+| Hypo median duration (min)    | 33.3 | 69.4 | 45.9 |
+| Hypo p90 duration (min)       | 89.8 | 179.2 | **94.2** |
+| Hyper median duration (min)   | 131.2 | 213.3 | 139.8 |
+| Hyper p90 duration (min)      | 422.8 | 622.6 | **511.0** |
 
 ![Episode duration boxplots](figures/episode_durations.png)
 
@@ -252,7 +252,7 @@ Time from the first sub-70 sample to the next ≥ 80 sample:
 |---|---:|---:|---:|---:|---:|---:|
 | Ohio     |   284 | 50 | 81 | 134 | 216 | 295 |
 | Shanghai |   157 | 90 | 195 | 300 | 510 | 555 |
-| Sim      | 3,590 | 70 | 120 | 190 | 371 | 580 |
+| Sim      | 3,297 | 65 | 115 | 175 | 380 | 545 |
 
 ---
 
@@ -264,7 +264,7 @@ Time from the first sub-70 sample to the next ≥ 80 sample:
 |---|---:|---|---:|
 | Ohio     | 9.3 | 40.3 – 71.7 | 16.2 |
 | Shanghai | 23.1 | 32.1 – 77.3 | 31.0 |
-| Sim      | 11.7 | 17.4 – 72.6 | 32.3 |
+| Sim      | 17.9 | 26.1 – 74.0 | 23.7 |
 
 ![LBGI and HBGI per-record boxplots](figures/risk_indices.png)
 
@@ -276,34 +276,34 @@ Raw deltas only — no qualitative verdicts. See sections 3–8 for context.
 
 | Quantity | T1DMSIM | OhioT1DM | ShanghaiT1DM | Sim − Ohio | Sim − Shang |
 |---|---:|---:|---:|---:|---:|
-| Pooled mean BG (mg/dL) | 170.1 | 162.1 | 164.7 | +8.1 | +5.4 |
-| Pooled median BG (mg/dL) | 151.2 | 155.2 | 156.6 | -4.0 | -5.4 |
-| Pooled std (mg/dL) | 91.1 | 60.8 | 72.3 | +30.3 | +18.8 |
-| Pooled CV (%) | 53.6 | 37.5 | 43.9 | +16.0 | +9.7 |
-| Pooled skewness | 1.13 | 0.58 | 0.51 | +0.54 | +0.61 |
-| Pooled excess kurtosis | 1.13 | 0.15 | -0.14 | +0.98 | +1.27 |
-| Pooled p99 (mg/dL) | 466.0 | 325.8 | 349.2 | +140.2 | +116.8 |
-| GMI (per-record mean) | 7.38 | 7.19 | 7.22 | +0.19 | +0.16 |
-| LBGI (per-record mean) | 1.70 | 0.86 | 1.82 | +0.85 | -0.12 |
-| HBGI (per-record mean) | 10.65 | 7.60 | 8.58 | +3.06 | +2.08 |
-| TIR % (per-record mean) | 54.0 | 60.5 | 54.7 | -6.5 | -0.8 |
-| TBR1 % (per-record mean) | 7.56 | 2.57 | 4.72 | +4.99 | +2.84 |
-| TBR2 % (per-record mean) | 0.83 | 0.73 | 2.79 | +0.09 | -1.96 |
-| TAR1 % (per-record mean) | 20.2 | 27.4 | 25.1 | -7.1 | -4.9 |
-| TAR2 % (per-record mean) | 17.4 | 8.9 | 12.6 | +8.5 | +4.8 |
-| MAGE (mg/dL) | 154.9 | 103.9 | 123.4 | +51.0 | +31.5 |
-| CONGA-1h (mg/dL) | 47.7 | 39.4 | 34.2 | +8.3 | +13.6 |
-| CONGA-4h (mg/dL) | 99.2 | 76.1 | 75.1 | +23.1 | +24.1 |
-| MODD (mg/dL) | 74.0 | 61.1 | 53.3 | +12.9 | +20.7 |
-| Hypo episodes / day | 1.99 | 0.81 | 1.02 | +1.18 | +0.97 |
-| Severe-hypo eps / day | 0.31 | 0.20 | 0.51 | +0.11 | -0.20 |
-| Hyper episodes / day | 2.02 | 2.61 | 1.87 | -0.59 | +0.15 |
-| Severe-hyper eps / day | 1.31 | 1.06 | 1.12 | +0.24 | +0.19 |
-| Hypo p90 duration (min) | 100.5 | 89.8 | 179.2 | +10.7 | -78.8 |
-| Hyper p90 duration (min) | 561.0 | 422.8 | 622.6 | +138.2 | -61.6 |
-| Hypo recovery median (min) | 70.0 | 50.0 | 90.0 | +20.0 | -20.0 |
-| Wasserstein-1 vs Ohio (mg/dL) | 21.3 | 10.1 | 13.0 | +11.1 | +8.3 |
-| KS statistic vs Ohio | 0.099 | 0.063 | 0.058 | +0.036 | +0.041 |
+| Pooled mean BG (mg/dL) | 160.4 | 162.1 | 164.7 | -1.7 | -4.3 |
+| Pooled median BG (mg/dL) | 148.9 | 155.2 | 156.6 | -6.3 | -7.7 |
+| Pooled std (mg/dL) | 76.0 | 60.8 | 72.3 | +15.1 | +3.6 |
+| Pooled CV (%) | 47.4 | 37.5 | 43.9 | +9.8 | +3.5 |
+| Pooled skewness | 1.07 | 0.58 | 0.51 | +0.49 | +0.56 |
+| Pooled excess kurtosis | 1.44 | 0.15 | -0.14 | +1.29 | +1.58 |
+| Pooled p99 (mg/dL) | 395.3 | 325.8 | 349.2 | +69.5 | +46.1 |
+| GMI (per-record mean) | 7.15 | 7.19 | 7.22 | -0.05 | -0.08 |
+| LBGI (per-record mean) | 1.54 | 0.86 | 1.82 | +0.68 | -0.29 |
+| HBGI (per-record mean) | 8.35 | 7.60 | 8.58 | +0.75 | -0.23 |
+| TIR % (per-record mean) | 59.1 | 60.5 | 54.7 | -1.3 | +4.4 |
+| TBR1 % (per-record mean) | 6.63 | 2.57 | 4.72 | +4.06 | +1.91 |
+| TBR2 % (per-record mean) | 0.73 | 0.73 | 2.79 | +0.00 | -2.05 |
+| TAR1 % (per-record mean) | 21.3 | 27.4 | 25.1 | -6.1 | -3.8 |
+| TAR2 % (per-record mean) | 12.2 | 8.9 | 12.6 | +3.3 | -0.5 |
+| MAGE (mg/dL) | 129.1 | 103.9 | 123.4 | +25.3 | +5.8 |
+| CONGA-1h (mg/dL) | 39.3 | 39.4 | 34.2 | -0.1 | +5.2 |
+| CONGA-4h (mg/dL) | 80.3 | 76.1 | 75.1 | +4.2 | +5.3 |
+| MODD (mg/dL) | 64.2 | 61.1 | 53.3 | +3.1 | +10.9 |
+| Hypo episodes / day | 1.80 | 0.81 | 1.02 | +0.99 | +0.78 |
+| Severe-hypo eps / day | 0.28 | 0.20 | 0.51 | +0.09 | -0.23 |
+| Hyper episodes / day | 2.08 | 2.61 | 1.87 | -0.53 | +0.21 |
+| Severe-hyper eps / day | 1.09 | 1.06 | 1.12 | +0.02 | -0.03 |
+| Hypo p90 duration (min) | 94.2 | 89.8 | 179.2 | +4.5 | -85.0 |
+| Hyper p90 duration (min) | 511.0 | 422.8 | 622.6 | +88.2 | -111.6 |
+| Hypo recovery median (min) | 65.0 | 50.0 | 90.0 | +15.0 | -25.0 |
+| Wasserstein-1 vs Ohio (mg/dL) | 11.9 | 10.1 | 9.1 | +1.8 | +2.8 |
+| KS statistic vs Ohio | 0.082 | 0.063 | 0.061 | +0.019 | +0.021 |
 
 ---
 
