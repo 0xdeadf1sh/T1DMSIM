@@ -195,9 +195,11 @@ Ohio 5.55 mg/dL · Shanghai 10.65 mg/dL ·
 Sim 6.36 mg/dL. Shanghai's value is at 15-min cadence and
 is not directly comparable to the 5-min values from Ohio and the simulator.
 
-### 6.3 Diurnal pattern (hour-of-day mean ± 1σ across records)
+### 6.3 Diurnal pattern (hour-of-day across records)
 
 ![Hour-of-day mean with ±1σ envelope](figures/diurnal_envelope.png)
+
+![Hour-of-day median with IQR envelope](figures/diurnal_envelope_median.png)
 
 Hour-by-hour mean BG (mg/dL):
 
@@ -207,7 +209,17 @@ Hour-by-hour mean BG (mg/dL):
 | Shanghai | 166 | 164 | 163 | 159 | 156 | 158 | 165 | 169 | 192 | 175 | 144 | 137 | 149 | 143 | 147 | 157 | 166 | 179 | 184 | 175 | 170 | 169 | 168 | 167 |
 | Sim | 156 | 137 | 127 | 122 | 123 | 128 | 138 | 151 | 169 | 186 | 193 | 189 | 182 | 182 | 188 | 192 | 187 | 175 | 170 | 182 | 203 | 213 | 206 | 183 |
 
-![Weekday × hour heatmap](figures/weekday_heatmap.png)
+Hour-by-hour median BG (mg/dL):
+
+|   | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Ohio | 144 | 137 | 139 | 139 | 142 | 157 | 160 | 166 | 180 | 164 | 147 | 148 | 152 | 162 | 163 | 160 | 159 | 155 | 156 | 160 | 154 | 149 | 143 | 148 |
+| Shanghai | 156 | 159 | 152 | 144 | 145 | 144 | 150 | 161 | 192 | 164 | 126 | 138 | 149 | 135 | 147 | 165 | 158 | 176 | 199 | 170 | 170 | 175 | 171 | 166 |
+| Sim | 136 | 110 | 93 | 94 | 93 | 100 | 110 | 122 | 146 | 167 | 179 | 176 | 162 | 158 | 163 | 172 | 165 | 151 | 146 | 162 | 184 | 198 | 185 | 165 |
+
+![Weekday × hour mean heatmap](figures/weekday_heatmap.png)
+
+![Weekday × hour median heatmap](figures/weekday_heatmap_median.png)
 
 ---
 
