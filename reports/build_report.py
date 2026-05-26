@@ -289,6 +289,9 @@ def assemble_cohort(name, items, regularize_fn, step_min):
     pooled = []
     diurnals_mean = []
     diurnals_std = []
+    diurnals_median = []
+    diurnals_p25 = []
+    diurnals_p75 = []
     weekday_hour = defaultdict(list)
     hypo_durs = []
     hyper_durs = []
@@ -353,17 +356,25 @@ def assemble_cohort(name, items, regularize_fn, step_min):
                 weekday_hour[(ts.weekday(), ts.hour)].append(v)
         m24 = np.array([np.mean(by_hour[h]) if by_hour[h] else np.nan for h in range(24)])
         s24 = np.array([np.std(by_hour[h]) if by_hour[h] else np.nan for h in range(24)])
+        med24 = np.array([np.median(by_hour[h]) if by_hour[h] else np.nan for h in range(24)])
+        p25_24 = np.array([np.percentile(by_hour[h], 25) if by_hour[h] else np.nan for h in range(24)])
+        p75_24 = np.array([np.percentile(by_hour[h], 75) if by_hour[h] else np.nan for h in range(24)])
         diurnals_mean.append(m24)
         diurnals_std.append(s24)
+        diurnals_median.append(med24)
+        diurnals_p25.append(p25_24)
+        diurnals_p75.append(p75_24)
         hypo_durs.extend(h)
         hyper_durs.extend(H)
         severe_hypo_durs.extend(sh)
         sev_hyper_durs.extend(SH)
         recov_times.extend(episode_recovery_time(bg, step_min=step_min))
-    # Weekday × hour 7×24 matrix
+    # Weekday × hour 7×24 matrices (mean and median across pooled samples per cell)
     wd_grid = np.full((7, 24), np.nan)
+    wd_grid_median = np.full((7, 24), np.nan)
     for (wd, h), arr in weekday_hour.items():
         wd_grid[wd, h] = float(np.mean(arr))
+        wd_grid_median[wd, h] = float(np.median(arr))
     cohort = {
         "name": name,
         "step_min": step_min,
@@ -372,7 +383,11 @@ def assemble_cohort(name, items, regularize_fn, step_min):
         "pooled_delta": np.concatenate(delta_pooled) if delta_pooled else np.array([]),
         "diurnal_mean": np.nanmean(np.stack(diurnals_mean), axis=0) if diurnals_mean else np.full(24, np.nan),
         "diurnal_std": np.nanmean(np.stack(diurnals_std), axis=0) if diurnals_std else np.full(24, np.nan),
+        "diurnal_median": np.nanmedian(np.stack(diurnals_median), axis=0) if diurnals_median else np.full(24, np.nan),
+        "diurnal_p25": np.nanmedian(np.stack(diurnals_p25), axis=0) if diurnals_p25 else np.full(24, np.nan),
+        "diurnal_p75": np.nanmedian(np.stack(diurnals_p75), axis=0) if diurnals_p75 else np.full(24, np.nan),
         "wd_grid": wd_grid,
+        "wd_grid_median": wd_grid_median,
         "pooled_acf": {L: (float(np.mean(v)) if v else float("nan")) for L, v in pooled_acf.items()},
         "lags_min": lags_min,
         "hypo_durs": hypo_durs,
@@ -540,6 +555,27 @@ def fig_diurnal_envelope(cohorts, path):
     plt.close(fig)
 
 
+def fig_diurnal_envelope_median(cohorts, path):
+    fig, ax = plt.subplots(figsize=(11, 5.5))
+    ax.axhspan(70, 180, color="lightgreen", alpha=0.18)
+    h = np.arange(24)
+    for n in ORDER:
+        med = cohorts[n]["diurnal_median"]
+        p25 = cohorts[n]["diurnal_p25"]
+        p75 = cohorts[n]["diurnal_p75"]
+        ax.plot(h, med, color=COL[n], lw=2.2, marker="o", ms=4, label=f"{n} median")
+        ax.fill_between(h, p25, p75, color=COL[n], alpha=0.15)
+    ax.set_xticks(np.arange(0, 25, 3))
+    ax.set_xlabel("hour of day")
+    ax.set_ylabel("BG (mg/dL)")
+    ax.set_title("Diurnal BG: per-record median and IQR (p25–p75) envelope")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+
+
 def fig_weekday_heatmaps(cohorts, path):
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -554,6 +590,25 @@ def fig_weekday_heatmaps(cohorts, path):
         ax.set_xlabel("hour")
         ax.set_title(n)
     fig.suptitle("Mean BG by weekday × hour", fontweight="bold")
+    fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.85, label="BG (mg/dL)")
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+
+
+def fig_weekday_heatmaps_median(cohorts, path):
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    vmin, vmax = 90, 220
+    for ax, n in zip(axes, ORDER):
+        g = cohorts[n]["wd_grid_median"]
+        im = ax.imshow(g, aspect="auto", origin="upper", cmap="viridis",
+                       vmin=vmin, vmax=vmax)
+        ax.set_yticks(range(7))
+        ax.set_yticklabels(days)
+        ax.set_xticks(np.arange(0, 24, 3))
+        ax.set_xlabel("hour")
+        ax.set_title(n)
+    fig.suptitle("Median BG by weekday × hour", fontweight="bold")
     fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.85, label="BG (mg/dL)")
     fig.savefig(path, dpi=130, bbox_inches="tight")
     plt.close(fig)
@@ -844,11 +899,15 @@ def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
 
     pct_rows = "\n".join(pct_row(f"p{p}") for p in (1, 5, 10, 25, 50, 75, 90, 95, 99))
 
-    # Diurnal hourly means
+    # Diurnal hourly means / medians
     dm = {x: cohorts[x]["diurnal_mean"] for x in ORDER}
+    dmed = {x: cohorts[x]["diurnal_median"] for x in ORDER}
 
     def hour_row(name):
         return " | ".join(f"{dm[name][h]:.0f}" for h in range(24))
+
+    def hour_row_median(name):
+        return " | ".join(f"{dmed[name][h]:.0f}" for h in range(24))
 
     # Distances table
     dist_rows = []
@@ -1068,9 +1127,11 @@ Ohio {pr_delta_std[O]:.2f} mg/dL · Shanghai {pr_delta_std[S]:.2f} mg/dL ·
 Sim {pr_delta_std[M]:.2f} mg/dL. Shanghai's value is at 15-min cadence and
 is not directly comparable to the 5-min values from Ohio and the simulator.
 
-### 6.3 Diurnal pattern (hour-of-day mean ± 1σ across records)
+### 6.3 Diurnal pattern (hour-of-day across records)
 
 ![Hour-of-day mean with ±1σ envelope](figures/diurnal_envelope.png)
+
+![Hour-of-day median with IQR envelope](figures/diurnal_envelope_median.png)
 
 Hour-by-hour mean BG (mg/dL):
 
@@ -1080,7 +1141,17 @@ Hour-by-hour mean BG (mg/dL):
 | Shanghai | {hour_row(S)} |
 | Sim | {hour_row(M)} |
 
-![Weekday × hour heatmap](figures/weekday_heatmap.png)
+Hour-by-hour median BG (mg/dL):
+
+|   | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Ohio | {hour_row_median(O)} |
+| Shanghai | {hour_row_median(S)} |
+| Sim | {hour_row_median(M)} |
+
+![Weekday × hour mean heatmap](figures/weekday_heatmap.png)
+
+![Weekday × hour median heatmap](figures/weekday_heatmap_median.png)
 
 ---
 
@@ -1257,7 +1328,9 @@ def main():
     fig_pdf_pooled(cohorts, os.path.join(FIGS, "pdf_pooled.png"))
     fig_cdf_pooled(cohorts, os.path.join(FIGS, "cdf_pooled.png"))
     fig_diurnal_envelope(cohorts, os.path.join(FIGS, "diurnal_envelope.png"))
+    fig_diurnal_envelope_median(cohorts, os.path.join(FIGS, "diurnal_envelope_median.png"))
     fig_weekday_heatmaps(cohorts, os.path.join(FIGS, "weekday_heatmap.png"))
+    fig_weekday_heatmaps_median(cohorts, os.path.join(FIGS, "weekday_heatmap_median.png"))
     fig_acf(cohorts, os.path.join(FIGS, "acf.png"))
     fig_delta_distribution(cohorts, os.path.join(FIGS, "delta_distribution.png"))
     fig_risk_indices(cohorts, os.path.join(FIGS, "risk_indices.png"))
@@ -1283,6 +1356,9 @@ def main():
             "pooled_acf": cohorts[n]["pooled_acf"],
             "diurnal_mean": cohorts[n]["diurnal_mean"].tolist(),
             "diurnal_std": cohorts[n]["diurnal_std"].tolist(),
+            "diurnal_median": cohorts[n]["diurnal_median"].tolist(),
+            "diurnal_p25": cohorts[n]["diurnal_p25"].tolist(),
+            "diurnal_p75": cohorts[n]["diurnal_p75"].tolist(),
             "summary": cohort_summaries[n],
             "n_hypo": len(cohorts[n]["hypo_durs"]),
             "n_hyper": len(cohorts[n]["hyper_durs"]),
