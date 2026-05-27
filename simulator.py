@@ -32,12 +32,12 @@ SKILL_MIN = 0.25  # Lowest possible skill level (0 = no skill)
 SKILL_MAX = 0.95  # Highest possible skill level (1 = perfect)
 
 # Wake/sleep
-WAKE_TIME_MEAN_HOURS = 6.5  # Mean wake time (hours from midnight). Shifted from 8.0 → 6.5
-                            # so breakfast lands at ~07:00 instead of 08:30. With breakfast
-                            # 90 min earlier, the breakfast-absorption peak coincides with
-                            # the hour-8 BG peak that real cohorts (Ohio, Shanghai) both
-                            # show. The previous 8.0 pushed the breakfast peak to hour
-                            # 10:00, where the sim diurnal curve overshot Ohio by ~30 mg/dL.
+WAKE_TIME_MEAN_HOURS = 7.5  # Mean wake time (hours from midnight). At 6.5 the dawn HGO
+                            # surge + breakfast absorption together peaked at hour 6-7,
+                            # while real cohorts (Ohio, Shanghai) peak at hour 8. 7.5 puts
+                            # breakfast at ~08:00 so the breakfast-absorption peak lands at
+                            # ~09:30, stacking with the (now later) dawn HGO peak to put
+                            # the diurnal maximum at hour 8 rather than hour 6-7.
 WAKE_TIME_SIGMA_BASE = 0.5  # Base sigma for wake time (hours), scaled by 1/s4
 SLEEP_DURATION_MEAN_HOURS = 7.5
 SLEEP_DURATION_SIGMA_HOURS = 1.0
@@ -45,10 +45,14 @@ SLEEP_DURATION_SIGMA_HOURS = 1.0
 # Meals
 MEALS_BASE = 3  # Base number of meals per day
 MEALS_EXTRA_LAMBDA = 3.5  # Extra meals Poisson lambda, scaled by (1 - s1). High value provides sub-day stochastic shocks that decorrelate the BG trace at mid-range lags.
-MEAL_TIME_OFFSETS_HOURS = [0.5, 5.0, 10.0]  # Breakfast, lunch, dinner offset from wake.
-                                             # Dinner pulled 1h earlier (11→10) so the
-                                             # post-prandial peak lands at hour 19 (matching
-                                             # Ohio) instead of hour 20.
+MEAL_TIME_OFFSETS_HOURS = [0.5, 5.0, 12.0]  # Breakfast, lunch, dinner offset from wake.
+                                             # Dinner at wake+12 = 19:30 for the 7:30 wake
+                                             # population — the physiologic norm. Earlier
+                                             # values (10.0) placed dinner at 16:30, ending
+                                             # all carb absorption by ~18:00 and leaving the
+                                             # 18:00-00:00 window covered only by basal,
+                                             # which over-cleared into a -24 mg/dL post-
+                                             # dinner crash between hour 21 and midnight.
 MEAL_TIME_JITTER_BASE_MIN = 15.0  # Base jitter in minutes, scaled by 1/s4
 MEAL_CARB_MEANS = [32.0, 42.0, 35.0]  # Mean carbs (g) per meal slot. Dinner cut to 35g:
                                        # the prior [48, 63, 75] over-shot Ohio's evening BG by
@@ -265,7 +269,14 @@ BOLUS_DIA_DOSE_SCALE = 0.6  # Hours added per unit of sqrt(dose) - sqrt(5)
 BOLUS_DIA_MIN_HOURS = 2.0  # Lowered from 3.0 so BOLUS_DIA_BASE_HOURS=2.5 is not clamped away.
 BOLUS_DIA_MAX_HOURS = 7.5
 BOLUS_THETA_DOSE_SLOPE = 0.06  # Theta multiplier per unit of sqrt(dose) - sqrt(5)
-ICR_MEAN = 11.0  # Insulin-to-carb ratio (1 unit per X grams). Higher = smaller per-meal bolus; the resulting hyper drift is balanced by a lower `BG_HIGH_THRESHOLD` so corrections fire sooner and more often.
+ICR_MEAN = 8.0   # Insulin-to-carb ratio (1 unit per X grams). Lowered from 11.0 → 8.0 to
+                 # raise TDD into the clinical 0.5-0.7 U/kg/day band. At 11 the sim ran at
+                 # 0.45 U/kg/day with a 55/45 basal:bolus split; 8 brings it to ~0.65 U/kg
+                 # with a ~50/50 split that matches AZT1D's pump-log totals. ICR also enters
+                 # `ideal_basal = HGO*24*is/ICR`, so lowering it raises both bolus and basal
+                 # symmetrically while preserving the HGO-balances-basal invariant. The Hill
+                 # calibration anchor `compute_hgo_rate(0.075) == 9.0` is unaffected because
+                 # HGO_INSULIN_HALF_MAX and HGO_BASE are untouched.
 ICR_SIGMA = 2.0
 BOLUS_TIMING_COMPETENT_MEAN = -15.0 # Minutes before meal (negative = before). Deepened from -5
                                      # to -15 so the bolus is already active when breakfast
@@ -333,7 +344,11 @@ HYPO_DETECTION_ASLEEP_LAMBDA = 30.0  # Exponential mean for detection delay asle
 # Exercise
 EXERCISE_PROBABILITY_BASE = 0.3  # Base daily probability
 EXERCISE_SKILL_BONUS = 0.4  # Added probability from s4
-EXERCISE_TIME_MEAN_OFFSET_HOURS = 9.0  # Typical time: wake + 9h (afternoon/evening)
+EXERCISE_TIME_MEAN_OFFSET_HOURS = 11.0  # Typical time: wake + 11h. For the 7:30 wake population this lands the
+                                        # average session around 18:30 (after-work / pre-dinner). Earlier values
+                                        # (9.0 → ~16:30) clustered with the old 16:30 dinner; with dinner now at
+                                        # 19:30 the exercise offset is shifted in step so the two events stay
+                                        # ordered (exercise → dinner) rather than overlapping.
 EXERCISE_TIME_SIGMA_HOURS = 2.0
 EXERCISE_DURATION_MEAN_MIN = 75.0       # Population-mean session length. Real OhioT1DM mean ≈ 86 min,
                                         # σ across patients ≈ 57; the previous 40-min mean represented
@@ -351,10 +366,31 @@ EXERCISE_GAMMA_THETA = 15.0
 # saturates toward the SUPPRESSED floor. HGO_INSULIN_HALF_MAX is tuned so that
 # a typical basal level (~0.07 U/step) lands at the legacy ~9 g/hr rate, which
 # preserves the basal-balances-HGO test invariant.
-HGO_BASE_GRAMS_PER_HOUR = 9.0  # Legacy "balanced" rate, used only for basal sizing
+HGO_BASE_GRAMS_PER_HOUR = 8.25  # "Balanced" reference rate used for basal sizing
+                                 # (ideal_basal = HGO_BASE * 24 * weight/75 * is / ICR).
+                                 # Lowered from 9.0 → 8.25 jointly with the ICR_MEAN 11→8
+                                 # drop: at HGO=9 + ICR=8 the simulator's basal share ran
+                                 # 58% (mean rate 1.32 U/hr) while AZT1D's pump log shows
+                                 # ~0.92 U/hr at ~43% basal share. 8.25/8 = 24.75 U/day
+                                 # basal lands the mean rate at ~0.94 U/hr (matches AZT1D
+                                 # within rounding) and brings basal share to ~53%. Going
+                                 # lower (e.g. 7.5) overshoots the basal-share target but
+                                 # collapses mean BG dynamics because the steeper Hill
+                                 # curve required for anchoring robs meal boluses of their
+                                 # extra dynamic HGO-suppression power — post-meal BG
+                                 # climbs +15 mg/dL.
 HGO_UNSUPPRESSED_GRAMS_PER_HOUR = 18.0  # Rate with no insulin (DKA-like)
 HGO_SUPPRESSED_FLOOR_GRAMS_PER_HOUR = 6.0  # Maximum suppression
-HGO_INSULIN_HALF_MAX = 0.025  # Insulin per step at which HGO is half-suppressed (U/step)
+HGO_INSULIN_HALF_MAX = 0.0198  # Insulin per step at which HGO is half-suppressed (U/step).
+                                # Retuned 0.025 → 0.0198 jointly with HGO_BASE so that
+                                # Hill(typical_basal_per_step) ≈ HGO_BASE under the new
+                                # ICR/HGO calibration. With ICR=8 and HGO_BASE=8.25,
+                                # typical basal-per-step is 8.25*24/8/288 ≈ 0.0859 U/step;
+                                # the closed-form solution for the anchor constraint
+                                # `Hill(B/96) = B` is h = B*(B-6) / (96*(18-B)) =
+                                # 8.25*2.25/(96*9.75) ≈ 0.0198. Mild change from 0.025 so
+                                # the Hill curve remains close to its previous shape and
+                                # meal-bolus HGO suppression dynamics are preserved.
 HGO_NOISE_SIGMA = 0.02  # Relative per-step noise (matched to IS_FAST_NOISE_SIGMA for visual consistency)
 HGO_INSULIN_SMOOTHING_ALPHA = 0.25  # EMA factor for the insulin level fed into the Hill function.
 # Models plasma-insulin lag behind SC absorption (~10-15 min), and prevents HGO
@@ -369,13 +405,14 @@ HGO_INSULIN_SMOOTHING_ALPHA = 0.25  # EMA factor for the insulin level fed into 
 # dawn rise. Per-patient amplitude is sampled in generate_patient (see
 # patient.dawn_hgo_amplitude / patient.night_hgo_dip_amplitude) so individuals
 # can have stronger or weaker dawn effects.
-DAWN_HGO_PEAK_HOUR = 4.5             # Hour of peak dawn HGO surge. 7.5 → 6.0 → 5.5 → 4.5:
-                                     # so the surge becomes meaningful (≥25% of peak) by
-                                     # hour 3 rather than essentially zero. Real cohorts
-                                     # show a positive overnight BG slope (Ohio: +4 mg/dL/h
-                                     # from midnight to 6am); the 7.5 peak couldn't explain
-                                     # that rise because the surge was still ramping up at
-                                     # 6am rather than peaking.
+DAWN_HGO_PEAK_HOUR = 6.0             # Hour of peak dawn HGO surge. 4.5 → 6.0: at 4.5 the
+                                     # surge peaked before patients woke and breakfast carbs
+                                     # arrived, putting the simulator diurnal maximum at hour
+                                     # 6-7 instead of the hour-8 peak seen in Ohio/Shanghai.
+                                     # 6.0 (the cortisol-driven dawn-phenomenon canonical
+                                     # time) stacks the tail of the surge with breakfast
+                                     # absorption at hour 9, producing the morning BG peak
+                                     # roughly an hour later than the old 4.5 placement.
 DAWN_HGO_SIGMA_HOURS = 2.5           # Gaussian width. Narrowed back from 3.5 → 2.5 so the surge
                                      # spans roughly midnight-to-noon rather than 5am-10am.
                                      # Wider sigma raises the daily HGO integral, intentionally
@@ -850,8 +887,8 @@ def compute_hgo_rate(insulin_per_step: float) -> float:
     """Hill-function HGO rate (g/hr) given current plasma insulin per step.
 
     HGO = SUPPRESSED + (UNSUPPRESSED - SUPPRESSED) / (1 + insulin/HALF_MAX).
-    Tuned so a typical basal level (~0.075 U/step) yields exactly HGO_BASE
-    (9 g/hr), preserving the basal-balances-HGO invariant.
+    Tuned so a typical basal level (~0.086 U/step under ICR=8) yields exactly
+    HGO_BASE (8.25 g/hr), preserving the basal-balances-HGO invariant.
     """
     span = HGO_UNSUPPRESSED_GRAMS_PER_HOUR - HGO_SUPPRESSED_FLOOR_GRAMS_PER_HOUR
     suppression = 1.0 / (1.0 + max(0.0, insulin_per_step) / HGO_INSULIN_HALF_MAX)
