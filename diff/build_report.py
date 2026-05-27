@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -2035,6 +2036,12 @@ them exactly because the simulator is seed-deterministic and the real-data
 side is fixed. Generating an arbitrarily larger synthetic corpus is just a
 matter of bumping `n_seeds=` and/or `days=` in the `assemble_sim()` call.
 """
+    # Column-alignment padding inside f-string bold markers (e.g. `**{x:>5.2f}**`)
+    # leaks spaces between the asterisks and the value, which GitHub's renderer
+    # then refuses to bold. Trim whitespace flush against the markers — but only
+    # *inside* a bold pair, so adjacent `**bold** *italic*` constructs aren't
+    # smashed together into `**bold***italic*`.
+    md = re.sub(r"\*\*[ \t]*([^*\n]+?)[ \t]*\*\*", r"**\1**", md)
     with open(path, "w") as f:
         f.write(md)
 

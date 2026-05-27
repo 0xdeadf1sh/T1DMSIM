@@ -62,7 +62,7 @@ fixed corpus size.
 | OhioT1DM     |   6 | 85,295 |   7,720 |     322 | 5 min |
 | ShanghaiT1DM |  16 | 15,696 |   3,924 |     164 | 15 min |
 | AZT1D        |  24 | 288,085 |  24,375 |   1,016 | 5 min |
-| **T1DMSIM** *(this run)* | **30** | **604,800** | ** 50,400** | **  2,100** | **5 min** |
+| **T1DMSIM** *(this run)* | **30** | **604,800** | **50,400** | **2,100** | **5 min** |
 
 The T1DMSIM row above reflects the 30-seed × 70-day run used
 to compute every other number in this report. A fresh `build_report.py` call
@@ -101,11 +101,11 @@ per-record means across each cohort.
 
 | Band | Threshold | Ohio % | Shang % | AZT1D % | **Sim %** |
 |---|---|---:|---:|---:|---:|
-| TBR2 | <54     |  0.73 |  2.79 |  0.23 | ** 0.72** |
-| TBR1 | 54-70   |  2.57 |  4.72 |  1.03 | ** 6.63** |
-| TIR  | 70-180  |  60.5  |  54.7  |  77.1  | ** 56.5**  |
-| TAR1 | 180-250 |  27.4 |  25.1 |  17.7 | ** 22.0** |
-| TAR2 | >250    |   8.9 |  12.6 |   3.9 | ** 14.2** |
+| TBR2 | <54     |  0.73 |  2.79 |  0.23 | **0.72** |
+| TBR1 | 54-70   |  2.57 |  4.72 |  1.03 | **6.63** |
+| TIR  | 70-180  |  60.5  |  54.7  |  77.1  | **56.5**  |
+| TAR1 | 180-250 |  27.4 |  25.1 |  17.7 | **22.0** |
+| TAR2 | >250    |   8.9 |  12.6 |   3.9 | **14.2** |
 
 T1DMSIM is intentionally tuned for *elevated mild-hypo (TBR1) and severe-hyper
 (TAR2) density* relative to OhioT1DM — the shape of those events (durations,
