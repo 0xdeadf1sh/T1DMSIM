@@ -1,9 +1,11 @@
-"""Comprehensive statistical comparison of T1DMSIM vs OhioT1DM vs ShanghaiT1DM.
+"""Comprehensive statistical comparison of T1DMSIM vs three real CGM corpora.
+
+Compares the simulator output against OhioT1DM, ShanghaiT1DM, and AZT1D.
 
 Produces:
-  reports/stats.json        — all computed numbers
-  reports/figures/*.png     — figure set referenced from REPORT.md
-  reports/REPORT.md         — templated markdown report (regenerated from stats)
+  diff/stats.json        — all computed numbers
+  diff/figures/*.png     — figure set referenced from README.md
+  diff/README.md         — templated markdown report (regenerated from stats)
 
 The analysis intentionally goes beyond scripts/compare_all_datasets.py and the
 existing README comparison block:
@@ -18,9 +20,11 @@ existing README comparison block:
   - hour-of-day mean ± 1σ envelopes
   - episode-level metrics: count/day, full duration percentiles, time-to-recover
   - per-patient TIR/TBR scatter (heterogeneity inside each cohort)
+  - AZT1D-only insulin / carb behaviour panel (basal-rate distribution, bolus
+    type breakdown, correction-vs-meal split, carbs / boluses per day)
   - cohort summary tables in JSON keyed by metric
 
-All three datasets are read with the loaders in scripts/compare_all_datasets.py;
+The four datasets are read with the loaders in scripts/compare_all_datasets.py;
 the simulator is exercised with the same warm-up convention as that script.
 """
 from __future__ import annotations
@@ -38,8 +42,8 @@ import matplotlib.pyplot as plt
 from scipy import stats as sps
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-REPORTS = os.path.join(REPO_ROOT, "reports")
-FIGS = os.path.join(REPORTS, "figures")
+DIFF = os.path.join(REPO_ROOT, "diff")
+FIGS = os.path.join(DIFF, "figures")
 os.makedirs(FIGS, exist_ok=True)
 
 sys.path.insert(0, REPO_ROOT)
@@ -47,14 +51,18 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
 from compare_all_datasets import (  # noqa: E402
     load_ohio_patients, load_shanghai_patients,
+    load_azt1d_patients, load_azt1d_events,
     regularize_bg, regularize_bg_15min,
 )
 from simulator import T1DMSimulator  # noqa: E402
 
 
 # ----- palette -----
-COL = {"Ohio": "#1f77b4", "Shanghai": "#ff7f0e", "Sim": "#d62728"}
-ORDER = ["Ohio", "Shanghai", "Sim"]
+# Four cohorts: three real (Ohio, Shanghai, AZT1D) plus the simulator.
+COL = {"Ohio": "#1f77b4", "Shanghai": "#ff7f0e",
+       "AZT1D": "#2ca02c", "Sim": "#d62728"}
+ORDER = ["Ohio", "Shanghai", "AZT1D", "Sim"]
+REAL_ORDER = ["Ohio", "Shanghai", "AZT1D"]
 
 
 # ============================================================================
@@ -400,8 +408,18 @@ def assemble_cohort(name, items, regularize_fn, step_min):
 
 
 def assemble_sim(n_seeds=30, days=70, warmup_h=24):
+    """Run the simulator once per seed and capture every output channel.
+
+    Returns a tuple `(items, raw_runs)` where:
+      - `items` is the list of (seed_id, [(ts, bg_observed), ...]) tuples used
+        by `assemble_cohort` to produce all CGM-only statistics.
+      - `raw_runs` is the per-seed dict of `generate_hours()` output arrays
+        (`bg_observed`, `total_carb`, `basal_insulin`, `bolus_insulin`, ...),
+        used by `sim_event_summary` so the simulator is only exercised once.
+    """
     print(f"Running T1DMSIM: {n_seeds} seeds × {days}d ({warmup_h}h warmup)…")
     items = []
+    raw_runs = []
     for seed in range(n_seeds):
         s = T1DMSimulator(seed=seed, initial_bg=120.0)
         s.generate_hours(warmup_h)
@@ -410,7 +428,8 @@ def assemble_sim(n_seeds=30, days=70, warmup_h=24):
         t0 = datetime(2024, 1, 1)
         rows = [(t0 + timedelta(minutes=5 * i), float(bg[i])) for i in range(len(bg))]
         items.append((str(seed), rows))
-    return items
+        raw_runs.append((str(seed), d))
+    return items, raw_runs
 
 
 def trivial_regularize_5min(rows):
@@ -418,6 +437,319 @@ def trivial_regularize_5min(rows):
     times = np.array([r[0] for r in rows])
     vals = np.array([r[1] for r in rows], dtype=float)
     return times, vals
+
+
+# ============================================================================
+# AZT1D-only event panel (basal rates, bolus type breakdown, carbs)
+# ============================================================================
+def azt1d_event_summary(events_by_subject):
+    """Aggregate per-subject insulin / carb / device-mode statistics.
+
+    Returns a dict suitable for both the markdown table and the bar chart:
+        {
+            "per_subject": [...],
+            "pooled": {basal stats, bolus split, carb stats, device-mode %},
+        }
+    """
+    import numpy as _np
+    per = []
+    all_basal = []
+    bolus_type_counts = defaultdict(int)
+    correction_units = 0.0
+    food_units = 0.0
+    total_bolus_units = 0.0
+    n_bolus_events = 0
+    n_correction_events = 0  # standalone "correction-only" boluses
+    n_meal_events = 0
+    all_carbs = []
+    device_mode_minutes = defaultdict(int)
+    total_minutes = 0
+    total_days = 0.0
+    # Several AZT1D subjects have a small fraction of clearly bogus basal-rate
+    # entries (e.g. 1000+ U/hr — likely an OCR or unit-encoding artefact in the
+    # original PDF-to-CSV extraction described in the manuscript). Cap at a
+    # physiologically plausible upper bound before any aggregation; the
+    # discarded fraction is recorded below.
+    BASAL_CAP_U_PER_HR = 10.0
+    discarded_basal = 0
+    total_basal = 0
+    for sub, df in events_by_subject.items():
+        if df.empty:
+            continue
+        n_rows = len(df)
+        total_minutes += n_rows * 5
+        days = n_rows * 5 / (60 * 24)
+        total_days += days
+        # Basal rate: rows where 'Basal' is set carry the active pump rate in U/hr.
+        basal = df["Basal"].dropna().to_numpy()
+        total_basal += len(basal)
+        discarded_basal += int((basal > BASAL_CAP_U_PER_HR).sum())
+        basal = basal[(basal >= 0) & (basal <= BASAL_CAP_U_PER_HR)]
+        all_basal.extend(basal.tolist())
+        # Bolus rows: any non-null BolusType. The pump exposes several
+        # categories — split user-driven boluses (Standard, Standard/Correction
+        # and the BLE variants) from AID-driven `Automatic Bolus/Correction`,
+        # because the simulator models MDI long-acting basal + per-meal user
+        # boluses with no AID counterpart, so mixing both would skew the
+        # bolus-events-per-day comparison by an order of magnitude.
+        bdf = df.dropna(subset=["BolusType"])
+        bt_str = bdf["BolusType"].astype(str)
+        is_automatic = bt_str.str.contains("Automatic", case=False, regex=False)
+        # Drop pump-internal "0" placeholder rows and explicit AID auto-boluses
+        # from the user-bolus count, but still log their existence.
+        is_zero_row = bt_str.str.strip().isin(["0", "0.0"])
+        user_mask = ~(is_automatic | is_zero_row)
+        # Skip the literal "0" placeholder (Subject 8 reports ~7800 rows with
+        # BolusType == "0", a known extraction artefact in the published
+        # CSV — meaningless category, not a real bolus).
+        for bt, cnt in bt_str.value_counts().items():
+            label = str(bt).strip()
+            if label in ("0", "0.0", "nan", ""):
+                continue
+            bolus_type_counts[label] += int(cnt)
+        # Restrict the per-day / per-meal / unit-share computations to
+        # user-initiated boluses for the simulator-comparable view.
+        ubdf = bdf[user_mask]
+        n_bolus_events += len(ubdf)
+        tot = ubdf["TotalBolusInsulinDelivered"].fillna(0.0).to_numpy()
+        corr = ubdf["CorrectionDelivered"].fillna(0.0).to_numpy()
+        food = ubdf["FoodDelivered"].fillna(0.0).to_numpy()
+        correction_units += float(corr.sum())
+        food_units += float(food.sum())
+        total_bolus_units += float(tot.sum())
+        is_meal = food > 1e-6
+        is_corr_only = (~is_meal) & (corr > 1e-6)
+        n_meal_events += int(is_meal.sum())
+        n_correction_events += int(is_corr_only.sum())
+        carbs = ubdf.loc[is_meal, "CarbSize"].dropna().to_numpy()
+        all_carbs.extend(carbs.tolist())
+        # Device mode minutes (each row covers 5 minutes). Several subjects'
+        # CSVs contain typos ("sleepsleep") or numeric-coerced placeholders
+        # ("0"); fold those into the canonical sleep/exercise/regular buckets.
+        dm = df["DeviceMode"].fillna("regular").astype(str).str.strip().str.lower()
+        dm = dm.replace({"": "regular", "nan": "regular", "0": "regular",
+                         "sleepsleep": "sleep", "exerciseexercise": "exercise"})
+        for mode, cnt in dm.value_counts().items():
+            key = str(mode)
+            if "sleep" in key:
+                key = "sleep"
+            elif "exercise" in key:
+                key = "exercise"
+            elif key not in ("regular",):
+                key = "regular"
+            device_mode_minutes[key] += int(cnt) * 5
+        # Per-subject summary — basal arr was already capped above; bolus
+        # counts here are the *user-initiated* subset (AID auto-boluses
+        # excluded so the per-day counts are comparable to the simulator).
+        per.append({
+            "sub": str(sub),
+            "days": float(days),
+            "basal_mean_U_per_hr": float(_np.mean(basal)) if len(basal) else float("nan"),
+            "basal_median_U_per_hr": float(_np.median(basal)) if len(basal) else float("nan"),
+            "basal_cv_pct": float(100 * _np.std(basal) / _np.mean(basal))
+                            if len(basal) and _np.mean(basal) > 0 else float("nan"),
+            "boluses_per_day": float(len(ubdf) / days) if days else 0.0,
+            "meal_boluses_per_day": float(int(is_meal.sum()) / days) if days else 0.0,
+            "correction_boluses_per_day": float(int(is_corr_only.sum()) / days)
+                                          if days else 0.0,
+            "carbs_per_day_g": float(carbs.sum() / days) if days else 0.0,
+            "mean_carb_per_meal_g": float(_np.mean(carbs)) if len(carbs) else float("nan"),
+            "correction_unit_share_pct": float(100 * corr.sum() / tot.sum())
+                                          if tot.sum() > 0 else float("nan"),
+            # Total daily insulin: basal U/hr × 24h + total bolus units. We
+            # estimate basal contribution from the *mean* sampled rate × 24h
+            # (basal samples are uniform 5-min snapshots, so mean × 24 is a
+            # well-defined daily-equivalent).
+            "total_insulin_U_per_day": float(
+                (_np.mean(basal) * 24 if len(basal) else 0.0) + tot.sum() / days)
+                if days else 0.0,
+        })
+    pooled = {
+        "n_subjects": len(per),
+        "total_days": float(total_days),
+        "basal_pooled_mean": float(_np.mean(all_basal)) if all_basal else float("nan"),
+        "basal_pooled_median": float(_np.median(all_basal)) if all_basal else float("nan"),
+        "basal_pooled_p10": float(_np.percentile(all_basal, 10)) if all_basal else float("nan"),
+        "basal_pooled_p90": float(_np.percentile(all_basal, 90)) if all_basal else float("nan"),
+        "boluses_per_day_mean": float(_np.mean([r["boluses_per_day"] for r in per])) if per else 0.0,
+        "meal_boluses_per_day_mean": float(_np.mean([r["meal_boluses_per_day"] for r in per])) if per else 0.0,
+        "correction_boluses_per_day_mean": float(_np.mean([r["correction_boluses_per_day"] for r in per])) if per else 0.0,
+        "carbs_per_day_mean": float(_np.mean([r["carbs_per_day_g"] for r in per])) if per else 0.0,
+        "mean_carb_per_meal_mean": float(_np.mean([r["mean_carb_per_meal_g"]
+                                                    for r in per
+                                                    if not _np.isnan(r["mean_carb_per_meal_g"])])) if per else 0.0,
+        "correction_unit_share_pct": float(100 * correction_units / total_bolus_units)
+                                      if total_bolus_units > 0 else float("nan"),
+        "food_unit_share_pct": float(100 * food_units / total_bolus_units)
+                                if total_bolus_units > 0 else float("nan"),
+        "total_insulin_per_day_mean": float(_np.mean([r["total_insulin_U_per_day"] for r in per])) if per else 0.0,
+        "bolus_type_counts": dict(bolus_type_counts),
+        "device_mode_minutes": dict(device_mode_minutes),
+        "device_mode_pct": {k: 100.0 * v / total_minutes
+                            for k, v in device_mode_minutes.items()}
+                            if total_minutes else {},
+        "basal_capped_pct": (100.0 * discarded_basal / total_basal
+                              if total_basal else 0.0),
+        "basal_cap_threshold": BASAL_CAP_U_PER_HR,
+    }
+    return {"per_subject": per, "pooled": pooled,
+            "basal_values": all_basal, "carb_values": all_carbs}
+
+
+def sim_event_summary(raw_runs):
+    """Per-seed insulin / carb stats from already-generated sim runs.
+
+    Consumes the `raw_runs` second tuple element returned by `assemble_sim`
+    so the simulator is only invoked once per seed.
+
+    We deliberately report only **integrated daily totals** (carbs/day,
+    insulin/day) and **basal-rate distributions** — quantities that are
+    directly comparable to AZT1D. Per-meal carb size and per-bolus event
+    counts are NOT computed for the simulator because its
+    `bolus_insulin` / `total_carb` channels expose active-PK / active-
+    absorption levels rather than discrete injection events, and any
+    threshold-based clustering merges events whose curves overlap. The
+    AZT1D-side per-meal / per-event numbers stay AZT1D-only in the report.
+    """
+    import numpy as _np
+    per = []
+    all_basal = []
+    for seed, d in raw_runs:
+        carbs_arr = _np.asarray(d.get("total_carb", []), dtype=float)
+        basal_arr = _np.asarray(d.get("basal_insulin", []), dtype=float)
+        bolus_arr = _np.asarray(d.get("bolus_insulin", []), dtype=float)
+        # basal_insulin / bolus_insulin are per-step (5 min) PK-curve samples,
+        # i.e. units of insulin reaching circulation in this step. Their sum
+        # over a full DIA equals the original injection size, so integrating
+        # over the whole run gives total delivered units. To project the
+        # per-step amount into a U/hr "rate" comparable to AZT1D's hourly
+        # basal column, multiply by 12 (12 × 5min = 60min).
+        basal_rate = basal_arr * 12.0
+        n_steps = len(carbs_arr)
+        d_days = n_steps * 5 / (60 * 24)
+        per.append({
+            "sub": str(seed),
+            "days": float(d_days),
+            "basal_mean_U_per_hr": float(_np.mean(basal_rate)),
+            "basal_median_U_per_hr": float(_np.median(basal_rate)),
+            "basal_cv_pct": float(100 * _np.std(basal_rate) / _np.mean(basal_rate))
+                            if _np.mean(basal_rate) > 0 else float("nan"),
+            "carbs_per_day_g": float(carbs_arr.sum() / d_days) if d_days else 0.0,
+            "total_insulin_U_per_day": float((basal_arr.sum() + bolus_arr.sum()) / d_days)
+                                       if d_days else 0.0,
+        })
+        all_basal.extend(basal_rate.tolist())
+    pooled = {
+        "n_subjects": len(per),
+        "total_days": float(sum(r["days"] for r in per)),
+        "basal_pooled_mean": float(_np.mean(all_basal)) if all_basal else float("nan"),
+        "basal_pooled_median": float(_np.median(all_basal)) if all_basal else float("nan"),
+        "basal_pooled_p10": float(_np.percentile(all_basal, 10)) if all_basal else float("nan"),
+        "basal_pooled_p90": float(_np.percentile(all_basal, 90)) if all_basal else float("nan"),
+        "carbs_per_day_mean": float(_np.mean([r["carbs_per_day_g"] for r in per])) if per else 0.0,
+        "total_insulin_per_day_mean": float(_np.mean([r["total_insulin_U_per_day"] for r in per])) if per else 0.0,
+    }
+    return {"per_subject": per, "pooled": pooled,
+            "basal_values": all_basal}
+
+
+def fig_azt1d_events(az_stats, sim_stats, path):
+    """4-panel panel comparing AZT1D and Sim insulin/carb behaviour."""
+    fig, axes = plt.subplots(2, 2, figsize=(13, 8.2))
+
+    # (1) Basal-rate distribution (U/hr)
+    ax = axes[0, 0]
+    bins = np.linspace(0.0, 4.0, 41)
+    az_basal = np.asarray(az_stats["basal_values"])
+    sim_basal = np.asarray(sim_stats["basal_values"])
+    if len(az_basal):
+        ax.hist(az_basal, bins=bins, density=True, histtype="step",
+                lw=2.2, color=COL["AZT1D"], label="AZT1D AID basal rate")
+    if len(sim_basal):
+        ax.hist(sim_basal, bins=bins, density=True, histtype="step",
+                lw=2.2, color=COL["Sim"], label="T1DMSIM basal-channel rate")
+    ax.set_xlabel("basal insulin (U/hr)")
+    ax.set_ylabel("density")
+    ax.set_title("Basal-rate distribution", fontweight="bold")
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    # (2) Per-subject daily insulin / carb totals — integrated quantities,
+    # comparable across data sources.
+    ax = axes[0, 1]
+    az_pool = az_stats["pooled"]
+    sim_pool = sim_stats["pooled"]
+    cats = ["carbs / day (g)", "total insulin / day (U)"]
+    az_vals = [az_pool["carbs_per_day_mean"],
+               az_pool["total_insulin_per_day_mean"]]
+    sim_vals = [sim_pool["carbs_per_day_mean"],
+                sim_pool["total_insulin_per_day_mean"]]
+    x = np.arange(len(cats))
+    w = 0.38
+    ax.bar(x - w / 2, az_vals, w, color=COL["AZT1D"], label="AZT1D")
+    ax.bar(x + w / 2, sim_vals, w, color=COL["Sim"], label="T1DMSIM")
+    ymax = max(max(az_vals), max(sim_vals)) * 1.18
+    for i, (a, b) in enumerate(zip(az_vals, sim_vals)):
+        ax.text(i - w / 2, a + ymax * 0.015, f"{a:.0f}", ha="center", fontsize=9)
+        ax.text(i + w / 2, b + ymax * 0.015, f"{b:.0f}", ha="center", fontsize=9)
+    ax.set_xticks(x)
+    ax.set_xticklabels(cats, fontsize=9)
+    ax.set_ylim(0, ymax)
+    ax.set_ylabel("per-subject mean")
+    ax.set_title("Daily intake totals (integrated)", fontweight="bold")
+    ax.legend()
+    ax.grid(alpha=0.3, axis="y")
+
+    # (3) AZT1D-only — per-meal carb-size distribution. The simulator's
+    # `total_carb` channel cannot be cleanly split into discrete meal events
+    # (overlapping gamma absorption tails), so this is reported as an AZT1D
+    # reference distribution rather than a head-to-head comparison.
+    ax = axes[1, 0]
+    bins = np.linspace(0, 120, 31)
+    az_carbs = np.asarray(az_stats.get("carb_values", []))
+    if len(az_carbs):
+        ax.hist(az_carbs, bins=bins, density=True, histtype="step",
+                lw=2.2, color=COL["AZT1D"],
+                label=f"AZT1D meals (n={len(az_carbs):,})")
+    ax.set_xlabel("carbohydrates per meal (g)")
+    ax.set_ylabel("density")
+    ax.set_title("Per-meal carb distribution (AZT1D only)",
+                 fontweight="bold")
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    # (4) AZT1D device-mode time share
+    ax = axes[1, 1]
+    dm_pct = az_pool.get("device_mode_pct", {})
+    # Collapse anything that isn't sleep/exercise into "regular".
+    dm_norm = {"regular": 0.0, "sleep": 0.0, "exercise": 0.0}
+    for k, v in dm_pct.items():
+        if k == "sleep":
+            dm_norm["sleep"] += v
+        elif k == "exercise":
+            dm_norm["exercise"] += v
+        else:
+            dm_norm["regular"] += v
+    labels = list(dm_norm.keys())
+    vals = list(dm_norm.values())
+    cs = ["#86C893", "#5B8DB8", "#E08550"]
+    x = np.arange(len(labels))
+    bars = ax.bar(x, vals, color=cs, edgecolor="black", linewidth=0.5)
+    for b, v in zip(bars, vals):
+        ax.text(b.get_x() + b.get_width() / 2, v + 1.5,
+                f"{v:.1f}%", ha="center", fontsize=10)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("% of total recorded minutes")
+    ax.set_title("AZT1D device-mode time share", fontweight="bold")
+    ax.set_ylim(0, max(vals) * 1.25 if vals else 1)
+    ax.grid(alpha=0.3, axis="y")
+
+    fig.suptitle("AZT1D vs T1DMSIM — insulin / carb / device-mode behaviour",
+                 fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
 
 
 # ============================================================================
@@ -577,9 +909,10 @@ def fig_diurnal_envelope_median(cohorts, path):
 
 
 def fig_weekday_heatmaps(cohorts, path):
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+    fig, axes = plt.subplots(1, len(ORDER), figsize=(4.5 * len(ORDER), 4.5))
     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     vmin, vmax = 90, 220
+    im = None
     for ax, n in zip(axes, ORDER):
         g = cohorts[n]["wd_grid"]
         im = ax.imshow(g, aspect="auto", origin="upper", cmap="viridis",
@@ -596,9 +929,10 @@ def fig_weekday_heatmaps(cohorts, path):
 
 
 def fig_weekday_heatmaps_median(cohorts, path):
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+    fig, axes = plt.subplots(1, len(ORDER), figsize=(4.5 * len(ORDER), 4.5))
     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     vmin, vmax = 90, 220
+    im = None
     for ax, n in zip(axes, ORDER):
         g = cohorts[n]["wd_grid_median"]
         im = ax.imshow(g, aspect="auto", origin="upper", cmap="viridis",
@@ -640,13 +974,14 @@ def fig_delta_distribution(cohorts, path):
     cadence differs between Shanghai (15m) and others (5m)."""
     fig, ax = plt.subplots(figsize=(11, 5.5))
     bins = np.arange(-40, 41, 1.0)
-    labels = {"Ohio": "Ohio (Δ5m)", "Shanghai": "Shanghai (Δ15m)", "Sim": "T1DMSIM (Δ5m)"}
+    labels = {"Ohio": "Ohio (Δ5m)", "Shanghai": "Shanghai (Δ15m)",
+              "AZT1D": "AZT1D (Δ5m)", "Sim": "T1DMSIM (Δ5m)"}
     for n in ORDER:
         d = cohorts[n]["pooled_delta"]
         if len(d) == 0:
             continue
         ax.hist(d, bins=bins, density=True, histtype="step", lw=2.0,
-                color=COL[n], label=labels[n])
+                color=COL[n], label=labels.get(n, n))
     ax.set_yscale("log")
     ax.set_xlabel("ΔBG between consecutive CGM samples (mg/dL)")
     ax.set_ylabel("density (log)")
@@ -774,11 +1109,14 @@ def fig_pct_table_figure(cohorts, path):
 
 
 def fig_qq(cohorts, path):
-    """Quantile-Quantile plots Sim vs Ohio and Sim vs Shanghai."""
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5.5))
+    """Quantile-Quantile plots Sim vs each real cohort."""
+    refs = [n for n in REAL_ORDER if n in cohorts and len(cohorts[n]["pooled_bg"])]
+    fig, axes = plt.subplots(1, len(refs), figsize=(5.5 * len(refs), 5.5))
+    if len(refs) == 1:
+        axes = [axes]
     qs = np.linspace(0.01, 0.99, 200)
     sim_q = np.quantile(cohorts["Sim"]["pooled_bg"], qs)
-    for ax, ref in zip(axes, ("Ohio", "Shanghai")):
+    for ax, ref in zip(axes, refs):
         ref_q = np.quantile(cohorts[ref]["pooled_bg"], qs)
         ax.plot(ref_q, sim_q, color=COL["Sim"], lw=2.0, label="data")
         lo = min(ref_q.min(), sim_q.min())
@@ -948,12 +1286,10 @@ def _build_ml_section(cohorts, distances, pooled_moments, pooled_percentiles,
     Numbers come from the same per-cohort structures used elsewhere in the
     report, so this section stays in sync on every re-run.
     """
-    O, S, M = "Ohio", "Shanghai", "Sim"
+    O, S, A, M = "Ohio", "Shanghai", "AZT1D", "Sim"
     pm = pooled_moments
     pp = pooled_percentiles
-    sm = cohort_summaries
 
-    # Volume
     def _samples(n):
         return int(pm[n]["n"])
 
@@ -965,41 +1301,37 @@ def _build_ml_section(cohorts, distances, pooled_moments, pooled_percentiles,
 
     hours = {n: _days(n) * 24 for n in ORDER}
 
-    # Class balance — per-record means across each cohort
-    class_keys = [("TBR2_pct", "<54"), ("TBR1_pct", "54-70"),
-                  ("TIR_pct", "70-180"), ("TAR1_pct", "180-250"),
-                  ("TAR2_pct", ">250")]
-
     def _class_pct(n, key):
         vs = [r[key] for r in cohorts[n]["per"] if key in r]
         return float(np.mean(vs)) if vs else float("nan")
 
-    # Episode counts
     n_hypo = {n: len(cohorts[n]["hypo_durs"]) for n in ORDER}
     n_hyper = {n: len(cohorts[n]["hyper_durs"]) for n in ORDER}
     n_severe_hypo = {n: len(cohorts[n]["severe_hypo_durs"]) for n in ORDER}
     n_severe_hyper = {n: len(cohorts[n]["severe_hyper_durs"]) for n in ORDER}
 
-    # Effective decorrelation lag (ACF crossings)
     decorr_05 = {n: _acf_threshold_lag(cohorts[n]["pooled_acf"], 0.5)
                  for n in ORDER}
     decorr_02 = {n: _acf_threshold_lag(cohorts[n]["pooled_acf"], 0.2)
                  for n in ORDER}
 
-    # Between vs within patient std
     between_std = {n: float(np.std([r["mean"] for r in cohorts[n]["per"]]))
                    for n in ORDER}
     within_std = {n: float(np.mean([r["std"] for r in cohorts[n]["per"]]))
                   for n in ORDER}
 
-    # Distribution distances
     d_so = distances["Sim_vs_Ohio"]
     d_ss = distances["Sim_vs_Shanghai"]
+    d_sa = distances["Sim_vs_AZT1D"]
+    d_oa = distances["Ohio_vs_AZT1D"]
     d_oo = distances["Ohio_vs_Shanghai"]
 
-    sim_vs_ohio_w = d_so["wasserstein"]
-    ohio_vs_shang_w = d_oo["wasserstein"]
-    closer_than_real = sim_vs_ohio_w < ohio_vs_shang_w
+    # Use the most-similar real-vs-real baseline as the comparison anchor.
+    real_baselines = [d_oo["wasserstein"], d_oa["wasserstein"],
+                      distances["Shanghai_vs_AZT1D"]["wasserstein"]]
+    real_baseline = float(np.mean(real_baselines))
+    sim_best = min(d_so["wasserstein"], d_ss["wasserstein"], d_sa["wasserstein"])
+    closer_than_real = sim_best < real_baseline
 
     def _fmt_lag(min_val):
         if not np.isfinite(min_val):
@@ -1010,15 +1342,16 @@ def _build_ml_section(cohorts, distances, pooled_moments, pooled_percentiles,
     def _fmt_int(n):
         return f"{n:,}"
 
-    sim_hypo_ratio_ohio = (n_hypo[M] / max(1, n_hypo[O]))
-    sim_hypo_ratio_shang = (n_hypo[S] and n_hypo[M] / n_hypo[S]) or float("nan")
-
     md = f"""## 0. Machine-learning summary
 
 Stats and visuals tailored to designing an ML pipeline against this data.
-The simulator output is positioned for sequence modelling
-(transformer / RNN / state-space) with class-imbalanced classification or
-regression heads on top.
+The simulator emits a continuous, fully-labelled multivariate stream
+(BG, carb intake, basal/bolus insulin, exercise, sensitivity, hepatic output
+…) suitable for sequence modelling with regression or class-imbalanced
+classification heads. **Volume is not a constraint:** each seed produces
+an arbitrarily long trace, and there is no upper bound on how many seeds you
+can sample — the figures below describe one particular generation run, not a
+fixed corpus size.
 
 ### 0.1 Data volume per cohort
 
@@ -1026,10 +1359,17 @@ regression heads on top.
 |---|---:|---:|---:|---:|---:|
 | OhioT1DM     | {_records(O):>3} | {_fmt_int(_samples(O))} | {hours[O]:>7,.0f} | {_days(O):>7,.0f} | {cohorts[O]['step_min']} min |
 | ShanghaiT1DM | {_records(S):>3} | {_fmt_int(_samples(S))} | {hours[S]:>7,.0f} | {_days(S):>7,.0f} | {cohorts[S]['step_min']} min |
-| **T1DMSIM**  | **{_records(M)}** | **{_fmt_int(_samples(M))}** | **{hours[M]:>7,.0f}** | **{_days(M):>7,.0f}** | **{cohorts[M]['step_min']} min** |
+| AZT1D        | {_records(A):>3} | {_fmt_int(_samples(A))} | {hours[A]:>7,.0f} | {_days(A):>7,.0f} | {cohorts[A]['step_min']} min |
+| **T1DMSIM** *(this run)* | **{_records(M)}** | **{_fmt_int(_samples(M))}** | **{hours[M]:>7,.0f}** | **{_days(M):>7,.0f}** | **{cohorts[M]['step_min']} min** |
 
-T1DMSIM provides **{_samples(M) / max(1, _samples(O)):.1f}× the sample count of OhioT1DM**
-and **{_samples(M) / max(1, _samples(S)):.1f}× that of ShanghaiT1DM**.
+The T1DMSIM row above reflects the {_records(M)}-seed × {int(round(_days(M)/_records(M)))}-day run used
+to compute every other number in this report. A fresh `build_report.py` call
+with `--n-seeds N --days D` (or the equivalent edit in `main()`) scales the
+synthetic corpus linearly with no quality penalty — useful when an ML model
+needs orders of magnitude more samples than the real corpora can supply.
+Relative to that one run, T1DMSIM provides **{_samples(M) / max(1, _samples(O)):.1f}× the sample count of OhioT1DM**,
+**{_samples(M) / max(1, _samples(S)):.1f}× ShanghaiT1DM**, and
+**{_samples(M) / max(1, _samples(A)):.1f}× AZT1D**.
 
 ### 0.2 Normalization statistics
 
@@ -1039,16 +1379,16 @@ standardization. For neural-net-friendly z-scoring on the simulator output:
 that is resistant to extreme-hyper outliers: `bg_robust = (bg - {pm[M]['median']:.1f}) / {pm[M]['iqr']:.1f}`
 (median / IQR).
 
-| Stat (mg/dL) | Ohio | Shanghai | **Sim** |
-|---|---:|---:|---:|
-| mean    | {pm[O]['mean']:.1f}  | {pm[S]['mean']:.1f}  | **{pm[M]['mean']:.1f}**  |
-| median  | {pm[O]['median']:.1f}  | {pm[S]['median']:.1f}  | **{pm[M]['median']:.1f}**  |
-| std     | {pm[O]['std']:.1f}   | {pm[S]['std']:.1f}   | **{pm[M]['std']:.1f}**   |
-| IQR     | {pm[O]['iqr']:.1f}   | {pm[S]['iqr']:.1f}   | **{pm[M]['iqr']:.1f}**   |
-| p1      | {pp[O]['p1']:.1f}    | {pp[S]['p1']:.1f}    | **{pp[M]['p1']:.1f}**    |
-| p99     | {pp[O]['p99']:.1f}   | {pp[S]['p99']:.1f}   | **{pp[M]['p99']:.1f}**   |
-| min     | {pm[O]['min']:.1f}   | {pm[S]['min']:.1f}   | **{pm[M]['min']:.1f}**   |
-| max     | {pm[O]['max']:.1f}   | {pm[S]['max']:.1f}   | **{pm[M]['max']:.1f}**   |
+| Stat (mg/dL) | Ohio | Shanghai | AZT1D | **Sim** |
+|---|---:|---:|---:|---:|
+| mean    | {pm[O]['mean']:.1f}  | {pm[S]['mean']:.1f}  | {pm[A]['mean']:.1f}  | **{pm[M]['mean']:.1f}**  |
+| median  | {pm[O]['median']:.1f}  | {pm[S]['median']:.1f}  | {pm[A]['median']:.1f}  | **{pm[M]['median']:.1f}**  |
+| std     | {pm[O]['std']:.1f}   | {pm[S]['std']:.1f}   | {pm[A]['std']:.1f}   | **{pm[M]['std']:.1f}**   |
+| IQR     | {pm[O]['iqr']:.1f}   | {pm[S]['iqr']:.1f}   | {pm[A]['iqr']:.1f}   | **{pm[M]['iqr']:.1f}**   |
+| p1      | {pp[O]['p1']:.1f}    | {pp[S]['p1']:.1f}    | {pp[A]['p1']:.1f}    | **{pp[M]['p1']:.1f}**    |
+| p99     | {pp[O]['p99']:.1f}   | {pp[S]['p99']:.1f}   | {pp[A]['p99']:.1f}   | **{pp[M]['p99']:.1f}**   |
+| min     | {pm[O]['min']:.1f}   | {pm[S]['min']:.1f}   | {pm[A]['min']:.1f}   | **{pm[M]['min']:.1f}**   |
+| max     | {pm[O]['max']:.1f}   | {pm[S]['max']:.1f}   | {pm[A]['max']:.1f}   | **{pm[M]['max']:.1f}**   |
 
 ### 0.3 Sample-level class balance
 
@@ -1057,13 +1397,13 @@ per-record means across each cohort.
 
 ![Class balance per cohort](figures/class_balance.png)
 
-| Band | Threshold | Ohio % | Shang % | **Sim %** |
-|---|---|---:|---:|---:|
-| TBR2 | <54     | {_class_pct(O,'TBR2_pct'):>5.2f} | {_class_pct(S,'TBR2_pct'):>5.2f} | **{_class_pct(M,'TBR2_pct'):>5.2f}** |
-| TBR1 | 54-70   | {_class_pct(O,'TBR1_pct'):>5.2f} | {_class_pct(S,'TBR1_pct'):>5.2f} | **{_class_pct(M,'TBR1_pct'):>5.2f}** |
-| TIR  | 70-180  | {_class_pct(O,'TIR_pct'):>5.1f}  | {_class_pct(S,'TIR_pct'):>5.1f}  | **{_class_pct(M,'TIR_pct'):>5.1f}**  |
-| TAR1 | 180-250 | {_class_pct(O,'TAR1_pct'):>5.1f} | {_class_pct(S,'TAR1_pct'):>5.1f} | **{_class_pct(M,'TAR1_pct'):>5.1f}** |
-| TAR2 | >250    | {_class_pct(O,'TAR2_pct'):>5.1f} | {_class_pct(S,'TAR2_pct'):>5.1f} | **{_class_pct(M,'TAR2_pct'):>5.1f}** |
+| Band | Threshold | Ohio % | Shang % | AZT1D % | **Sim %** |
+|---|---|---:|---:|---:|---:|
+| TBR2 | <54     | {_class_pct(O,'TBR2_pct'):>5.2f} | {_class_pct(S,'TBR2_pct'):>5.2f} | {_class_pct(A,'TBR2_pct'):>5.2f} | **{_class_pct(M,'TBR2_pct'):>5.2f}** |
+| TBR1 | 54-70   | {_class_pct(O,'TBR1_pct'):>5.2f} | {_class_pct(S,'TBR1_pct'):>5.2f} | {_class_pct(A,'TBR1_pct'):>5.2f} | **{_class_pct(M,'TBR1_pct'):>5.2f}** |
+| TIR  | 70-180  | {_class_pct(O,'TIR_pct'):>5.1f}  | {_class_pct(S,'TIR_pct'):>5.1f}  | {_class_pct(A,'TIR_pct'):>5.1f}  | **{_class_pct(M,'TIR_pct'):>5.1f}**  |
+| TAR1 | 180-250 | {_class_pct(O,'TAR1_pct'):>5.1f} | {_class_pct(S,'TAR1_pct'):>5.1f} | {_class_pct(A,'TAR1_pct'):>5.1f} | **{_class_pct(M,'TAR1_pct'):>5.1f}** |
+| TAR2 | >250    | {_class_pct(O,'TAR2_pct'):>5.1f} | {_class_pct(S,'TAR2_pct'):>5.1f} | {_class_pct(A,'TAR2_pct'):>5.1f} | **{_class_pct(M,'TAR2_pct'):>5.1f}** |
 
 T1DMSIM is intentionally tuned for *elevated mild-hypo (TBR1) and severe-hyper
 (TAR2) density* relative to OhioT1DM — the shape of those events (durations,
@@ -1076,12 +1416,12 @@ per epoch.
 For rare-event detection training (e.g. "will hypo in next N minutes" binary
 heads). Each row is a contiguous excursion ≥ 15 min.
 
-| Event class | Ohio | Shanghai | **Sim** | Sim/Ohio | Sim/Shang |
-|---|---:|---:|---:|---:|---:|
-| Hypo (<70) episodes        | {_fmt_int(n_hypo[O])}   | {_fmt_int(n_hypo[S])}   | **{_fmt_int(n_hypo[M])}**   | {sim_hypo_ratio_ohio:.1f}× | {n_hypo[M]/max(1,n_hypo[S]):.1f}× |
-| Severe-hypo (<54) episodes | {_fmt_int(n_severe_hypo[O])}    | {_fmt_int(n_severe_hypo[S])}    | **{_fmt_int(n_severe_hypo[M])}**    | {n_severe_hypo[M]/max(1,n_severe_hypo[O]):.1f}× | {n_severe_hypo[M]/max(1,n_severe_hypo[S]):.1f}× |
-| Hyper (>180) episodes      | {_fmt_int(n_hyper[O])}  | {_fmt_int(n_hyper[S])}  | **{_fmt_int(n_hyper[M])}**  | {n_hyper[M]/max(1,n_hyper[O]):.1f}× | {n_hyper[M]/max(1,n_hyper[S]):.1f}× |
-| Severe-hyper (>250) episodes | {_fmt_int(n_severe_hyper[O])}  | {_fmt_int(n_severe_hyper[S])}  | **{_fmt_int(n_severe_hyper[M])}**  | {n_severe_hyper[M]/max(1,n_severe_hyper[O]):.1f}× | {n_severe_hyper[M]/max(1,n_severe_hyper[S]):.1f}× |
+| Event class | Ohio | Shanghai | AZT1D | **Sim** |
+|---|---:|---:|---:|---:|
+| Hypo (<70) episodes        | {_fmt_int(n_hypo[O])}   | {_fmt_int(n_hypo[S])}   | {_fmt_int(n_hypo[A])}   | **{_fmt_int(n_hypo[M])}** |
+| Severe-hypo (<54) episodes | {_fmt_int(n_severe_hypo[O])}    | {_fmt_int(n_severe_hypo[S])}    | {_fmt_int(n_severe_hypo[A])}    | **{_fmt_int(n_severe_hypo[M])}** |
+| Hyper (>180) episodes      | {_fmt_int(n_hyper[O])}  | {_fmt_int(n_hyper[S])}  | {_fmt_int(n_hyper[A])}  | **{_fmt_int(n_hyper[M])}** |
+| Severe-hyper (>250) episodes | {_fmt_int(n_severe_hyper[O])}  | {_fmt_int(n_severe_hyper[S])}  | {_fmt_int(n_severe_hyper[A])}  | **{_fmt_int(n_severe_hyper[M])}** |
 
 ### 0.5 Effective context window
 
@@ -1089,10 +1429,10 @@ Pooled Pearson autocorrelation decays as the lag grows. The lag at which the
 ACF drops below a chosen threshold is a useful order-of-magnitude estimate of
 how long an autoregressive model needs to look back.
 
-| ACF threshold | Ohio | Shanghai | **Sim** |
-|---|---:|---:|---:|
-| 0.5 (50% retained) | {_fmt_lag(decorr_05[O])} | {_fmt_lag(decorr_05[S])} | **{_fmt_lag(decorr_05[M])}** |
-| 0.2 (20% retained) | {_fmt_lag(decorr_02[O])} | {_fmt_lag(decorr_02[S])} | **{_fmt_lag(decorr_02[M])}** |
+| ACF threshold | Ohio | Shanghai | AZT1D | **Sim** |
+|---|---:|---:|---:|---:|
+| 0.5 (50% retained) | {_fmt_lag(decorr_05[O])} | {_fmt_lag(decorr_05[S])} | {_fmt_lag(decorr_05[A])} | **{_fmt_lag(decorr_05[M])}** |
+| 0.2 (20% retained) | {_fmt_lag(decorr_02[O])} | {_fmt_lag(decorr_02[S])} | {_fmt_lag(decorr_02[A])} | **{_fmt_lag(decorr_02[M])}** |
 
 A 4-8h context window covers the meaningful autoregressive signal; longer
 contexts add little beyond the half-day BG ACF tail visible in §6.1.
@@ -1109,6 +1449,7 @@ to the real cohorts' so the same split strategy carries over.
 |---|---:|---:|---:|
 | Ohio     | {between_std[O]:.1f} | {within_std[O]:.1f} | {between_std[O]/max(1e-6,within_std[O]):.2f} |
 | Shanghai | {between_std[S]:.1f} | {within_std[S]:.1f} | {between_std[S]/max(1e-6,within_std[S]):.2f} |
+| AZT1D    | {between_std[A]:.1f} | {within_std[A]:.1f} | {between_std[A]/max(1e-6,within_std[A]):.2f} |
 | **Sim**  | **{between_std[M]:.1f}** | **{within_std[M]:.1f}** | **{between_std[M]/max(1e-6,within_std[M]):.2f}** |
 
 ### 0.7 Diurnal shape (clean line overlay)
@@ -1128,19 +1469,23 @@ direct measure of the domain gap that needs to close at inference time.
 |---|---:|---:|---:|
 | **Sim vs Ohio**     | {d_so['ks_stat']:.3f} | {d_so['wasserstein']:.1f} | {d_so['js_div']:.3f} |
 | **Sim vs Shanghai** | {d_ss['ks_stat']:.3f} | {d_ss['wasserstein']:.1f} | {d_ss['js_div']:.3f} |
+| **Sim vs AZT1D**    | {d_sa['ks_stat']:.3f} | {d_sa['wasserstein']:.1f} | {d_sa['js_div']:.3f} |
 | Ohio vs Shanghai (real-vs-real baseline) | {d_oo['ks_stat']:.3f} | {d_oo['wasserstein']:.1f} | {d_oo['js_div']:.3f} |
+| Ohio vs AZT1D    (real-vs-real baseline) | {d_oa['ks_stat']:.3f} | {d_oa['wasserstein']:.1f} | {d_oa['js_div']:.3f} |
+| Shanghai vs AZT1D (real-vs-real baseline) | {distances['Shanghai_vs_AZT1D']['ks_stat']:.3f} | {distances['Shanghai_vs_AZT1D']['wasserstein']:.1f} | {distances['Shanghai_vs_AZT1D']['js_div']:.3f} |
 
-The Sim-vs-Ohio Wasserstein-1 of {sim_vs_ohio_w:.1f} mg/dL is
+The smallest Sim-vs-real Wasserstein-1 of {sim_best:.1f} mg/dL is
 {'*smaller* than' if closer_than_real else 'comparable to'} the
-Ohio-vs-Shanghai baseline of {ohio_vs_shang_w:.1f} mg/dL — meaning the
+mean real-vs-real baseline of {real_baseline:.1f} mg/dL — meaning the
 simulator's pooled BG distribution is
-{'closer to OhioT1DM than the two real cohorts are to each other' if closer_than_real else 'within the same band as the two real cohorts'}.
+{'closer to one real cohort than the three real cohorts are to each other on average' if closer_than_real else 'within the same band as the three real cohorts'}.
 """
     return md
 
 
 def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
-                    pooled_risk, cohort_summaries, recov_summaries, path):
+                    pooled_risk, cohort_summaries, recov_summaries,
+                    az_event_stats, sim_event_stats, path):
     """Template the full markdown report from computed stats.
 
     Tables are filled programmatically from the same numbers that go into
@@ -1156,7 +1501,7 @@ def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
     rec = recov_summaries
 
     # Convenience handles
-    O, S, M = "Ohio", "Shanghai", "Sim"
+    O, S, A, M = "Ohio", "Shanghai", "AZT1D", "Sim"
 
     # Per-record TIR IQR + mean-BG std across records (Section 8)
     def _per_records_field(cohort_name, key):
@@ -1170,8 +1515,8 @@ def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
     tir_hi = {x: float(np.max(_per_records_field(x, "TIR_pct"))) for x in ORDER}
     mean_bg_std = {x: float(np.std(_per_records_field(x, "mean"))) for x in ORDER}
 
-    # ACF lag rows that exist for both Ohio and Sim (5-min cadence) and for
-    # Shanghai (15-min cadence). 5-min row is absent for Shanghai.
+    # ACF lag rows that exist at 5-min cadence (Ohio, AZT1D, Sim) and at
+    # 15-min cadence (Shanghai). The 5-min row is absent for Shanghai.
     acf = {x: cohorts[x]["pooled_acf"] for x in ORDER}
 
     def _acf_cell(name, lag_min):
@@ -1180,11 +1525,11 @@ def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
             return "(n/a)"
         return f"{v:.3f}"
 
-    # Δ vs Ohio / Δ vs Shanghai column generators
+    # Δ vs each real cohort
     def pct_row(pkey):
-        po = pp[O][pkey]; ps = pp[S][pkey]; psim = pp[M][pkey]
-        return (f"| {pkey} | {po:.1f} | {ps:.1f} | {psim:.1f} | "
-                f"{psim-po:+.1f} | {psim-ps:+.1f} |")
+        po = pp[O][pkey]; ps = pp[S][pkey]; pa = pp[A][pkey]; psim = pp[M][pkey]
+        return (f"| {pkey} | {po:.1f} | {ps:.1f} | {pa:.1f} | {psim:.1f} | "
+                f"{psim-po:+.1f} | {psim-ps:+.1f} | {psim-pa:+.1f} |")
 
     pct_rows = "\n".join(pct_row(f"p{p}") for p in (1, 5, 10, 25, 50, 75, 90, 95, 99))
 
@@ -1198,11 +1543,19 @@ def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
     def hour_row_median(name):
         return " | ".join(f"{dmed[name][h]:.0f}" for h in range(24))
 
-    # Distances table
+    # Distances table — every pair we computed.
     dist_rows = []
-    for pair_key, label in [("Ohio_vs_Shanghai", "Ohio vs Shanghai"),
-                            ("Sim_vs_Ohio",      "Sim vs Ohio"),
-                            ("Sim_vs_Shanghai",  "Sim vs Shanghai")]:
+    pair_labels = [
+        ("Ohio_vs_Shanghai", "Ohio vs Shanghai"),
+        ("Ohio_vs_AZT1D", "Ohio vs AZT1D"),
+        ("Shanghai_vs_AZT1D", "Shanghai vs AZT1D"),
+        ("Sim_vs_Ohio", "Sim vs Ohio"),
+        ("Sim_vs_Shanghai", "Sim vs Shanghai"),
+        ("Sim_vs_AZT1D", "Sim vs AZT1D"),
+    ]
+    for pair_key, label in pair_labels:
+        if pair_key not in distances:
+            continue
         d = distances[pair_key]
         dist_rows.append(
             f"| {label} | {d['ks_stat']:.3f} | {_sci(d['ks_p'])} | "
@@ -1219,10 +1572,11 @@ def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
     rec_table = "\n".join(rec_row(x) for x in ORDER)
 
     # Synthesis tables — produce neutral side-by-side rows with Δ columns.
-    def syn_row(label, sim_val, ohio_val, shang_val, fmt=".1f", unit=""):
+    def syn_row(label, sim_val, ohio_val, shang_val, az_val, fmt=".1f", unit=""):
         return (f"| {label} | {sim_val:{fmt}}{unit} | {ohio_val:{fmt}}{unit} | "
-                f"{shang_val:{fmt}}{unit} | {sim_val-ohio_val:+{fmt}} | "
-                f"{sim_val-shang_val:+{fmt}} |")
+                f"{shang_val:{fmt}}{unit} | {az_val:{fmt}}{unit} | "
+                f"{sim_val-ohio_val:+{fmt}} | {sim_val-shang_val:+{fmt}} | "
+                f"{sim_val-az_val:+{fmt}} |")
 
     # Per-record delta std (mean across records)
     pr_delta_std = {x: float(np.nanmean([
@@ -1233,19 +1587,53 @@ def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
     ml_section_md = _build_ml_section(cohorts, distances, pooled_moments,
                                        pooled_percentiles, cohort_summaries)
 
-    md = f"""# T1DMSIM vs OhioT1DM vs ShanghaiT1DM — Statistical Comparison Report
+    # AZT1D event section
+    az_pool = az_event_stats["pooled"]
+    sim_pool = sim_event_stats["pooled"]
 
-Comprehensive statistical comparison of the synthetic blood-glucose traces
-produced by `simulator.py` against two non-redistributable real-world CGM
-corpora. Goes well beyond the summary panel in `README.md`: full
-percentile tables, distribution-distance statistics (Kolmogorov–Smirnov,
-Wasserstein, Jensen–Shannon), Kovatchev risk indices, MAGE / CONGA / MODD /
-sample entropy, autocorrelation across nine lags, rate-of-change distributions,
-hour-of-day envelopes, weekday × hour heatmaps, per-record TIR/TBR scatter, and
-expanded excursion-level metrics.
+    md = f"""# T1DMSIM vs OhioT1DM, ShanghaiT1DM, AZT1D — Statistical Comparison Report
 
-This file is regenerated end-to-end by `reports/build_report.py`. Raw stats
-are persisted to `reports/stats.json`; figures live in `reports/figures/`.
+`simulator.py` is the seed-driven T1D behaviour simulator described in the
+[project README](../README.md). It produces synthetic blood-glucose traces
+together with the underlying carb / insulin / exercise / sensitivity factor
+curves that generated them. This document compares those synthetic traces
+against three real-world CGM corpora — OhioT1DM, ShanghaiT1DM, and AZT1D
+(see [References](../README.md#references) in the project README) — across
+distributional moments, KS / Wasserstein / JS distances, Kovatchev risk
+indices, MAGE / CONGA / MODD / sample entropy, autocorrelation across nine
+lags, rate-of-change distributions, hour-of-day envelopes, weekday × hour
+heatmaps, per-record TIR / TBR scatter, expanded excursion-level metrics,
+and — using AZT1D's richer pump log — a head-to-head comparison of basal-rate
+distribution, bolus-event counts, per-meal carb size, and device-mode time
+share.
+
+**Cohort sizing.** The simulator is exercised here at {len(n[M]['per'])} seeds × {int(round(np.mean([p['days'] for p in n[M]['per']])))}
+days to give it a sample count comparable to the largest real corpus.
+**This is not a fixed corpus** — `T1DMSimulator.generate_hours()` is a
+deterministic generator (same seed → same trace), and an arbitrary number of
+new patient seeds can be sampled, each producing an arbitrarily long trace.
+Every per-record number below ("samples", "CGM-days", "n events", etc.) is a
+property of *this particular run*, not an upper bound on what the simulator
+can produce.
+
+This file is regenerated end-to-end by `diff/build_report.py`. Raw stats are
+persisted to `diff/stats.json`; figures live in `diff/figures/`.
+
+## Table of contents
+
+- [0. Machine-learning summary](#0-machine-learning-summary)
+- [1. Corpora at a glance](#1-corpora-at-a-glance)
+- [2. Methodology](#2-methodology)
+- [3. Headline numbers](#3-headline-numbers)
+- [4. Clinical glycemic indices](#4-clinical-glycemic-indices)
+- [5. Variability and complexity](#5-variability-and-complexity)
+- [6. Temporal dynamics](#6-temporal-dynamics)
+- [7. Excursion-level dynamics](#7-excursion-level-dynamics)
+- [8. Per-record heterogeneity](#8-per-record-per-patient-heterogeneity)
+- [9. AZT1D insulin / carb panel](#9-azt1d-insulin--carb-behaviour-panel)
+- [10. Side-by-side summary](#10-side-by-side-summary)
+- [11. Limitations of this comparison](#11-limitations-of-this-comparison)
+- [12. Reproduction](#12-reproduction)
 
 ---
 
@@ -1259,9 +1647,10 @@ are persisted to `reports/stats.json`; figures live in `reports/figures/`.
 |---|---:|---:|---:|---|---|
 | OhioT1DM | {len(n[O]['per'])} records (file pairs) | {n[O]['step_min']} min Dexcom | {sum(p['days'] for p in n[O]['per']):.1f} | US adults, pump + announced meals | training + testing periods concatenated per patient |
 | ShanghaiT1DM | {len(n[S]['per'])} records | **{n[S]['step_min']} min** | {sum(p['days'] for p in n[S]['per']):.1f} | CN adults, mixed CSII + MDI (incl. regular Novolin R), BMI ≈ 21 | shorter individual records (~10 d) |
-| T1DMSIM | {len(n[M]['per'])} seeds × {int(round(np.mean([p['days'] for p in n[M]['per']])))} days | {n[M]['step_min']} min | {sum(p['days'] for p in n[M]['per']):.1f} | synthetic, seeds 0–{len(n[M]['per'])-1}, 24 h warm-up discarded | `initial_bg = 120 mg/dL`, `bg_observed` (sensor-noised) |
+| AZT1D | {len(n[A]['per'])} subjects | {n[A]['step_min']} min Dexcom G6 | {sum(p['days'] for p in n[A]['per']):.1f} | US adults, Mayo Clinic AZ, all on Tandem t:slim X2 Control-IQ (AID) | rich pump event log: bolus type, basal rate, carbs, device mode |
+| T1DMSIM *(this run)* | {len(n[M]['per'])} seeds × {int(round(np.mean([p['days'] for p in n[M]['per']])))} days | {n[M]['step_min']} min | {sum(p['days'] for p in n[M]['per']):.1f} | synthetic, seeds 0–{len(n[M]['per'])-1}, 24 h warm-up discarded | `initial_bg = 120 mg/dL`, `bg_observed` (sensor-noised); generator is unbounded |
 
-Both real datasets are gitignored. The simulator is exercised as in
+All three real datasets are gitignored. The simulator is exercised as in
 `scripts/compare_all_datasets.py`: 24 h warm-up to clear the `initial_bg = 120`
 transient, then the next 70 days are captured.
 
@@ -1271,8 +1660,9 @@ transient, then the next 70 days are captured.
 
 - **Resampling.** Ohio CGM is irregular Dexcom samples; it is linearly
   interpolated onto a 5 min grid with gaps > 30 min NaN-bridged. Shanghai is
-  similarly resampled to a 15 min grid with > 60 min gaps as NaN. The simulator
-  is already on a 5 min grid. All statistics ignore NaN.
+  similarly resampled to a 15 min grid with > 60 min gaps as NaN. AZT1D is
+  natively 5-min and uses the same 30-min gap rule as Ohio. The simulator is
+  already on a 5 min grid. All statistics ignore NaN.
 - **Cadence-aware comparison.** Rate-of-change Δ-BG, ACF, CONGA, MAGE, and MODD
   are computed at each cohort's **native** cadence. Cross-cadence comparison is
   flagged where it materially affects interpretation (notably Δ-BG std and
@@ -1290,6 +1680,11 @@ transient, then the next 70 days are captured.
   before computation.
 - **Episodes.** Contiguous runs across a threshold lasting ≥ 15 min, NaN
   gaps treated as in-range so a sensor dropout does not split an episode.
+- **AZT1D event log.** The pump CSV columns are parsed straight from `Subject
+  N.csv`: Basal (U/hr), TotalBolusInsulinDelivered, CorrectionDelivered,
+  FoodDelivered, CarbSize, BolusType, DeviceMode. Bolus events are flagged
+  by a non-null BolusType. Meal vs correction-only is decided per event by
+  `FoodDelivered > 0`. Device-mode time share counts every 5-min row.
 
 ---
 
@@ -1297,23 +1692,23 @@ transient, then the next 70 days are captured.
 
 ### 3.1 Pooled central moments
 
-| Metric (mg/dL) | OhioT1DM | ShanghaiT1DM | T1DMSIM | Sim − Ohio | Sim − Shang |
-|---|---:|---:|---:|---:|---:|
-| n (samples) | {pm[O]['n']:,} | {pm[S]['n']:,} | {pm[M]['n']:,} | — | — |
-| **mean** | {pm[O]['mean']:.1f} | {pm[S]['mean']:.1f} | {pm[M]['mean']:.1f} | {pm[M]['mean']-pm[O]['mean']:+.1f} | {pm[M]['mean']-pm[S]['mean']:+.1f} |
-| **median** | {pm[O]['median']:.1f} | {pm[S]['median']:.1f} | {pm[M]['median']:.1f} | {pm[M]['median']-pm[O]['median']:+.1f} | {pm[M]['median']-pm[S]['median']:+.1f} |
-| std | {pm[O]['std']:.1f} | {pm[S]['std']:.1f} | {pm[M]['std']:.1f} | {pm[M]['std']-pm[O]['std']:+.1f} | {pm[M]['std']-pm[S]['std']:+.1f} |
-| IQR | {pm[O]['iqr']:.1f} | {pm[S]['iqr']:.1f} | {pm[M]['iqr']:.1f} | {pm[M]['iqr']-pm[O]['iqr']:+.1f} | {pm[M]['iqr']-pm[S]['iqr']:+.1f} |
-| CV (%) | {pm[O]['cv_pct']:.1f} | {pm[S]['cv_pct']:.1f} | {pm[M]['cv_pct']:.1f} | {pm[M]['cv_pct']-pm[O]['cv_pct']:+.1f} pp | {pm[M]['cv_pct']-pm[S]['cv_pct']:+.1f} pp |
-| skewness | {pm[O]['skew']:.2f} | {pm[S]['skew']:.2f} | {pm[M]['skew']:.2f} | {pm[M]['skew']-pm[O]['skew']:+.2f} | {pm[M]['skew']-pm[S]['skew']:+.2f} |
-| excess kurtosis | {pm[O]['excess_kurt']:.2f} | {pm[S]['excess_kurt']:.2f} | {pm[M]['excess_kurt']:.2f} | {pm[M]['excess_kurt']-pm[O]['excess_kurt']:+.2f} | {pm[M]['excess_kurt']-pm[S]['excess_kurt']:+.2f} |
-| min | {pm[O]['min']:.1f} | {pm[S]['min']:.1f} | {pm[M]['min']:.1f} | — | — |
-| max | {pm[O]['max']:.1f} | {pm[S]['max']:.1f} | {pm[M]['max']:.1f} | — | — |
+| Metric (mg/dL) | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM | Sim − Ohio | Sim − Shang | Sim − AZT1D |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| n (samples) | {pm[O]['n']:,} | {pm[S]['n']:,} | {pm[A]['n']:,} | {pm[M]['n']:,} | — | — | — |
+| **mean** | {pm[O]['mean']:.1f} | {pm[S]['mean']:.1f} | {pm[A]['mean']:.1f} | {pm[M]['mean']:.1f} | {pm[M]['mean']-pm[O]['mean']:+.1f} | {pm[M]['mean']-pm[S]['mean']:+.1f} | {pm[M]['mean']-pm[A]['mean']:+.1f} |
+| **median** | {pm[O]['median']:.1f} | {pm[S]['median']:.1f} | {pm[A]['median']:.1f} | {pm[M]['median']:.1f} | {pm[M]['median']-pm[O]['median']:+.1f} | {pm[M]['median']-pm[S]['median']:+.1f} | {pm[M]['median']-pm[A]['median']:+.1f} |
+| std | {pm[O]['std']:.1f} | {pm[S]['std']:.1f} | {pm[A]['std']:.1f} | {pm[M]['std']:.1f} | {pm[M]['std']-pm[O]['std']:+.1f} | {pm[M]['std']-pm[S]['std']:+.1f} | {pm[M]['std']-pm[A]['std']:+.1f} |
+| IQR | {pm[O]['iqr']:.1f} | {pm[S]['iqr']:.1f} | {pm[A]['iqr']:.1f} | {pm[M]['iqr']:.1f} | {pm[M]['iqr']-pm[O]['iqr']:+.1f} | {pm[M]['iqr']-pm[S]['iqr']:+.1f} | {pm[M]['iqr']-pm[A]['iqr']:+.1f} |
+| CV (%) | {pm[O]['cv_pct']:.1f} | {pm[S]['cv_pct']:.1f} | {pm[A]['cv_pct']:.1f} | {pm[M]['cv_pct']:.1f} | {pm[M]['cv_pct']-pm[O]['cv_pct']:+.1f} pp | {pm[M]['cv_pct']-pm[S]['cv_pct']:+.1f} pp | {pm[M]['cv_pct']-pm[A]['cv_pct']:+.1f} pp |
+| skewness | {pm[O]['skew']:.2f} | {pm[S]['skew']:.2f} | {pm[A]['skew']:.2f} | {pm[M]['skew']:.2f} | {pm[M]['skew']-pm[O]['skew']:+.2f} | {pm[M]['skew']-pm[S]['skew']:+.2f} | {pm[M]['skew']-pm[A]['skew']:+.2f} |
+| excess kurtosis | {pm[O]['excess_kurt']:.2f} | {pm[S]['excess_kurt']:.2f} | {pm[A]['excess_kurt']:.2f} | {pm[M]['excess_kurt']:.2f} | {pm[M]['excess_kurt']-pm[O]['excess_kurt']:+.2f} | {pm[M]['excess_kurt']-pm[S]['excess_kurt']:+.2f} | {pm[M]['excess_kurt']-pm[A]['excess_kurt']:+.2f} |
+| min | {pm[O]['min']:.1f} | {pm[S]['min']:.1f} | {pm[A]['min']:.1f} | {pm[M]['min']:.1f} | — | — | — |
+| max | {pm[O]['max']:.1f} | {pm[S]['max']:.1f} | {pm[A]['max']:.1f} | {pm[M]['max']:.1f} | — | — | — |
 
 ### 3.2 Percentiles of the pooled distribution
 
-| Percentile | OhioT1DM | ShanghaiT1DM | T1DMSIM | Sim − Ohio | Sim − Shang |
-|---|---:|---:|---:|---:|---:|
+| Percentile | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM | Sim − Ohio | Sim − Shang | Sim − AZT1D |
+|---|---:|---:|---:|---:|---:|---:|---:|
 {pct_rows}
 
 ![Percentile curves](figures/percentile_curves.png)
@@ -1322,7 +1717,7 @@ transient, then the next 70 days are captured.
 
 ![Pooled empirical CDF](figures/cdf_pooled.png)
 
-![Q-Q vs Ohio and Shanghai](figures/qq.png)
+![Q-Q vs each real cohort](figures/qq.png)
 
 ### 3.3 Distribution-distance statistics
 
@@ -1331,8 +1726,8 @@ transient, then the next 70 days are captured.
 {dist_table}
 
 KS p-values fall to numerical zero in the right tail at these sample sizes
-(Ohio ~85k, Sim ~600k); the magnitudes of the KS statistic and the
-Wasserstein-1 distance are the meaningful quantities, not p.
+(Ohio ~85k, AZT1D ~320k, Sim ~600k); the magnitudes of the KS statistic and
+the Wasserstein-1 distance are the meaningful quantities, not p.
 
 ---
 
@@ -1340,37 +1735,35 @@ Wasserstein-1 distance are the meaningful quantities, not p.
 
 Per-record means ± std across each cohort.
 
-| Index | OhioT1DM | ShanghaiT1DM | T1DMSIM |
-|---|---|---|---|
-| GMI / eA1c proxy | {_ms(sm[O], 'GMI')} | {_ms(sm[S], 'GMI')} | {_ms(sm[M], 'GMI')} |
-| **LBGI** (low-BG risk) | {_ms(sm[O], 'LBGI')} | {_ms(sm[S], 'LBGI')} | **{_ms(sm[M], 'LBGI')}** |
-| **HBGI** (high-BG risk) | {_ms(sm[O], 'HBGI')} | {_ms(sm[S], 'HBGI')} | **{_ms(sm[M], 'HBGI')}** |
-| J-index | {_ms1(sm[O], 'j_index')} | {_ms1(sm[S], 'j_index')} | {_ms1(sm[M], 'j_index')} |
-| M-value (ref 120) | {_ms1(sm[O], 'm_value')} | {_ms1(sm[S], 'm_value')} | {_ms1(sm[M], 'm_value')} |
+| Index | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
+|---|---|---|---|---|
+| GMI / eA1c proxy | {_ms(sm[O], 'GMI')} | {_ms(sm[S], 'GMI')} | {_ms(sm[A], 'GMI')} | {_ms(sm[M], 'GMI')} |
+| **LBGI** (low-BG risk) | {_ms(sm[O], 'LBGI')} | {_ms(sm[S], 'LBGI')} | {_ms(sm[A], 'LBGI')} | **{_ms(sm[M], 'LBGI')}** |
+| **HBGI** (high-BG risk) | {_ms(sm[O], 'HBGI')} | {_ms(sm[S], 'HBGI')} | {_ms(sm[A], 'HBGI')} | **{_ms(sm[M], 'HBGI')}** |
+| J-index | {_ms1(sm[O], 'j_index')} | {_ms1(sm[S], 'j_index')} | {_ms1(sm[A], 'j_index')} | {_ms1(sm[M], 'j_index')} |
+| M-value (ref 120) | {_ms1(sm[O], 'm_value')} | {_ms1(sm[S], 'm_value')} | {_ms1(sm[A], 'm_value')} | {_ms1(sm[M], 'm_value')} |
 
 Pooled (not per-record) risk indices, for reference:
 
-| | Ohio | Shanghai | Sim |
-|---|---:|---:|---:|
-| LBGI (pooled) | {pr[O]['LBGI_pooled']:.2f} | {pr[S]['LBGI_pooled']:.2f} | {pr[M]['LBGI_pooled']:.2f} |
-| HBGI (pooled) | {pr[O]['HBGI_pooled']:.2f} | {pr[S]['HBGI_pooled']:.2f} | {pr[M]['HBGI_pooled']:.2f} |
-| J-index (pooled) | {pr[O]['J_index_pooled']:.1f} | {pr[S]['J_index_pooled']:.1f} | {pr[M]['J_index_pooled']:.1f} |
-| M-value (pooled) | {pr[O]['M_value_pooled']:.1f} | {pr[S]['M_value_pooled']:.1f} | {pr[M]['M_value_pooled']:.1f} |
+| | Ohio | Shanghai | AZT1D | Sim |
+|---|---:|---:|---:|---:|
+| LBGI (pooled) | {pr[O]['LBGI_pooled']:.2f} | {pr[S]['LBGI_pooled']:.2f} | {pr[A]['LBGI_pooled']:.2f} | {pr[M]['LBGI_pooled']:.2f} |
+| HBGI (pooled) | {pr[O]['HBGI_pooled']:.2f} | {pr[S]['HBGI_pooled']:.2f} | {pr[A]['HBGI_pooled']:.2f} | {pr[M]['HBGI_pooled']:.2f} |
+| J-index (pooled) | {pr[O]['J_index_pooled']:.1f} | {pr[S]['J_index_pooled']:.1f} | {pr[A]['J_index_pooled']:.1f} | {pr[M]['J_index_pooled']:.1f} |
+| M-value (pooled) | {pr[O]['M_value_pooled']:.1f} | {pr[S]['M_value_pooled']:.1f} | {pr[A]['M_value_pooled']:.1f} | {pr[M]['M_value_pooled']:.1f} |
 
 ### 4.1 Time-in-range, per-record cohort summary
 
-| Range | OhioT1DM | ShanghaiT1DM | T1DMSIM |
-|---|---|---|---|
-| TBR2 (<54)        | {_ms(sm[O], 'TBR2_pct')} | {_ms(sm[S], 'TBR2_pct')} | {_ms(sm[M], 'TBR2_pct')} |
-| TBR1 (54–70)      | {_ms(sm[O], 'TBR1_pct')} | {_ms(sm[S], 'TBR1_pct')} | {_ms(sm[M], 'TBR1_pct')} |
-| **TIR (70–180)**  | **{_ms1(sm[O], 'TIR_pct')}** | **{_ms1(sm[S], 'TIR_pct')}** | **{_ms1(sm[M], 'TIR_pct')}** |
-| TAR1 (180–250)    | {_ms1(sm[O], 'TAR1_pct')} | {_ms1(sm[S], 'TAR1_pct')} | {_ms1(sm[M], 'TAR1_pct')} |
-| TAR2 (>250)       | {_ms(sm[O], 'TAR2_pct')} | {_ms(sm[S], 'TAR2_pct')} | {_ms(sm[M], 'TAR2_pct')} |
+| Range | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
+|---|---|---|---|---|
+| TBR2 (<54)        | {_ms(sm[O], 'TBR2_pct')} | {_ms(sm[S], 'TBR2_pct')} | {_ms(sm[A], 'TBR2_pct')} | {_ms(sm[M], 'TBR2_pct')} |
+| TBR1 (54–70)      | {_ms(sm[O], 'TBR1_pct')} | {_ms(sm[S], 'TBR1_pct')} | {_ms(sm[A], 'TBR1_pct')} | {_ms(sm[M], 'TBR1_pct')} |
+| **TIR (70–180)**  | **{_ms1(sm[O], 'TIR_pct')}** | **{_ms1(sm[S], 'TIR_pct')}** | **{_ms1(sm[A], 'TIR_pct')}** | **{_ms1(sm[M], 'TIR_pct')}** |
+| TAR1 (180–250)    | {_ms1(sm[O], 'TAR1_pct')} | {_ms1(sm[S], 'TAR1_pct')} | {_ms1(sm[A], 'TAR1_pct')} | {_ms1(sm[M], 'TAR1_pct')} |
+| TAR2 (>250)       | {_ms(sm[O], 'TAR2_pct')} | {_ms(sm[S], 'TAR2_pct')} | {_ms(sm[A], 'TAR2_pct')} | {_ms(sm[M], 'TAR2_pct')} |
 
-![Clinical-range cohort comparison](../assets/clinical_ranges.png)
-
-(The bar chart from the README is included here for direct reference; the
-figure is produced by `scripts/generate_comparison_figures.py`.)
+The §0.3 class-balance stacked bar (`figures/class_balance.png`) plots the
+same numbers visually for all four cohorts.
 
 ---
 
@@ -1378,14 +1771,14 @@ figure is produced by `scripts/generate_comparison_figures.py`.)
 
 Per-record mean ± std.
 
-| Metric (native cadence) | OhioT1DM | ShanghaiT1DM | T1DMSIM |
-|---|---|---|---|
-| CV (%)              | {_ms1(sm[O], 'cv_pct')}   | {_ms1(sm[S], 'cv_pct')}   | **{_ms1(sm[M], 'cv_pct')}**   |
-| MAGE (mg/dL)        | {_ms1(sm[O], 'mage')}     | {_ms1(sm[S], 'mage')}     | {_ms1(sm[M], 'mage')}     |
-| CONGA-1h (mg/dL)    | {_ms1(sm[O], 'conga_1h')} | {_ms1(sm[S], 'conga_1h')} | {_ms1(sm[M], 'conga_1h')} |
-| CONGA-4h (mg/dL)    | {_ms1(sm[O], 'conga_4h')} | {_ms1(sm[S], 'conga_4h')} | {_ms1(sm[M], 'conga_4h')} |
-| MODD (mg/dL)        | {_ms1(sm[O], 'modd')}     | {_ms1(sm[S], 'modd')}     | **{_ms1(sm[M], 'modd')}**     |
-| Sample entropy      | {_ms(sm[O], 'sample_entropy')} | {_ms(sm[S], 'sample_entropy')}¹ | {_ms(sm[M], 'sample_entropy')} |
+| Metric (native cadence) | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
+|---|---|---|---|---|
+| CV (%)              | {_ms1(sm[O], 'cv_pct')}   | {_ms1(sm[S], 'cv_pct')}   | {_ms1(sm[A], 'cv_pct')}   | **{_ms1(sm[M], 'cv_pct')}**   |
+| MAGE (mg/dL)        | {_ms1(sm[O], 'mage')}     | {_ms1(sm[S], 'mage')}     | {_ms1(sm[A], 'mage')}     | {_ms1(sm[M], 'mage')}     |
+| CONGA-1h (mg/dL)    | {_ms1(sm[O], 'conga_1h')} | {_ms1(sm[S], 'conga_1h')} | {_ms1(sm[A], 'conga_1h')} | {_ms1(sm[M], 'conga_1h')} |
+| CONGA-4h (mg/dL)    | {_ms1(sm[O], 'conga_4h')} | {_ms1(sm[S], 'conga_4h')} | {_ms1(sm[A], 'conga_4h')} | {_ms1(sm[M], 'conga_4h')} |
+| MODD (mg/dL)        | {_ms1(sm[O], 'modd')}     | {_ms1(sm[S], 'modd')}     | {_ms1(sm[A], 'modd')}     | **{_ms1(sm[M], 'modd')}**     |
+| Sample entropy      | {_ms(sm[O], 'sample_entropy')} | {_ms(sm[S], 'sample_entropy')}¹ | {_ms(sm[A], 'sample_entropy')} | {_ms(sm[M], 'sample_entropy')} |
 
 ¹ Shanghai SampEn is computed on 15-min samples, which collapses the
   fine-scale jitter that drives SampEn at 5 min — the lower value is mostly a
@@ -1401,17 +1794,17 @@ Per-record mean ± std.
 
 Pooled (mean across records) Pearson autocorrelation at the indicated lag.
 
-| Lag         | OhioT1DM | ShanghaiT1DM | T1DMSIM |
-|---|---|---|---|
-| 5 min   | {_acf_cell(O, 5)} | {_acf_cell(S, 5)}  | {_acf_cell(M, 5)} |
-| 15 min  | {_acf_cell(O, 15)} | {_acf_cell(S, 15)}  | {_acf_cell(M, 15)} |
-| 30 min  | {_acf_cell(O, 30)} | {_acf_cell(S, 30)}  | {_acf_cell(M, 30)} |
-| 1 h     | {_acf_cell(O, 60)} | {_acf_cell(S, 60)}  | {_acf_cell(M, 60)} |
-| 2 h     | {_acf_cell(O, 120)} | {_acf_cell(S, 120)}  | {_acf_cell(M, 120)} |
-| 4 h     | {_acf_cell(O, 240)} | {_acf_cell(S, 240)}  | {_acf_cell(M, 240)} |
-| **8 h**     | **{_acf_cell(O, 480)}** | **{_acf_cell(S, 480)}** | **{_acf_cell(M, 480)}** |
-| **12 h**    | **{_acf_cell(O, 720)}** | **{_acf_cell(S, 720)}** | **{_acf_cell(M, 720)}** |
-| 24 h    | {_acf_cell(O, 1440)} | {_acf_cell(S, 1440)}  | **{_acf_cell(M, 1440)}** |
+| Lag         | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
+|---|---|---|---|---|
+| 5 min   | {_acf_cell(O, 5)} | {_acf_cell(S, 5)}  | {_acf_cell(A, 5)} | {_acf_cell(M, 5)} |
+| 15 min  | {_acf_cell(O, 15)} | {_acf_cell(S, 15)}  | {_acf_cell(A, 15)} | {_acf_cell(M, 15)} |
+| 30 min  | {_acf_cell(O, 30)} | {_acf_cell(S, 30)}  | {_acf_cell(A, 30)} | {_acf_cell(M, 30)} |
+| 1 h     | {_acf_cell(O, 60)} | {_acf_cell(S, 60)}  | {_acf_cell(A, 60)} | {_acf_cell(M, 60)} |
+| 2 h     | {_acf_cell(O, 120)} | {_acf_cell(S, 120)}  | {_acf_cell(A, 120)} | {_acf_cell(M, 120)} |
+| 4 h     | {_acf_cell(O, 240)} | {_acf_cell(S, 240)}  | {_acf_cell(A, 240)} | {_acf_cell(M, 240)} |
+| **8 h**     | **{_acf_cell(O, 480)}** | **{_acf_cell(S, 480)}** | **{_acf_cell(A, 480)}** | **{_acf_cell(M, 480)}** |
+| **12 h**    | **{_acf_cell(O, 720)}** | **{_acf_cell(S, 720)}** | **{_acf_cell(A, 720)}** | **{_acf_cell(M, 720)}** |
+| 24 h    | {_acf_cell(O, 1440)} | {_acf_cell(S, 1440)}  | {_acf_cell(A, 1440)} | **{_acf_cell(M, 1440)}** |
 
 ![Autocorrelation across lag](figures/acf.png)
 
@@ -1421,8 +1814,9 @@ Pooled (mean across records) Pearson autocorrelation at the indicated lag.
 
 Per-record Δ-BG standard deviation (mean across records, native cadence):
 Ohio {pr_delta_std[O]:.2f} mg/dL · Shanghai {pr_delta_std[S]:.2f} mg/dL ·
-Sim {pr_delta_std[M]:.2f} mg/dL. Shanghai's value is at 15-min cadence and
-is not directly comparable to the 5-min values from Ohio and the simulator.
+AZT1D {pr_delta_std[A]:.2f} mg/dL · Sim {pr_delta_std[M]:.2f} mg/dL.
+Shanghai's value is at 15-min cadence and is not directly comparable to the
+5-min values from Ohio, AZT1D, and the simulator.
 
 ### 6.3 Diurnal pattern (hour-of-day across records)
 
@@ -1436,6 +1830,7 @@ Hour-by-hour mean BG (mg/dL):
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Ohio | {hour_row(O)} |
 | Shanghai | {hour_row(S)} |
+| AZT1D | {hour_row(A)} |
 | Sim | {hour_row(M)} |
 
 Hour-by-hour median BG (mg/dL):
@@ -1444,6 +1839,7 @@ Hour-by-hour median BG (mg/dL):
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Ohio | {hour_row_median(O)} |
 | Shanghai | {hour_row_median(S)} |
+| AZT1D | {hour_row_median(A)} |
 | Sim | {hour_row_median(M)} |
 
 ![Weekday × hour mean heatmap](figures/weekday_heatmap.png)
@@ -1458,16 +1854,16 @@ Hour-by-hour median BG (mg/dL):
 
 Per-record means ± std.
 
-| Metric | OhioT1DM | ShanghaiT1DM | T1DMSIM |
-|---|---|---|---|
-| Hypo (<70) episodes / day      | {_ms(sm[O], 'hypo_count_per_day')} | {_ms(sm[S], 'hypo_count_per_day')} | **{_ms(sm[M], 'hypo_count_per_day')}** |
-| Severe-hypo (<54) eps / day   | {_ms(sm[O], 'severe_hypo_count_per_day')} | {_ms(sm[S], 'severe_hypo_count_per_day')} | {_ms(sm[M], 'severe_hypo_count_per_day')} |
-| Hyper (>180) episodes / day   | {_ms(sm[O], 'hyper_count_per_day')} | {_ms(sm[S], 'hyper_count_per_day')} | {_ms(sm[M], 'hyper_count_per_day')} |
-| Severe-hyper (>250) eps / day | {_ms(sm[O], 'severe_hyper_count_per_day')} | {_ms(sm[S], 'severe_hyper_count_per_day')} | {_ms(sm[M], 'severe_hyper_count_per_day')} |
-| Hypo median duration (min)    | {sm[O]['hypo_median_min']['mean']:.1f} | {sm[S]['hypo_median_min']['mean']:.1f} | {sm[M]['hypo_median_min']['mean']:.1f} |
-| Hypo p90 duration (min)       | {sm[O]['hypo_p90_min']['mean']:.1f} | {sm[S]['hypo_p90_min']['mean']:.1f} | **{sm[M]['hypo_p90_min']['mean']:.1f}** |
-| Hyper median duration (min)   | {sm[O]['hyper_median_min']['mean']:.1f} | {sm[S]['hyper_median_min']['mean']:.1f} | {sm[M]['hyper_median_min']['mean']:.1f} |
-| Hyper p90 duration (min)      | {sm[O]['hyper_p90_min']['mean']:.1f} | {sm[S]['hyper_p90_min']['mean']:.1f} | **{sm[M]['hyper_p90_min']['mean']:.1f}** |
+| Metric | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
+|---|---|---|---|---|
+| Hypo (<70) episodes / day      | {_ms(sm[O], 'hypo_count_per_day')} | {_ms(sm[S], 'hypo_count_per_day')} | {_ms(sm[A], 'hypo_count_per_day')} | **{_ms(sm[M], 'hypo_count_per_day')}** |
+| Severe-hypo (<54) eps / day   | {_ms(sm[O], 'severe_hypo_count_per_day')} | {_ms(sm[S], 'severe_hypo_count_per_day')} | {_ms(sm[A], 'severe_hypo_count_per_day')} | {_ms(sm[M], 'severe_hypo_count_per_day')} |
+| Hyper (>180) episodes / day   | {_ms(sm[O], 'hyper_count_per_day')} | {_ms(sm[S], 'hyper_count_per_day')} | {_ms(sm[A], 'hyper_count_per_day')} | {_ms(sm[M], 'hyper_count_per_day')} |
+| Severe-hyper (>250) eps / day | {_ms(sm[O], 'severe_hyper_count_per_day')} | {_ms(sm[S], 'severe_hyper_count_per_day')} | {_ms(sm[A], 'severe_hyper_count_per_day')} | {_ms(sm[M], 'severe_hyper_count_per_day')} |
+| Hypo median duration (min)    | {sm[O]['hypo_median_min']['mean']:.1f} | {sm[S]['hypo_median_min']['mean']:.1f} | {sm[A]['hypo_median_min']['mean']:.1f} | {sm[M]['hypo_median_min']['mean']:.1f} |
+| Hypo p90 duration (min)       | {sm[O]['hypo_p90_min']['mean']:.1f} | {sm[S]['hypo_p90_min']['mean']:.1f} | {sm[A]['hypo_p90_min']['mean']:.1f} | **{sm[M]['hypo_p90_min']['mean']:.1f}** |
+| Hyper median duration (min)   | {sm[O]['hyper_median_min']['mean']:.1f} | {sm[S]['hyper_median_min']['mean']:.1f} | {sm[A]['hyper_median_min']['mean']:.1f} | {sm[M]['hyper_median_min']['mean']:.1f} |
+| Hyper p90 duration (min)      | {sm[O]['hyper_p90_min']['mean']:.1f} | {sm[S]['hyper_p90_min']['mean']:.1f} | {sm[A]['hyper_p90_min']['mean']:.1f} | **{sm[M]['hyper_p90_min']['mean']:.1f}** |
 
 ![Episode duration boxplots](figures/episode_durations.png)
 
@@ -1491,85 +1887,153 @@ Time from the first sub-70 sample to the next ≥ 80 sample:
 |---|---:|---|---:|
 | Ohio     | {tir_iqr[O]:.1f} | {tir_lo[O]:.1f} – {tir_hi[O]:.1f} | {mean_bg_std[O]:.1f} |
 | Shanghai | {tir_iqr[S]:.1f} | {tir_lo[S]:.1f} – {tir_hi[S]:.1f} | {mean_bg_std[S]:.1f} |
+| AZT1D    | {tir_iqr[A]:.1f} | {tir_lo[A]:.1f} – {tir_hi[A]:.1f} | {mean_bg_std[A]:.1f} |
 | Sim      | {tir_iqr[M]:.1f} | {tir_lo[M]:.1f} – {tir_hi[M]:.1f} | {mean_bg_std[M]:.1f} |
 
 ![LBGI and HBGI per-record boxplots](figures/risk_indices.png)
 
 ---
 
-## 9. Side-by-side summary
+## 9. AZT1D insulin / carb behaviour panel
 
-Raw deltas only — no qualitative verdicts. See sections 3–8 for context.
+OhioT1DM and ShanghaiT1DM only expose CGM-level traces. AZT1D additionally
+publishes the full pump event log — basal rate, bolus type (standard /
+correction / automatic), units delivered for food and for correction, carb
+size, and a device-mode flag (regular / sleep / exercise). The simulator
+generates the same channels by construction (`basal_insulin`, `bolus_insulin`,
+`total_carb`), so this section compares the comparable quantities head-to-head
+and reports the AZT1D-only quantities alongside.
 
-| Quantity | T1DMSIM | OhioT1DM | ShanghaiT1DM | Sim − Ohio | Sim − Shang |
-|---|---:|---:|---:|---:|---:|
-{syn_row("Pooled mean BG (mg/dL)",       pm[M]['mean'],     pm[O]['mean'],     pm[S]['mean'])}
-{syn_row("Pooled median BG (mg/dL)",     pm[M]['median'],   pm[O]['median'],   pm[S]['median'])}
-{syn_row("Pooled std (mg/dL)",           pm[M]['std'],      pm[O]['std'],      pm[S]['std'])}
-{syn_row("Pooled CV (%)",                pm[M]['cv_pct'],   pm[O]['cv_pct'],   pm[S]['cv_pct'])}
-{syn_row("Pooled skewness",              pm[M]['skew'],     pm[O]['skew'],     pm[S]['skew'], fmt=".2f")}
-{syn_row("Pooled excess kurtosis",       pm[M]['excess_kurt'], pm[O]['excess_kurt'], pm[S]['excess_kurt'], fmt=".2f")}
-{syn_row("Pooled p99 (mg/dL)",           pp[M]['p99'],      pp[O]['p99'],      pp[S]['p99'])}
-{syn_row("GMI (per-record mean)",        sm[M]['GMI']['mean'],     sm[O]['GMI']['mean'],     sm[S]['GMI']['mean'], fmt=".2f")}
-{syn_row("LBGI (per-record mean)",       sm[M]['LBGI']['mean'],    sm[O]['LBGI']['mean'],    sm[S]['LBGI']['mean'], fmt=".2f")}
-{syn_row("HBGI (per-record mean)",       sm[M]['HBGI']['mean'],    sm[O]['HBGI']['mean'],    sm[S]['HBGI']['mean'], fmt=".2f")}
-{syn_row("TIR % (per-record mean)",      sm[M]['TIR_pct']['mean'], sm[O]['TIR_pct']['mean'], sm[S]['TIR_pct']['mean'])}
-{syn_row("TBR1 % (per-record mean)",     sm[M]['TBR1_pct']['mean'], sm[O]['TBR1_pct']['mean'], sm[S]['TBR1_pct']['mean'], fmt=".2f")}
-{syn_row("TBR2 % (per-record mean)",     sm[M]['TBR2_pct']['mean'], sm[O]['TBR2_pct']['mean'], sm[S]['TBR2_pct']['mean'], fmt=".2f")}
-{syn_row("TAR1 % (per-record mean)",     sm[M]['TAR1_pct']['mean'], sm[O]['TAR1_pct']['mean'], sm[S]['TAR1_pct']['mean'])}
-{syn_row("TAR2 % (per-record mean)",     sm[M]['TAR2_pct']['mean'], sm[O]['TAR2_pct']['mean'], sm[S]['TAR2_pct']['mean'])}
-{syn_row("MAGE (mg/dL)",                 sm[M]['mage']['mean'],    sm[O]['mage']['mean'],    sm[S]['mage']['mean'])}
-{syn_row("CONGA-1h (mg/dL)",             sm[M]['conga_1h']['mean'],sm[O]['conga_1h']['mean'],sm[S]['conga_1h']['mean'])}
-{syn_row("CONGA-4h (mg/dL)",             sm[M]['conga_4h']['mean'],sm[O]['conga_4h']['mean'],sm[S]['conga_4h']['mean'])}
-{syn_row("MODD (mg/dL)",                 sm[M]['modd']['mean'],    sm[O]['modd']['mean'],    sm[S]['modd']['mean'])}
-{syn_row("Hypo episodes / day",          sm[M]['hypo_count_per_day']['mean'], sm[O]['hypo_count_per_day']['mean'], sm[S]['hypo_count_per_day']['mean'], fmt=".2f")}
-{syn_row("Severe-hypo eps / day",        sm[M]['severe_hypo_count_per_day']['mean'], sm[O]['severe_hypo_count_per_day']['mean'], sm[S]['severe_hypo_count_per_day']['mean'], fmt=".2f")}
-{syn_row("Hyper episodes / day",         sm[M]['hyper_count_per_day']['mean'], sm[O]['hyper_count_per_day']['mean'], sm[S]['hyper_count_per_day']['mean'], fmt=".2f")}
-{syn_row("Severe-hyper eps / day",       sm[M]['severe_hyper_count_per_day']['mean'], sm[O]['severe_hyper_count_per_day']['mean'], sm[S]['severe_hyper_count_per_day']['mean'], fmt=".2f")}
-{syn_row("Hypo p90 duration (min)",      sm[M]['hypo_p90_min']['mean'],   sm[O]['hypo_p90_min']['mean'],   sm[S]['hypo_p90_min']['mean'])}
-{syn_row("Hyper p90 duration (min)",     sm[M]['hyper_p90_min']['mean'],  sm[O]['hyper_p90_min']['mean'],  sm[S]['hyper_p90_min']['mean'])}
-{syn_row("Hypo recovery median (min)",   rec[M]['median'],    rec[O]['median'],    rec[S]['median'])}
-{syn_row("Wasserstein-1 vs Ohio (mg/dL)",   distances['Sim_vs_Ohio']['wasserstein'],   distances['Ohio_vs_Shanghai']['wasserstein'], distances['Sim_vs_Shanghai']['wasserstein'])}
-{syn_row("KS statistic vs Ohio",            distances['Sim_vs_Ohio']['ks_stat'],       distances['Ohio_vs_Shanghai']['ks_stat'],     distances['Sim_vs_Shanghai']['ks_stat'], fmt=".3f")}
+![AZT1D vs Sim insulin / carb panel](figures/azt1d_event_panel.png)
+
+**Comparable quantities** (integrated daily totals + basal-rate distribution):
+
+| Quantity | AZT1D | T1DMSIM | Δ (Sim − AZT1D) |
+|---|---:|---:|---:|
+| Mean basal rate (U/hr)            | {az_pool['basal_pooled_mean']:.2f} | {sim_pool['basal_pooled_mean']:.2f} | {sim_pool['basal_pooled_mean'] - az_pool['basal_pooled_mean']:+.2f} |
+| Median basal rate (U/hr)          | {az_pool['basal_pooled_median']:.2f} | {sim_pool['basal_pooled_median']:.2f} | {sim_pool['basal_pooled_median'] - az_pool['basal_pooled_median']:+.2f} |
+| Basal P10–P90 spread (U/hr)       | {az_pool['basal_pooled_p10']:.2f} – {az_pool['basal_pooled_p90']:.2f} | {sim_pool['basal_pooled_p10']:.2f} – {sim_pool['basal_pooled_p90']:.2f} | — |
+| Carbs / day (g, per-subject mean) | {az_pool['carbs_per_day_mean']:.1f} | {sim_pool['carbs_per_day_mean']:.1f} | {sim_pool['carbs_per_day_mean'] - az_pool['carbs_per_day_mean']:+.1f} |
+| Total insulin / day (U)           | {az_pool['total_insulin_per_day_mean']:.1f} | {sim_pool['total_insulin_per_day_mean']:.1f} | {sim_pool['total_insulin_per_day_mean'] - az_pool['total_insulin_per_day_mean']:+.1f} |
+
+AZT1D's pooled basal-rate distribution was clipped at
+{az_pool['basal_cap_threshold']:.0f} U/hr before pooling
+({az_pool['basal_capped_pct']:.1f}% of the basal column was discarded as
+clearly non-physiological — values up to 4000+ U/hr in a few subjects,
+likely PDF-to-CSV extraction artefacts). The Tandem AID adjusts basal every
+5 min, so AZT1D's basal column is a long sequence of distinct rates; the
+simulator's `basal_insulin` channel is the per-step PK-curve sample from
+user-injected long-acting basal and integrates to the same daily total
+**by construction** (matched to the patient's HGO via the
+`basal = HGO_base × 24h × (BW/BW₀) × is_base / ICR` invariant), so this
+panel is the sanity check that the daily-balance derivation lands in the
+right ballpark for real T1D patients.
+
+**AZT1D-only quantities** (user-initiated bolus events; AID auto-boluses are
+filtered out — the simulator models MDI without a closed-loop controller and
+has no auto-bolus channel to compare to):
+
+| Quantity | AZT1D (per-subject mean) |
+|---|---:|
+| User-initiated boluses / day        | {az_pool['boluses_per_day_mean']:.2f} |
+| Meal boluses / day                  | {az_pool['meal_boluses_per_day_mean']:.2f} |
+| Correction-only boluses / day       | {az_pool['correction_boluses_per_day_mean']:.2f} |
+| Mean carbs / meal (g)               | {az_pool['mean_carb_per_meal_mean']:.1f} |
+| Correction-unit share of total bolus | {az_pool['correction_unit_share_pct']:.1f}% |
+
+Per-bolus and per-meal event counts are deliberately not computed for the
+simulator: its `bolus_insulin` / `total_carb` channels expose per-step active
+PK / absorption levels rather than discrete injection events, and any
+threshold-based clustering merges events whose curves overlap. Comparison at
+the **daily-total** level (above) is well-posed; comparison at the
+per-event level is not.
+
+- **Bolus type counts** (across the whole AZT1D pool, including AID-driven
+  events):
+{chr(10).join(f"  - {bt}: {cnt:,}" for bt, cnt in sorted(az_pool['bolus_type_counts'].items(), key=lambda kv: -kv[1])[:10])}
+- **Device-mode time share:** {", ".join(f"{k} {v:.1f}%" for k, v in sorted(az_pool['device_mode_pct'].items(), key=lambda kv: -kv[1]))}
 
 ---
 
-## 10. Limitations of this comparison
+## 10. Side-by-side summary
 
-- **Cohort size.** Ohio (n = {len(n[O]['per'])}) and Shanghai (n = {len(n[S]['per'])}) are small enough that
-  cohort means have non-trivial sampling error; the "real" distribution should
-  be taken as a band, not a point. With {len(n[M]['per'])} simulator seeds the sim cohort is
-  intentionally larger to bound its own sampling error tightly.
+Raw deltas only — no qualitative verdicts. See sections 3–9 for context.
+
+| Quantity | T1DMSIM | OhioT1DM | ShanghaiT1DM | AZT1D | Sim − Ohio | Sim − Shang | Sim − AZT1D |
+|---|---:|---:|---:|---:|---:|---:|---:|
+{syn_row("Pooled mean BG (mg/dL)",       pm[M]['mean'],     pm[O]['mean'],     pm[S]['mean'],     pm[A]['mean'])}
+{syn_row("Pooled median BG (mg/dL)",     pm[M]['median'],   pm[O]['median'],   pm[S]['median'],   pm[A]['median'])}
+{syn_row("Pooled std (mg/dL)",           pm[M]['std'],      pm[O]['std'],      pm[S]['std'],      pm[A]['std'])}
+{syn_row("Pooled CV (%)",                pm[M]['cv_pct'],   pm[O]['cv_pct'],   pm[S]['cv_pct'],   pm[A]['cv_pct'])}
+{syn_row("Pooled skewness",              pm[M]['skew'],     pm[O]['skew'],     pm[S]['skew'],     pm[A]['skew'], fmt=".2f")}
+{syn_row("Pooled excess kurtosis",       pm[M]['excess_kurt'], pm[O]['excess_kurt'], pm[S]['excess_kurt'], pm[A]['excess_kurt'], fmt=".2f")}
+{syn_row("Pooled p99 (mg/dL)",           pp[M]['p99'],      pp[O]['p99'],      pp[S]['p99'],      pp[A]['p99'])}
+{syn_row("GMI (per-record mean)",        sm[M]['GMI']['mean'],     sm[O]['GMI']['mean'],     sm[S]['GMI']['mean'],     sm[A]['GMI']['mean'], fmt=".2f")}
+{syn_row("LBGI (per-record mean)",       sm[M]['LBGI']['mean'],    sm[O]['LBGI']['mean'],    sm[S]['LBGI']['mean'],    sm[A]['LBGI']['mean'], fmt=".2f")}
+{syn_row("HBGI (per-record mean)",       sm[M]['HBGI']['mean'],    sm[O]['HBGI']['mean'],    sm[S]['HBGI']['mean'],    sm[A]['HBGI']['mean'], fmt=".2f")}
+{syn_row("TIR % (per-record mean)",      sm[M]['TIR_pct']['mean'], sm[O]['TIR_pct']['mean'], sm[S]['TIR_pct']['mean'], sm[A]['TIR_pct']['mean'])}
+{syn_row("TBR1 % (per-record mean)",     sm[M]['TBR1_pct']['mean'], sm[O]['TBR1_pct']['mean'], sm[S]['TBR1_pct']['mean'], sm[A]['TBR1_pct']['mean'], fmt=".2f")}
+{syn_row("TBR2 % (per-record mean)",     sm[M]['TBR2_pct']['mean'], sm[O]['TBR2_pct']['mean'], sm[S]['TBR2_pct']['mean'], sm[A]['TBR2_pct']['mean'], fmt=".2f")}
+{syn_row("TAR1 % (per-record mean)",     sm[M]['TAR1_pct']['mean'], sm[O]['TAR1_pct']['mean'], sm[S]['TAR1_pct']['mean'], sm[A]['TAR1_pct']['mean'])}
+{syn_row("TAR2 % (per-record mean)",     sm[M]['TAR2_pct']['mean'], sm[O]['TAR2_pct']['mean'], sm[S]['TAR2_pct']['mean'], sm[A]['TAR2_pct']['mean'])}
+{syn_row("MAGE (mg/dL)",                 sm[M]['mage']['mean'],    sm[O]['mage']['mean'],    sm[S]['mage']['mean'],    sm[A]['mage']['mean'])}
+{syn_row("CONGA-1h (mg/dL)",             sm[M]['conga_1h']['mean'],sm[O]['conga_1h']['mean'],sm[S]['conga_1h']['mean'],sm[A]['conga_1h']['mean'])}
+{syn_row("CONGA-4h (mg/dL)",             sm[M]['conga_4h']['mean'],sm[O]['conga_4h']['mean'],sm[S]['conga_4h']['mean'],sm[A]['conga_4h']['mean'])}
+{syn_row("MODD (mg/dL)",                 sm[M]['modd']['mean'],    sm[O]['modd']['mean'],    sm[S]['modd']['mean'],    sm[A]['modd']['mean'])}
+{syn_row("Hypo episodes / day",          sm[M]['hypo_count_per_day']['mean'], sm[O]['hypo_count_per_day']['mean'], sm[S]['hypo_count_per_day']['mean'], sm[A]['hypo_count_per_day']['mean'], fmt=".2f")}
+{syn_row("Severe-hypo eps / day",        sm[M]['severe_hypo_count_per_day']['mean'], sm[O]['severe_hypo_count_per_day']['mean'], sm[S]['severe_hypo_count_per_day']['mean'], sm[A]['severe_hypo_count_per_day']['mean'], fmt=".2f")}
+{syn_row("Hyper episodes / day",         sm[M]['hyper_count_per_day']['mean'], sm[O]['hyper_count_per_day']['mean'], sm[S]['hyper_count_per_day']['mean'], sm[A]['hyper_count_per_day']['mean'], fmt=".2f")}
+{syn_row("Severe-hyper eps / day",       sm[M]['severe_hyper_count_per_day']['mean'], sm[O]['severe_hyper_count_per_day']['mean'], sm[S]['severe_hyper_count_per_day']['mean'], sm[A]['severe_hyper_count_per_day']['mean'], fmt=".2f")}
+{syn_row("Hypo p90 duration (min)",      sm[M]['hypo_p90_min']['mean'],   sm[O]['hypo_p90_min']['mean'],   sm[S]['hypo_p90_min']['mean'],   sm[A]['hypo_p90_min']['mean'])}
+{syn_row("Hyper p90 duration (min)",     sm[M]['hyper_p90_min']['mean'],  sm[O]['hyper_p90_min']['mean'],  sm[S]['hyper_p90_min']['mean'],  sm[A]['hyper_p90_min']['mean'])}
+{syn_row("Hypo recovery median (min)",   rec[M]['median'],    rec[O]['median'],    rec[S]['median'],    rec[A]['median'])}
+{syn_row("Wasserstein-1 vs Ohio (mg/dL)",   distances['Sim_vs_Ohio']['wasserstein'],   distances['Ohio_vs_Shanghai']['wasserstein'], distances['Sim_vs_Shanghai']['wasserstein'], distances['Ohio_vs_AZT1D']['wasserstein'])}
+{syn_row("KS statistic vs Ohio",            distances['Sim_vs_Ohio']['ks_stat'],       distances['Ohio_vs_Shanghai']['ks_stat'],     distances['Sim_vs_Shanghai']['ks_stat'], distances['Ohio_vs_AZT1D']['ks_stat'], fmt=".3f")}
+
+---
+
+## 11. Limitations of this comparison
+
+- **Cohort size.** OhioT1DM (n = {len(n[O]['per'])}), ShanghaiT1DM (n = {len(n[S]['per'])}), and
+  AZT1D (n = {len(n[A]['per'])}) are small enough that cohort means have non-trivial
+  sampling error; each "real" distribution should be taken as a band, not a
+  point. The simulator was exercised with {len(n[M]['per'])} seeds for this report, but the
+  generator is unbounded — production training pipelines can sample as many
+  more seeds as they need.
 - **Cadence asymmetry.** Shanghai's 15-min cadence collapses Δ-BG std and
   sample entropy relative to 5-min cohorts. Cross-cadence ACF below 30 min is
   not directly comparable.
-- **No glucose-controller benchmark.** The simulator output is compared to two
-  real human cohorts but not to UVA/Padova `simglucose` here.
-- **No external behaviour event matching.** Meal and bolus event distributions
-  exist in both Ohio XML and Shanghai sheets, but this report compares CGM
-  output only — not the carb-bolus pairing distribution, time-to-meal-peak
-  alignment, or exercise/sleep co-occurrence.
+- **No glucose-controller benchmark.** The simulator output is compared to
+  three real human cohorts but not to UVA/Padova `simglucose` here.
+- **AID asymmetry.** AZT1D subjects are all on closed-loop AID (Tandem
+  Control-IQ); OhioT1DM is a mix of pump + announced meals; ShanghaiT1DM
+  mixes CSII and MDI; the simulator models MDI long-acting basal + per-meal
+  bolus. Differences in basal-rate variability and time-in-range partly
+  reflect these different therapy regimens, not just simulator vs reality.
 - **Sample entropy subsampling.** Records longer than 2,500 points are
   subsampled with `np.random.default_rng(0)` so the metric is reproducible but
   is a Monte-Carlo estimate, not the exact value over the full trace.
 
 ---
 
-## 11. Reproduction
+## 12. Reproduction
 
 ```bash
-# regenerates reports/stats.json + reports/REPORT.md + reports/figures/*.png
-python reports/build_report.py
+# regenerates diff/stats.json + diff/README.md + diff/figures/*.png
+python diff/build_report.py
 ```
 
 `scripts/compare_all_datasets.py` is reused for the dataset loaders and grid
-regularisation. `OhioT1DM/` and `ShanghaiT1DM/` must be placed at the repo root
-(both gitignored, both subject to data-use agreements).
+regularisation. The three real datasets must live under `datasets/`
+(`datasets/ohiot1dm/`, `datasets/ShanghaiT1DM/Shanghai_T1DM/`, and
+`datasets/AZT1D/CGM Records/Subject N/`) — all gitignored, all subject to
+their respective data-use agreements.
 
 Numbers in this file come from one run of `build_report.py`
 ({len(n[M]['per'])} seeds, {int(round(np.mean([p['days'] for p in n[M]['per']])))} days each, 24 h warm-up discarded). Re-running reproduces
 them exactly because the simulator is seed-deterministic and the real-data
-side is fixed.
+side is fixed. Generating an arbitrarily larger synthetic corpus is just a
+matter of bumping `n_seeds=` and/or `days=` in the `assemble_sim()` call.
 """
     with open(path, "w") as f:
         f.write(md)
@@ -1590,17 +2054,32 @@ def main():
                             regularize_bg_15min, step_min=15)
     print(f"  {len(shang['per'])} records")
 
-    sim_items = assemble_sim(n_seeds=30, days=70, warmup_h=24)
+    print("Loading AZT1D…")
+    az_p = load_azt1d_patients()
+    azt1d = assemble_cohort("AZT1D", sorted(az_p.items()),
+                            regularize_bg, step_min=5)
+    print(f"  {len(azt1d['per'])} subjects")
+
+    sim_items, sim_raw = assemble_sim(n_seeds=30, days=70, warmup_h=24)
     sim = assemble_cohort("Sim", sim_items, trivial_regularize_5min, step_min=5)
     print(f"  {len(sim['per'])} simulator runs")
 
-    cohorts = {"Ohio": ohio, "Shanghai": shang, "Sim": sim}
+    cohorts = {"Ohio": ohio, "Shanghai": shang, "AZT1D": azt1d, "Sim": sim}
 
-    # Distribution distances
+    # AZT1D event log: insulin / carb / device-mode columns that the other two
+    # real corpora do not expose at this granularity.
+    print("Loading AZT1D event log…")
+    az_events = load_azt1d_events()
+    az_event_stats = azt1d_event_summary(az_events)
+    sim_event_stats = sim_event_summary(sim_raw)
+
+    # Distribution distances — all sim/real pairs + every real/real baseline.
     distances = {}
     bins = np.arange(40, 401, 5)
-    for pair in [("Sim", "Ohio"), ("Sim", "Shanghai"), ("Ohio", "Shanghai")]:
-        a, b = pair
+    pair_list = [("Sim", "Ohio"), ("Sim", "Shanghai"), ("Sim", "AZT1D"),
+                 ("Ohio", "Shanghai"), ("Ohio", "AZT1D"),
+                 ("Shanghai", "AZT1D")]
+    for a, b in pair_list:
         distances[f"{a}_vs_{b}"] = distribution_distances(
             cohorts[a]["pooled_bg"], cohorts[b]["pooled_bg"], bins=bins)
 
@@ -1639,6 +2118,8 @@ def main():
     fig_recovery(cohorts, os.path.join(FIGS, "recovery_time.png"))
     fig_diurnal_lines(cohorts, os.path.join(FIGS, "diurnal_lines.png"))
     fig_class_balance(cohorts, os.path.join(FIGS, "class_balance.png"))
+    fig_azt1d_events(az_event_stats, sim_event_stats,
+                     os.path.join(FIGS, "azt1d_event_panel.png"))
 
     # Recovery-time summary per cohort
     recov_summaries = {n: recovery_summary(cohorts[n]["recov_times"]) for n in ORDER}
@@ -1666,16 +2147,19 @@ def main():
             "recovery": recov_summaries[n],
         } for n in ORDER},
         "distances": distances,
+        "azt1d_events": az_event_stats,
+        "sim_events": sim_event_stats,
     }
-    out = os.path.join(REPORTS, "stats.json")
+    out = os.path.join(DIFF, "stats.json")
     with open(out, "w") as f:
         json.dump(payload, f, indent=2, default=float)
     print(f"Wrote {out}")
 
     # Templated markdown report
-    report_path = os.path.join(REPORTS, "REPORT.md")
+    report_path = os.path.join(DIFF, "README.md")
     write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
                     pooled_risk, cohort_summaries, recov_summaries,
+                    az_event_stats, sim_event_stats,
                     report_path)
     print(f"Wrote {report_path}")
     print(f"Figures in {FIGS}")

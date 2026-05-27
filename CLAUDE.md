@@ -2,7 +2,7 @@
 
 ## About
 
-A seed-driven simulator that generates synthetic blood glucose data by modeling Type 1 Diabetes patient behavior (not physiology directly). The simulator produces factor curves (carb intake, insulin, insulin sensitivity, exercise) whose interactions determine blood sugar deltas. The end goal is to generate training data for a transformer model that learns the relationships between patient behavior and blood sugar outcomes.
+A seed-driven simulator that generates synthetic blood glucose data by modeling Type 1 Diabetes patient behavior (not physiology directly). The simulator produces factor curves (carb intake, insulin, insulin sensitivity, exercise) whose interactions determine blood sugar deltas. The end goal is to generate near-unlimited training data for downstream ML models that learn the relationships between patient behavior and blood sugar outcomes.
 
 ## Architecture
 

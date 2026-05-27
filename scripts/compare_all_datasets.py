@@ -5,10 +5,12 @@ aggregator consumed by scripts/generate_comparison_figures.py. Also runnable
 directly to print pooled aggregate stats.
 
 Reads from:
-    ./ohiot1dm/*.xml                              (5-min Dexcom CGM, US adults)
-    ./ShanghaiT1DM/Shanghai_T1DM/*.xls(x)         (15-min, CN adults)
+    ./datasets/ohiot1dm/*.xml                      (5-min Dexcom CGM, US adults)
+    ./datasets/ShanghaiT1DM/Shanghai_T1DM/*.xls(x) (15-min, CN adults)
+    ./datasets/AZT1D/CGM Records/Subject N/*.csv   (5-min Dexcom + AID pump,
+                                                    Mayo Clinic Arizona)
 
-Datasets are gitignored (non-redistributable).
+Datasets live under datasets/ and are gitignored (non-redistributable).
 """
 from __future__ import annotations
 
@@ -25,8 +27,10 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, REPO_ROOT)
 from simulator import T1DMSimulator  # noqa: E402
 
-OHIO_DIR = os.path.join(REPO_ROOT, 'ohiot1dm')
-SHANG_DIR = os.path.join(REPO_ROOT, 'ShanghaiT1DM', 'Shanghai_T1DM')
+DATASETS_DIR = os.path.join(REPO_ROOT, 'datasets')
+OHIO_DIR = os.path.join(DATASETS_DIR, 'ohiot1dm')
+SHANG_DIR = os.path.join(DATASETS_DIR, 'ShanghaiT1DM', 'Shanghai_T1DM')
+AZT1D_DIR = os.path.join(DATASETS_DIR, 'AZT1D', 'CGM Records')
 
 
 # ---------- Loaders ----------
@@ -85,6 +89,73 @@ def load_shanghai_patients() -> dict:
             rows.sort()
             pts[rid] = rows
     return pts
+
+
+def load_azt1d_patients() -> dict:
+    """Return {subject_id: [(ts, bg_mg_dl), ...]} from the AZT1D CSV corpus.
+
+    Only CGM samples are loaded here; insulin / carb / device-mode columns are
+    loaded separately by `load_azt1d_events`.
+    """
+    pts: dict = {}
+    if not os.path.isdir(AZT1D_DIR):
+        return {}
+    for sub in sorted(os.listdir(AZT1D_DIR)):
+        sub_dir = os.path.join(AZT1D_DIR, sub)
+        if not os.path.isdir(sub_dir):
+            continue
+        csvs = [f for f in os.listdir(sub_dir) if f.endswith('.csv')]
+        if not csvs:
+            continue
+        try:
+            df = pd.read_csv(os.path.join(sub_dir, csvs[0]),
+                             usecols=['EventDateTime', 'CGM'])
+        except Exception:
+            continue
+        ts_col = pd.to_datetime(df['EventDateTime'], errors='coerce')
+        bg_col = pd.to_numeric(df['CGM'], errors='coerce')
+        rows = []
+        for ts, val in zip(ts_col, bg_col):
+            if pd.isna(ts) or pd.isna(val):
+                continue
+            rows.append((ts.to_pydatetime(), float(val)))
+        if rows:
+            rows.sort()
+            pts[sub] = rows
+    return pts
+
+
+def load_azt1d_events() -> dict:
+    """Return {subject_id: DataFrame} with the full AZT1D event log.
+
+    Columns kept: EventDateTime, DeviceMode, BolusType, Basal,
+    CorrectionDelivered, TotalBolusInsulinDelivered, FoodDelivered, CarbSize.
+    Numeric columns are coerced; missing event fields stay NaN.
+    """
+    out: dict = {}
+    if not os.path.isdir(AZT1D_DIR):
+        return {}
+    cols = ['EventDateTime', 'DeviceMode', 'BolusType', 'Basal',
+            'CorrectionDelivered', 'TotalBolusInsulinDelivered',
+            'FoodDelivered', 'CarbSize']
+    for sub in sorted(os.listdir(AZT1D_DIR)):
+        sub_dir = os.path.join(AZT1D_DIR, sub)
+        if not os.path.isdir(sub_dir):
+            continue
+        csvs = [f for f in os.listdir(sub_dir) if f.endswith('.csv')]
+        if not csvs:
+            continue
+        try:
+            df = pd.read_csv(os.path.join(sub_dir, csvs[0]), usecols=cols)
+        except Exception:
+            continue
+        df['EventDateTime'] = pd.to_datetime(df['EventDateTime'],
+                                              errors='coerce')
+        for c in ('Basal', 'CorrectionDelivered',
+                  'TotalBolusInsulinDelivered', 'FoodDelivered', 'CarbSize'):
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+        out[sub] = df
+    return out
 
 
 # ---------- Regularisation ----------

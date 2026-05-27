@@ -9,13 +9,31 @@ Screenshot:
 ![Software Screenshot](screenshots/t1dm_seed42_1779650963.png)
 
 
+## Table of contents
+
+- [Motivation](#motivation)
+- [Design Principles](#design-principles)
+- [Architecture](#architecture)
+- [Blood Sugar Computation](#blood-sugar-computation)
+- [Patient Model](#patient-model)
+- [Insulin Sensitivity Model](#insulin-sensitivity-model)
+- [Behavioral Events](#behavioral-events)
+- [Installation and Usage](#installation-and-usage)
+- [Visualizer Controls](#visualizer-controls)
+- [Parameters](#parameters)
+- [Comparison Against Real-World Datasets](#comparison-against-real-world-datasets)
+- [Testing](#testing)
+- [References](#references)
+- [License](#license)
+
+
 ## Motivation
 
 Most T1DM simulators model physiology: glucose kinetics, insulin pharmacokinetics, compartmental models. They produce accurate BG traces but require dozens of physiological parameters that are hard to measure and vary between patients.
 
 This simulator takes a different approach. It models the *person*, not the pancreas. The key insight is that most real-world blood sugar variance comes from behavioral decisions -- what the patient eats, when they bolus, how they correct, whether they exercise -- not from subtle physiological differences. By generating diverse behavioral patterns and computing BG as a consequence, the simulator produces training data that teaches a model to predict what patients *do*, with blood sugar as the outcome.
 
-The ultimate goal is to train a transformer model on these synthetic factor curves, then fine-tune it on real patient data for personalized blood sugar prediction.
+The ultimate goal is to provide a near-unlimited stream of synthetic factor curves that can be used to pretrain ML models for personalized blood sugar prediction, with real patient data reserved for fine-tuning.
 
 
 ## Design Principles
@@ -218,12 +236,12 @@ All parameters are uppercase constants at the top of `simulator.py`. They are gr
 
 ## Comparison Against Real-World Datasets
 
-The simulator output is compared against two non-redistributable real CGM corpora — **OhioT1DM** (6 US adults, 5-min Dexcom CGM) and **ShanghaiT1DM** (13 patients / 16 records, 15-min cadence, mixed CSII + MDI) — on distributional moments, KS / Wasserstein / JS distances, LBGI / HBGI, MAGE / CONGA / MODD / SampEn, autocorrelation across nine lags, diurnal envelopes, weekday × hour heatmaps, episode counts and durations, hypo recovery time, and per-record TIR / TBR scatter.
+The simulator output is compared against three non-redistributable real CGM corpora — **OhioT1DM** (6 US adults, 5-min Dexcom CGM), **ShanghaiT1DM** (13 patients / 16 records, 15-min cadence, mixed CSII + MDI), and **AZT1D** (25 US adults on Tandem t:slim X2 Control-IQ AID systems, 5-min Dexcom G6 plus full pump event log: basal rate, bolus type, correction-vs-meal split, carb size, device mode) — on distributional moments, KS / Wasserstein / JS distances, LBGI / HBGI, MAGE / CONGA / MODD / SampEn, autocorrelation across nine lags, diurnal envelopes, weekday × hour heatmaps, episode counts and durations, hypo recovery time, per-record TIR / TBR scatter, and (AZT1D only) a head-to-head insulin / carb behaviour panel.
 
-The full report — tables, figures, and methodology — lives at `reports/REPORT.md`. Both datasets are gitignored (subject to data-use agreements). Reproduce with:
+The full report — tables, figures, and methodology — lives at [`diff/README.md`](diff/README.md). All three datasets are gitignored and live under `datasets/` (subject to data-use agreements). Reproduce with:
 
 ```bash
-python reports/build_report.py
+python diff/build_report.py
 ```
 
 ## Testing
@@ -237,6 +255,16 @@ The test suite (54 tests) covers:
 - `tests/test_patient.py` — skill ranges, basal/HGO/ICR relationship, behavioral parameters
 - `tests/test_simulator.py` — reproducibility, BG bounds, meal/insulin effects, weekday/weekend/holiday, severe-hypo rescue grams, skill-scaled correction, `inject_curve` totals contract, follow-up snack effect
 - `tests/test_balance.py` — basal-HGO balance, meal-bolus balance, ICR-basal proportionality
+
+## References
+
+The comparison report in [`diff/README.md`](diff/README.md) benchmarks the simulator against three publicly available T1D CGM datasets. Credit and citation requests for those datasets belong to their original authors.
+
+- **OhioT1DM** — Marling, C., and Bunescu, R. *The OhioT1DM Dataset for Blood Glucose Level Prediction: Update 2020.* Proceedings of the 5th International Workshop on Knowledge Discovery in Healthcare Data (KDH @ ECAI 2020), CEUR Workshop Proceedings, vol. 2675, pp. 71–74. Distributed under a data-use agreement via Ohio University; please request access through the maintainers' instructions before redistributing.
+
+- **ShanghaiT1DM** — Zhao, Q., Zhu, J., Shen, X., Lin, C., Zhang, Y., Liang, Y., Cao, B., Li, J., Liu, X., Rao, W., and Wang, C. *Chinese Diabetes Datasets for Data-Driven Machine Learning.* Scientific Data 10, 35 (2023). doi:10.1038/s41597-023-01940-7. The T1DM portion contains 13 patients / 16 records of paired CGM, insulin, and dietary data.
+
+- **AZT1D** — Khamesian, S., Arefeen, A., Thompson, B. M., Grando, M. A., and Ghasemzadeh, H. *AZT1D: A Real-World Dataset for Type 1 Diabetes.* Dataset of 25 individuals with T1D on Automated Insulin Delivery (Tandem t:slim X2 Control-IQ) collected at Mayo Clinic Arizona over 6–8 weeks per patient, including CGM, basal/bolus insulin (with correction-specific amounts and bolus types), carbohydrate intake, and device-mode annotations (regular / sleep / exercise). See the accompanying manuscript (Mayo Clinic / Arizona State University, 2025) for full study design and IRB protocol (#23-003065).
 
 ## License
 

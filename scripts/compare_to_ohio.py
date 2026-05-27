@@ -8,7 +8,7 @@ Run from the repo root with the project venv:
 
     venv/bin/python scripts/compare_to_ohio.py
 
-Reads OhioT1DM data from ./ohiot1dm/*.xml (gitignored, non-redistributable).
+Reads OhioT1DM data from ./datasets/ohiot1dm/*.xml (gitignored, non-redistributable).
 """
 import os
 import sys
@@ -22,7 +22,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, REPO_ROOT)
 import simulator as sim  # noqa: E402
 
-OHIO_DIR = os.path.join(REPO_ROOT, 'ohiot1dm')
+OHIO_DIR = os.path.join(REPO_ROOT, 'datasets', 'ohiot1dm')
 STEP_MIN = 5
 N_SEEDS = 40
 DAYS = 70
