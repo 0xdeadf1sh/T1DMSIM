@@ -1,0 +1,15 @@
+{
+  "venvPath": ".",
+  "venv": "venv",
+  "typeCheckingMode": "off",
+  "reportMissingImports": "none",
+  "reportArgumentType": "none",
+  "reportCallIssue": "none",
+  "exclude": [
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    "datasets",
+    "diff/figures"
+  ]
+}
