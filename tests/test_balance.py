@@ -48,14 +48,14 @@ def isolated_biology(monkeypatch):
     """Disable stochastic / feedback biology that intentionally breaks the
     'exact-ICR-match = zero delta' assumption these tests rely on:
 
-    - postprandial IS bonus (IS rises while carbs absorb -> bolus over-corrects)
+    - postprandial insulin resistance (IR rises while carbs absorb -> bolus under-corrects)
     - lipohypertrophy per-dose multiplier (insulin amplitude noise)
     - glucotoxicity (IS drift from chronic hyperglycemia)
     - per-step absorption noise on carbs and insulin
 
     With these off, dose math is the only thing under test.
     """
-    monkeypatch.setattr(simulator, 'POSTPRANDIAL_IS_BONUS_FACTOR', 0.0)
+    monkeypatch.setattr(simulator, 'POSTPRANDIAL_IR_PENALTY_FACTOR', 0.0)
     monkeypatch.setattr(simulator, 'SITE_QUALITY_SIGMA_BASE', 0.0)
     monkeypatch.setattr(simulator, 'GLUCOTOX_MAX_IS_INCREASE', 0.0)
     monkeypatch.setattr(simulator, 'CARB_ABSORPTION_NOISE_SIGMA', 0.0)

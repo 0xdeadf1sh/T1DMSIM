@@ -79,7 +79,7 @@ Combined, with all modifiers:
 
     IS(t) = IS_base * diurnal * (1 + daily_drift) * illness_factor
             * exercise_envelope * stress_envelope
-            * glucotox_factor * postprandial_bonus
+            * glucotox_factor * postprandial_ir
             * (1 + fast_noise)
 
 Where:
@@ -102,12 +102,12 @@ A slow EMA of true BG (6h half-life) drives transient insulin resistance when ch
 
 Closes a positive feedback loop: high BG → more IR → harder to bring down.
 
-### Postprandial IS bonus
+### Postprandial insulin resistance
 
-Incretin / GLP-1 effect: while carbs are absorbing, peripheral tissues are transiently more insulin-sensitive. Saturating in active carb load:
+In non-diabetics the incretin / GLP-1 axis augments insulin secretion and sensitivity around a meal. In T1DM that axis is blunted and there is no endogenous insulin response, so the meal-time sensitivity boost is absent; if anything the absorbing-carb state is mildly insulin-*resistant*. While carbs are absorbing, IR is raised (insulin clears glucose slightly less effectively). Saturating in active carb load:
 
-    bonus = POSTPRANDIAL_IS_BONUS_FACTOR * active_carb / (POSTPRANDIAL_IS_BONUS_HALF + active_carb)
-    postprandial_bonus = 1 - bonus
+    penalty = POSTPRANDIAL_IR_PENALTY_FACTOR * active_carb / (POSTPRANDIAL_IR_PENALTY_HALF + active_carb)
+    postprandial_ir = 1 + penalty
 
 
 ## BG Delta Computation

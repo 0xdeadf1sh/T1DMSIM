@@ -466,10 +466,15 @@ GLUCOTOX_BG_THRESHOLD = 200.0  # Above this EMA value, IS starts to climb
 GLUCOTOX_BG_FOR_MAX = 350.0  # EMA value at which the maximum IR multiplier is applied
 GLUCOTOX_MAX_IS_INCREASE = 0.15  # Up to 15% more resistant at saturating BG
 
-# Postprandial IS bonus — incretin / GLP-1 effect transiently boosts sensitivity
-# while carbs are absorbing. Saturating in active carb, peaks ~10% bonus.
-POSTPRANDIAL_IS_BONUS_FACTOR = 0.04
-POSTPRANDIAL_IS_BONUS_HALF = 1.5  # g/step active carb at half-max bonus
+# Postprandial insulin resistance — in non-diabetics the incretin / GLP-1 axis
+# augments insulin secretion and sensitivity around a meal. In T1DM that axis is
+# blunted and there is no endogenous insulin response, so the meal-time
+# sensitivity boost is absent; if anything the absorbing-carb state is mildly
+# insulin-RESISTANT (glucose/FFA surge, absent amylin → faster gastric emptying,
+# counter-regulatory tone). While carbs are absorbing, insulin clears glucose
+# slightly LESS effectively. Saturating in active carb, peaks at a ~4% penalty.
+POSTPRANDIAL_IR_PENALTY_FACTOR = 0.04
+POSTPRANDIAL_IR_PENALTY_HALF = 1.5  # g/step active carb at half-max penalty
 
 # Injection site quality (lipohypertrophy) — per-dose multiplier on the
 # delivered insulin. Sigma scales inversely with lifestyle_consistency (poor
@@ -1632,8 +1637,8 @@ class T1DMSimulator:
         """Compute insulin resistance factor at a given time index.
 
         Includes diurnal pattern, daily drift (smoothed across midnight), illness
-        factor, exercise/stress envelopes, glucotoxic IR, postprandial incretin
-        sensitivity bonus, and per-step noise.
+        factor, exercise/stress envelopes, glucotoxic IR, postprandial insulin
+        resistance, and per-step noise.
         """
         s = self.state
 
@@ -1712,12 +1717,14 @@ class T1DMSimulator:
             intensity = min(1.0, excess / span)
             is_val *= (1.0 + GLUCOTOX_MAX_IS_INCREASE * intensity)
 
-        # Postprandial IS bonus (incretin / GLP-1 effect): while carbs are
-        # absorbing, peripheral tissues are transiently more insulin-sensitive.
-        # Saturates with active carb load, peaks at POSTPRANDIAL_IS_BONUS_FACTOR.
+        # Postprandial insulin resistance: T1DM patients lack the incretin /
+        # GLP-1 sensitivity boost non-diabetics get with a meal, so the
+        # absorbing-carb state is if anything mildly insulin-RESISTANT. While
+        # carbs are absorbing, raise IR (insulin clears glucose less effectively).
+        # Saturates with active carb load, peaks at POSTPRANDIAL_IR_PENALTY_FACTOR.
         if active_carb > 0.0:
-            bonus = POSTPRANDIAL_IS_BONUS_FACTOR * active_carb / (POSTPRANDIAL_IS_BONUS_HALF + active_carb)
-            is_val *= (1.0 - bonus)
+            penalty = POSTPRANDIAL_IR_PENALTY_FACTOR * active_carb / (POSTPRANDIAL_IR_PENALTY_HALF + active_carb)
+            is_val *= (1.0 + penalty)
 
         # Fast noise via AR(1) — same stationary σ as the previous independent
         # draw, but with ~22 min correlation half-life so IS swings are smooth.

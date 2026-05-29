@@ -115,7 +115,7 @@ Additional IS modifiers apply on top of the diurnal pattern:
 - **Post-exercise sensitivity boost**: After aerobic exercise, IS is reduced by `EXERCISE_IS_REDUCTION` (10%) for `EXERCISE_IS_DURATION_HOURS` (10h), modelling the well-known glucose-lowering effect of exercise that causes nocturnal hypos in active patients.
 - **Stress resistance**: Stress events (2–6h duration, 1.2–1.8× IS multiplier) model the transient insulin resistance from cortisol and adrenaline.
 - **Glucotoxicity**: A slow 6h EMA of true BG drives transient insulin resistance when chronically elevated, closing a positive feedback loop on hyperglycemia (high BG → more IR → harder to bring down).
-- **Postprandial IS bonus**: While carbs are absorbing, IS is multiplied by `(1 − bonus)` where `bonus` saturates with active carb load. Models the incretin / GLP-1 effect — peripheral tissues are transiently more insulin-sensitive after eating.
+- **Postprandial insulin resistance**: While carbs are absorbing, the insulin-resistance factor is multiplied by `(1 + penalty)` where `penalty` saturates with active carb load. In T1DM the incretin / GLP-1 sensitivity boost non-diabetics get with a meal is blunted/absent, so the absorbing-carb state is if anything mildly insulin-*resistant* — insulin clears glucose slightly less effectively after eating.
 - **Injection site quality (lipohypertrophy)**: Every insulin dose (basal, meal bolus, corrections) is multiplied by a per-dose `site_quality` factor sampled from `N(1.0, σ)` where σ scales with `1/s4`. Patients with poor lifestyle consistency rotate sites poorly and develop higher dose-to-dose variance.
 
 
