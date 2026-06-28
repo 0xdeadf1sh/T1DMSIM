@@ -8,6 +8,7 @@ build/
 *.png
 !screenshots/*.png
 !diff/figures/*.png
+!uva_padova/figures/*.png
 *.npz
 .venv/
 venv/

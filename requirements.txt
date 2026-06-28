@@ -9,3 +9,12 @@ pytest>=8.0
 pandas>=2.0
 scipy>=1.11
 matplotlib>=3.8
+xlrd>=2.0.1     # read the legacy-.xls ShanghaiT1DM corpus
+openpyxl        # read the .xlsx ShanghaiT1DM records
+
+# UVA/Padova reference comparison (uva_padova/). Install the engine WITHOUT its
+# RL extras — the pinned gym==0.9.4 is unneeded and does not build on current
+# Python (gym/pkg_resources are stubbed at import; see padova_engine.py). Not a
+# bare requirement line on purpose, so `pip install -r requirements.txt` stays
+# clean:
+#     pip install --no-deps simglucose>=0.2.11
