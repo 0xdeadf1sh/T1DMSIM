@@ -6,7 +6,7 @@ Designed by a T1DM patient, informed by lived experience.
 
 Screenshot:
 
-![Software Screenshot](screenshots/t1dm_seed42_1779650963.png)
+![Software Screenshot](screenshots/t1dm_seed42_36h.png)
 
 
 ## Table of contents
@@ -22,6 +22,7 @@ Screenshot:
 - [Visualizer Controls](#visualizer-controls)
 - [Parameters](#parameters)
 - [Comparison Against Real-World Datasets](#comparison-against-real-world-datasets)
+- [Comparison Against the UVA/Padova Simulator](#comparison-against-the-uvapadova-simulator)
 - [Testing](#testing)
 - [References](#references)
 - [License](#license)
@@ -244,13 +245,30 @@ The full report — tables, figures, and methodology — lives at [`diff/README.
 python diff/build_report.py
 ```
 
+## Comparison Against the UVA/Padova Simulator
+
+Where the datasets above anchor the simulator to *real* CGM, a second comparison pits it against the field's reference *in-silico* model — the FDA-accepted **UVA/Padova 2008** simulator, via the open-source [`simglucose`](https://github.com/jxx123/simglucose) ODE core, driven through a thin adapter in [`uva_padova/padova_engine.py`](uva_padova/padova_engine.py). Three complementary lenses, each its own self-contained report:
+
+- **Identical-input replay** — [`uva_padova/README.md`](uva_padova/README.md). The exact meals, boluses, and basal a seed generates are captured and replayed verbatim into a paired UVA/Padova virtual patient, isolating how the two physiologies answer the same behaviour. Also carries a single-threaded **generation-speed** benchmark: this simulator reads pre-accumulated curves in O(1) per 5-min step, while UVA/Padova integrates a thirteen-state stiff ODE every minute.
+- **Meal excursions** — [`uva_padova/EXCURSIONS.md`](uva_padova/EXCURSIONS.md). Sharing only the meal schedule and letting each engine dose for its own physiology, the post-meal excursions are compared in amplitude, time-to-peak, area, and amplitude-normalised shape.
+- **Distance to real** — [`uva_padova/REALISM.md`](uva_padova/REALISM.md). Treating each simulator as a synthetic-data source, this measures how far each one's output sits from the real cohorts above, across the same metric battery, with the distance *between* the real cohorts as the yardstick for "indistinguishable from real".
+
+The reference engine is installed without its reinforcement-learning extras (its pinned `gym` is unneeded and does not build on current Python). Reproduce with:
+
+```bash
+pip install --no-deps simglucose>=0.2.11
+python uva_padova/compare_uva_padova.py     # identical-input replay + speed
+python uva_padova/compare_excursions.py     # meal-excursion deviations
+python uva_padova/compare_realism.py        # distance-to-real-CGM
+```
+
 ## Testing
 
 ```bash
 python -m pytest tests/ -v
 ```
 
-The test suite (54 tests) covers:
+The test suite (58 tests) covers:
 - `tests/test_curves.py` — curve generation correctness and unit consistency
 - `tests/test_patient.py` — skill ranges, basal/HGO/ICR relationship, behavioral parameters
 - `tests/test_simulator.py` — reproducibility, BG bounds, meal/insulin effects, weekday/weekend/holiday, severe-hypo rescue grams, skill-scaled correction, `inject_curve` totals contract, follow-up snack effect
