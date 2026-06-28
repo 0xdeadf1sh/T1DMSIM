@@ -56,6 +56,10 @@ NIGHT_OVERLAY_RGBA = (4, 26, 22, 50)   # Cold teal wash — the Grid at night
 
 DEFAULT_ZOOM_HOURS = 6.0  # Initial visible window width
 
+# Transient "screenshot saved" modal: total dwell, plus the trailing fade window.
+SCREENSHOT_TOAST_SECONDS = 3.0
+SCREENSHOT_TOAST_FADE = 0.7
+
 # ============================================================================
 # VISUAL THEME — "Tron Legacy" (lime neon on a black Grid)
 # ============================================================================
@@ -243,6 +247,10 @@ class Visualizer:
         # entry's `toggle_key` field.
         self.curve_visible = [True, True, True, True, False, True, False, False, False, False]
         self.hovered_step = None     # Step under mouse cursor
+
+        # Transient "screenshot saved" modal: path string + epoch deadline.
+        self.screenshot_msg = None
+        self.screenshot_msg_until = 0.0
 
         # Burn off the first day so display starts after dynamics settle, then
         # generate the initial 24h of visible data.
@@ -753,6 +761,69 @@ class Visualizer:
                              (self.sidebar_width + track_pad, sb_y, track_w, sb_h))
             pygame.draw.rect(self.buffer, ACCENT, (sb_x, sb_y, sb_w, sb_h))
 
+    def _render_scene(self):
+        """Paint the full frame to the off-screen buffer (no screen flip)."""
+        self.buffer.fill(BG_COLOR)
+        chart = self._chart_rect()
+
+        self._draw_nocturnal_zones(chart)
+        self._draw_bg_zones(chart)
+        self._draw_grid(chart)
+
+        # Chart border — lime-glow frame around the Grid
+        draw_glow_rect(self.buffer, ACCENT, chart)
+
+        self._draw_curves(chart)
+        self._draw_crosshair(chart)
+        self._draw_sidebar()
+        self._draw_header()
+        self._draw_footer()
+        self._draw_screenshot_toast()  # always last — overlays everything
+
+    def _draw_screenshot_toast(self):
+        """Centered, self-dismissing 'screenshot saved' modal with a lime frame.
+
+        Kept out of the saved PNG by clearing screenshot_msg before the capture
+        re-render (see the K_s handler). Fades over the final SCREENSHOT_TOAST_FADE
+        seconds; the run loop keeps redrawing while it is live so it animates and
+        then clears without needing user input.
+        """
+        if self.screenshot_msg is None:
+            return
+        remaining = self.screenshot_msg_until - time.time()
+        if remaining <= 0:
+            self.screenshot_msg = None
+            return
+
+        title = "✓ SCREENSHOT SAVED"
+        path = self.screenshot_msg
+        pad_x, pad_y = self._s(20), self._s(16)
+        line_gap = self._s(6)
+        title_surf = self.font_md.render(title, True, ACCENT)
+        path_surf = self.font_sm.render(path, True, TEXT_BRIGHT)
+
+        w = min(self.win_w - self._s(40),
+                max(title_surf.get_width(), path_surf.get_width()) + pad_x * 2)
+        h = title_surf.get_height() + path_surf.get_height() + line_gap + pad_y * 2
+
+        toast = pygame.Surface((w, h), pygame.SRCALPHA)
+        toast.fill((4, 14, 12, 238))
+        toast_rect = toast.get_rect()
+        pygame.draw.rect(toast, (*_dim(ACCENT, 0.35), 255), toast_rect, self._s(3))
+        pygame.draw.rect(toast, (*ACCENT, 255), toast_rect, 1)
+
+        ty = pad_y
+        toast.blit(title_surf, ((w - title_surf.get_width()) // 2, ty))
+        ty += title_surf.get_height() + line_gap
+        toast.blit(path_surf, ((w - path_surf.get_width()) // 2, ty))
+
+        # Trailing fade: scale the whole toast's alpha down uniformly.
+        if remaining < SCREENSHOT_TOAST_FADE and SCREENSHOT_TOAST_FADE > 0:
+            alpha = max(0, int(255 * remaining / SCREENSHOT_TOAST_FADE))
+            toast.fill((255, 255, 255, alpha), special_flags=pygame.BLEND_RGBA_MULT)
+
+        self.buffer.blit(toast, ((self.win_w - w) // 2, (self.win_h - h) // 2))
+
     def run(self):
         """Main loop."""
         running = True
@@ -822,12 +893,18 @@ class Visualizer:
 
                     elif event.key == pygame.K_s:
                         fname = f"t1dm_seed{self.seed}_{int(time.time())}.png"
-                        # convert(24) drops any per-pixel alpha the buffer may
-                        # have picked up from SRCALPHA zone blits, so the saved
-                        # PNG is always opaque (transparent regions otherwise
-                        # render white in image viewers).
+                        path = os.path.abspath(fname)
+                        # Re-render a clean frame with the toast suppressed so the
+                        # confirmation modal never lands in the saved PNG (even if
+                        # a prior toast is still on screen). convert(24) drops any
+                        # per-pixel alpha the buffer picked up from SRCALPHA zone
+                        # blits, so the file is always opaque.
+                        self.screenshot_msg = None
+                        self._render_scene()
                         pygame.image.save(self.buffer.convert(24), fname)
-                        print(f"Screenshot saved: {fname}")
+                        print(f"Screenshot saved: {path}")
+                        self.screenshot_msg = path
+                        self.screenshot_msg_until = time.time() + SCREENSHOT_TOAST_SECONDS
 
                 elif event.type == pygame.MOUSEWHEEL:
                     self.scroll_x -= event.y * scroll_speed
@@ -842,30 +919,20 @@ class Visualizer:
                 self.scroll_x = min(max(0, self.total_steps - 10), self.scroll_x + scroll_speed)
                 needs_redraw = True # Trigger redraw while holding key
 
+            # Keep redrawing while the screenshot modal is live so it fades and
+            # then clears on its own, without waiting for the next user event.
+            if self.screenshot_msg is not None:
+                needs_redraw = True
+
             # === ONLY DRAW IF SOMETHING CHANGED ===
             if needs_redraw:
-                self.buffer.fill(BG_COLOR)
-
-                chart = self._chart_rect()
-
-                self._draw_nocturnal_zones(chart)
-                self._draw_bg_zones(chart)
-                self._draw_grid(chart)
-
-                # Chart border — lime-glow frame around the Grid
-                draw_glow_rect(self.buffer, ACCENT, chart)
-
-                self._draw_curves(chart)
-                self._draw_crosshair(chart)
-                self._draw_sidebar()
-                self._draw_header()
-                self._draw_footer()
+                self._render_scene()
 
                 self.screen.blit(self.buffer, (0, 0))
                 pygame.display.flip()
-                
+
                 # Reset flag so we don't draw next frame unless needed
-                needs_redraw = False 
+                needs_redraw = False
 
         pygame.quit()
 
