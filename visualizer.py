@@ -103,14 +103,15 @@ BASE_FONT_LG = 24
 BASE_FONT_XL = 30
 
 # Text scale presets — cycled at runtime with the F key.
-# small ≈ pre-feature defaults; medium is the new default; large for hi-DPI / presentation.
+# small ≈ pre-feature defaults; medium is baseline; large (the default) suits
+# hi-DPI / presentation and the maximized-on-open window.
 TEXT_SCALES = {
     'small':  0.80,
     'medium': 1.00,
     'large':  1.25,
 }
 TEXT_SCALE_ORDER = ['small', 'medium', 'large']
-DEFAULT_TEXT_SCALE = 'medium'
+DEFAULT_TEXT_SCALE = 'large'
 
 STEPS_PER_DAY = 24 * 60 // DT_MINUTES  # 288
 
@@ -206,6 +207,16 @@ class Visualizer:
             pygame.RESIZABLE | pygame.DOUBLEBUF
         )
         pygame.display.set_caption("T1DM Simulator")
+
+        # Open maximized. The WM-managed maximize (via SDL2) respects panels and
+        # emits a VIDEORESIZE the main loop consumes to resync win_w/win_h/buffer.
+        # Guarded so headless/dummy-driver runs (and any build lacking _sdl2)
+        # silently keep the near-full-screen size above.
+        try:
+            from pygame._sdl2.video import Window
+            Window.from_display_module().maximize()
+        except Exception:
+            pass
 
         # Off-screen buffer to eliminate flickering
         self.buffer = pygame.Surface((self.win_w, self.win_h))
