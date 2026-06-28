@@ -583,8 +583,15 @@ def main():
 
     # ---- figures ----
     print("  rendering figures...")
-    rep = min(range(len(per_seed)), key=lambda i: abs(per_seed[i]["rmse"]
-                                                      - paired_summary["rmse"]["median"]))
+    # Representative trace: the seed whose mean-BG pair (ours, UVA) sits closest
+    # to the pooled means, so the showcased curve embodies the population's
+    # typical level relationship. A median-RMSE pick is direction-blind (RMSE
+    # measures disagreement magnitude, not sign) and can land on a minority seed
+    # where UVA runs higher, contradicting the pooled table.
+    _po, _pu = pooled_o["mean"], pooled_u["mean"]
+    rep = min(range(len(per_seed)),
+              key=lambda i: (per_seed[i]["mean_ours"] - _po) ** 2
+                          + (per_seed[i]["mean_uva"] - _pu) ** 2)
     rp = pairs[rep]
     simrep, _, ev = capture_run(rp["seed"], days, PadovaPatient(rp["uva_name"]).init_gsub)
     carb, bolus, _ = build_inputs(ev, len(rp["bg_ours"]),
