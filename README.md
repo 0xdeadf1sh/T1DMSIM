@@ -4,6 +4,9 @@ A seed-driven simulator for generating synthetic Type 1 Diabetes blood glucose d
 
 Designed by a T1DM patient, informed by lived experience.
 
+> [!CAUTION]
+> **Research and educational use only.** This project is a synthetic-data generator and a behavioral model of Type 1 Diabetes — not a medical device, and not clinically validated. Its output is artificial data, not real patient measurements, and **must not** be used to make medical, diagnostic, or treatment decisions, to calculate or adjust insulin doses, or to guide diabetes management in any way. For medical advice, consult a qualified healthcare professional. The software is provided "as is", without warranty of any kind, and the authors accept no liability for any use.
+
 Screenshot:
 
 ![Software Screenshot](screenshots/t1dm_seed42_36h.png)
