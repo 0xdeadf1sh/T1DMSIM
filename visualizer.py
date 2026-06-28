@@ -52,32 +52,35 @@ DISPLAY_START_DOW = (SIMULATION_START_DAY_OF_WEEK + WARMUP_DAYS) % 7
 # Nocturnal hours shaded in the chart background (22:00-06:00)
 NIGHT_START_HOUR = 22
 NIGHT_END_HOUR = 6
-NIGHT_OVERLAY_RGBA = (10, 20, 50, 35)
+NIGHT_OVERLAY_RGBA = (4, 26, 22, 50)   # Cold teal wash — the Grid at night
 
 DEFAULT_ZOOM_HOURS = 6.0  # Initial visible window width
 
 # ============================================================================
-# VISUAL THEME
+# VISUAL THEME — "Tron Legacy" (lime neon on a black Grid)
 # ============================================================================
+# Deep black backdrop, electric-lime hero accent, cyan/orange/magenta neon
+# secondaries. Curves are drawn with a glow underlay (see draw_glow_lines) so
+# the bright core reads as luminous against the dark field.
 
 # Colors
-BG_COLOR        = (15, 15, 20)
-PANEL_COLOR     = (22, 22, 30)
-GRID_COLOR      = (35, 35, 45)
-GRID_COLOR_MAJOR= (50, 50, 65)
-TEXT_COLOR       = (190, 195, 210)
-TEXT_DIM         = (100, 105, 120)
-TEXT_BRIGHT      = (230, 235, 245)
-ACCENT           = (90, 140, 255)
+BG_COLOR        = (3, 6, 5)          # Near-black with a faint green cast
+PANEL_COLOR     = (6, 12, 11)        # Panels barely lift off the void
+GRID_COLOR      = (18, 46, 30)       # Dim lime Grid lines
+GRID_COLOR_MAJOR= (34, 84, 52)       # Brighter lime Grid lines
+TEXT_COLOR       = (170, 230, 180)   # Pale lime
+TEXT_DIM         = (78, 128, 92)     # Muted lime
+TEXT_BRIGHT      = (215, 255, 200)   # Hot lime-white
+ACCENT           = (170, 255, 60)    # Electric lime — the signature glow
 
-# Curve colors
-COLOR_BG_TRACE   = (50, 205, 100)    # Green for BG
-COLOR_BG_OBS     = (50, 205, 100)    # Green for CGM reading
-COLOR_CARB       = (255, 160, 40)    # Orange for carbs
-COLOR_INSULIN    = (80, 150, 255)    # Blue for insulin
-COLOR_IS         = (200, 120, 255)   # Purple for IS
-COLOR_EXERCISE   = (255, 80, 120)    # Pink/red for exercise
-COLOR_DELTA      = (120, 220, 220)   # Cyan for delta
+# Curve colors — neon spectrum tuned for a black field
+COLOR_BG_TRACE   = (170, 255, 60)    # Electric lime for BG (the hero trace)
+COLOR_BG_OBS     = (170, 255, 60)    # Electric lime for CGM reading
+COLOR_CARB       = (255, 150, 20)    # Neon amber for carbs (Tron contrast)
+COLOR_INSULIN    = (40, 210, 255)    # Neon cyan for insulin
+COLOR_IS         = (200, 100, 255)   # Neon magenta for IS
+COLOR_EXERCISE   = (255, 55, 130)    # Hot pink for exercise
+COLOR_DELTA      = (90, 255, 220)    # Aqua-lime for delta
 
 # BG zone colors (for background shading)
 COLOR_LOW        = (180, 40, 40, 25)
@@ -120,13 +123,13 @@ CURVES = [
     {'key': 'bg_observed', 'name': 'Blood Glucose',     'color': COLOR_BG_OBS,  'unit': 'mg/dL', 'y_min': 20,  'y_max': 500, 'toggle_key': pygame.K_1},
     {'key': 'total_carb',  'name': 'Carb Intake',       'color': COLOR_CARB,    'unit': 'g/step','y_min': 0,   'y_max': 20,   'toggle_key': pygame.K_2},
     {'key': 'total_insulin','name': 'Insulin (total)',  'color': COLOR_INSULIN, 'unit': 'U/step','y_min': 0,   'y_max': 2,   'toggle_key': pygame.K_3},
-    {'key': 'basal_insulin','name': 'Basal',             'color': (140, 200, 255), 'unit': 'U/step','y_min': 0, 'y_max': 0.3, 'toggle_key': pygame.K_4},
-    {'key': 'bolus_insulin','name': 'Bolus',             'color': (100, 160, 255), 'unit': 'U/step','y_min': 0, 'y_max': 2,   'toggle_key': pygame.K_5},
+    {'key': 'basal_insulin','name': 'Basal',             'color': (120, 235, 255), 'unit': 'U/step','y_min': 0, 'y_max': 0.3, 'toggle_key': pygame.K_4},
+    {'key': 'bolus_insulin','name': 'Bolus',             'color': (60, 180, 255),  'unit': 'U/step','y_min': 0, 'y_max': 2,   'toggle_key': pygame.K_5},
     {'key': 'insulin_resistance','name': 'Insulin Resistance','color': COLOR_IS,'unit': '×',  'y_min': 0,   'y_max': 3,   'toggle_key': pygame.K_6},
     {'key': 'total_exercise','name': 'Exercise',        'color': COLOR_EXERCISE,'unit': 'g/step','y_min': 0,   'y_max': 10,   'toggle_key': pygame.K_7},
     {'key': 'bg_delta',    'name': 'BG Delta',          'color': COLOR_DELTA,   'unit': 'mg/dL', 'y_min': -20, 'y_max': 10,  'toggle_key': pygame.K_8},
-    {'key': 'hgo',          'name': 'Hepatic Output',   'color': (200, 200, 50), 'unit': 'g/step', 'y_min': 0, 'y_max': 1.5, 'toggle_key': pygame.K_9},
-    {'key': 'glucose_in', 'name': 'Glucose In',         'color': (255, 100, 100), 'unit': 'g/step', 'y_min': 0, 'y_max': 20, 'toggle_key': pygame.K_0},
+    {'key': 'hgo',          'name': 'Hepatic Output',   'color': (230, 240, 70), 'unit': 'g/step', 'y_min': 0, 'y_max': 1.5, 'toggle_key': pygame.K_9},
+    {'key': 'glucose_in', 'name': 'Glucose In',         'color': (255, 90, 90), 'unit': 'g/step', 'y_min': 0, 'y_max': 20, 'toggle_key': pygame.K_0},
 ]
 
 
@@ -140,6 +143,33 @@ def draw_text(surface, font, text, x, y, color=TEXT_COLOR, anchor='topleft'):
     rect = rendered.get_rect(**{anchor: (x, y)})
     surface.blit(rendered, rect)
     return rect
+
+
+def _dim(color, factor):
+    """Scale an RGB color toward black by `factor` (0..1)."""
+    return (int(color[0] * factor), int(color[1] * factor), int(color[2] * factor))
+
+
+def draw_glow_lines(surface, color, points, width=2, glow=True):
+    """Tron-style polyline: a bright core wrapped in dimmer, wider halos.
+
+    On a near-black field a halo painted in progressively darker shades of the
+    line's own hue reads as a neon glow — brighter than the void at every ring,
+    brightest at the core. Cheap (no per-pixel alpha) and redraw is event-gated.
+    """
+    if len(points) < 2:
+        return
+    if glow:
+        pygame.draw.lines(surface, _dim(color, 0.22), False, points, width + 6)
+        pygame.draw.lines(surface, _dim(color, 0.45), False, points, width + 2)
+    pygame.draw.lines(surface, color, False, points, width)
+
+
+def draw_glow_rect(surface, color, rect, glow=True):
+    """Tron-style rectangle outline with a dim halo around a bright edge."""
+    if glow:
+        pygame.draw.rect(surface, _dim(color, 0.30), rect, 3)
+    pygame.draw.rect(surface, color, rect, 1)
 
 
 def format_time(step_idx):
@@ -285,7 +315,9 @@ class Visualizer:
         """Draw the parameter panel on the left."""
         sidebar = pygame.Rect(0, 0, self.sidebar_width, self.win_h)
         pygame.draw.rect(self.buffer, PANEL_COLOR, sidebar)
-        pygame.draw.line(self.buffer, GRID_COLOR_MAJOR,
+        pygame.draw.line(self.buffer, _dim(ACCENT, 0.35),
+                         (self.sidebar_width - 2, 0), (self.sidebar_width - 2, self.win_h), 3)
+        pygame.draw.line(self.buffer, ACCENT,
                          (self.sidebar_width - 1, 0), (self.sidebar_width - 1, self.win_h))
 
         line_sm = self.font_sm.get_linesize()
@@ -293,7 +325,7 @@ class Visualizer:
 
         x = self._s(12)
         y = self._s(12)
-        draw_text(self.buffer, self.font_lg, "T1DM Simulator", x, y, TEXT_BRIGHT)
+        draw_text(self.buffer, self.font_lg, "T1DM Simulator", x, y, ACCENT)
         y += self.font_lg.get_linesize() + self._s(6)
 
         # Seed + text scale
@@ -466,11 +498,11 @@ class Visualizer:
         h = chart.height
 
         zones = [
-            (30, 54, (180, 30, 30, 20)),      # Very low — red
-            (54, 70, (200, 100, 30, 15)),      # Low — orange
-            (70, 180, (30, 100, 30, 10)),      # In range — green
-            (180, 250, (200, 160, 30, 12)),    # High — yellow
-            (250, 400, (180, 30, 30, 15)),     # Very high — red
+            (30, 54, (200, 30, 40, 22)),       # Very low — red
+            (54, 70, (220, 90, 30, 16)),       # Low — amber
+            (70, 180, (90, 200, 50, 14)),      # In range — lime (the safe Grid)
+            (180, 250, (210, 170, 30, 13)),    # High — yellow
+            (250, 400, (200, 30, 40, 16)),     # Very high — red
         ]
 
         for zone_lo, zone_hi, rgba in zones:
@@ -585,8 +617,10 @@ class Visualizer:
                 points.append((px, py))
 
             if len(points) >= 2:
-                # Draw with anti-aliased lines
-                pygame.draw.lines(self.buffer, color, False, points, 2)
+                # The BG trace is the hero — give it the fullest glow; the rest
+                # carry a lighter halo so the chart doesn't smear into mush.
+                hero = (key == 'bg_observed')
+                draw_glow_lines(self.buffer, color, points, width=2, glow=hero)
 
             # For BG curve, also draw fill below certain thresholds
             if key == 'bg_observed' and len(points) >= 2:
@@ -596,11 +630,11 @@ class Visualizer:
                     if step_j < len(data) and data[step_j] < 70:
                         px = points[j][0]
                         py = points[j][1]
-                        pygame.draw.circle(self.buffer, (255, 60, 60), (int(px), int(py)), 3)
+                        pygame.draw.circle(self.buffer, (255, 70, 90), (int(px), int(py)), 3)
                     elif step_j < len(data) and data[step_j] > 300:
                         px = points[j][0]
                         py = points[j][1]
-                        pygame.draw.circle(self.buffer, (255, 200, 40), (int(px), int(py)), 2)
+                        pygame.draw.circle(self.buffer, (255, 210, 40), (int(px), int(py)), 2)
 
     def _draw_crosshair(self, chart):
         """Draw crosshair and tooltip at mouse position."""
@@ -617,8 +651,8 @@ class Visualizer:
 
         self.hovered_step = step
 
-        # Vertical line
-        pygame.draw.line(self.buffer, (80, 80, 100), (mx, chart.y), (mx, chart.y + chart.height), 1)
+        # Vertical line — dim lime scanline
+        pygame.draw.line(self.buffer, (60, 120, 70), (mx, chart.y), (mx, chart.y + chart.height), 1)
 
         # Tooltip
         tooltip_lines = [format_day_time(step)]
@@ -646,9 +680,9 @@ class Visualizer:
         tt_y = max(chart.y, my - tt_h // 2)
 
         tt_surf = pygame.Surface((tt_w, tt_h), pygame.SRCALPHA)
-        tt_surf.fill((20, 20, 30, 220))
+        tt_surf.fill((4, 14, 12, 230))
         self.buffer.blit(tt_surf, (tt_x, tt_y))
-        pygame.draw.rect(self.buffer, GRID_COLOR_MAJOR, (tt_x, tt_y, tt_w, tt_h), 1)
+        pygame.draw.rect(self.buffer, ACCENT, (tt_x, tt_y, tt_w, tt_h), 1)
 
         for j, line in enumerate(tooltip_lines):
             color = TEXT_BRIGHT if j == 0 else TEXT_COLOR
@@ -665,13 +699,16 @@ class Visualizer:
                 frac = (val - y_min) / (y_max - y_min) if y_max != y_min else 0.5
                 frac = max(0, min(1, frac))
                 py = chart.y + chart.height * (1 - frac)
+                pygame.draw.circle(self.buffer, _dim(curve_def['color'], 0.4), (mx, int(py)), 7)
                 pygame.draw.circle(self.buffer, curve_def['color'], (mx, int(py)), 5)
-                pygame.draw.circle(self.buffer, (255, 255, 255), (mx, int(py)), 5, 1)
+                pygame.draw.circle(self.buffer, TEXT_BRIGHT, (mx, int(py)), 5, 1)
 
     def _draw_header(self):
         """Draw header bar."""
         pygame.draw.rect(self.buffer, PANEL_COLOR, (self.sidebar_width, 0, self.win_w - self.sidebar_width, self.header_height))
-        pygame.draw.line(self.buffer, GRID_COLOR_MAJOR,
+        pygame.draw.line(self.buffer, _dim(ACCENT, 0.35),
+                         (self.sidebar_width, self.header_height + 1), (self.win_w, self.header_height + 1), 3)
+        pygame.draw.line(self.buffer, ACCENT,
                          (self.sidebar_width, self.header_height), (self.win_w, self.header_height))
 
         # Current time info — vertically center font_lg in header
@@ -774,7 +811,11 @@ class Visualizer:
 
                     elif event.key == pygame.K_s:
                         fname = f"t1dm_seed{self.seed}_{int(time.time())}.png"
-                        pygame.image.save(self.buffer, fname)
+                        # convert(24) drops any per-pixel alpha the buffer may
+                        # have picked up from SRCALPHA zone blits, so the saved
+                        # PNG is always opaque (transparent regions otherwise
+                        # render white in image viewers).
+                        pygame.image.save(self.buffer.convert(24), fname)
                         print(f"Screenshot saved: {fname}")
 
                 elif event.type == pygame.MOUSEWHEEL:
@@ -800,8 +841,8 @@ class Visualizer:
                 self._draw_bg_zones(chart)
                 self._draw_grid(chart)
 
-                # Chart border
-                pygame.draw.rect(self.buffer, GRID_COLOR_MAJOR, chart, 1)
+                # Chart border — lime-glow frame around the Grid
+                draw_glow_rect(self.buffer, ACCENT, chart)
 
                 self._draw_curves(chart)
                 self._draw_crosshair(chart)
