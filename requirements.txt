@@ -1,0 +1,11 @@
+# Core simulator + visualizer
+numpy>=2.0
+pygame>=2.6
+
+# Test suite (tests/)
+pytest>=8.0
+
+# Dataset comparison + diff report tooling (scripts/, diff/)
+pandas>=2.0
+scipy>=1.11
+matplotlib>=3.8
