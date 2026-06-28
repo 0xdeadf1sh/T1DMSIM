@@ -273,7 +273,7 @@ class Visualizer:
         # Footer must hold the scrollbar; chart leaves room for X-axis time labels above
         # the footer and curve-name labels above the chart, so they never collide.
         self.footer_height = max(int(BASE_FOOTER_HEIGHT * mult), self.font_sm.get_linesize() + int(18 * mult))
-        self.time_label_height = self.font_sm.get_linesize() + 4
+        self.time_label_height = self.font_sm.get_linesize() * 2 + 6  # hour row + day row
         self.curve_label_height = self.font_sm.get_linesize() + 4
 
     def _s(self, n):
@@ -551,9 +551,19 @@ class Visualizer:
             interval_steps = 12 * 6  # 6 hours
             major_interval = STEPS_PER_DAY  # 24 hours
 
-        # Vertical grid lines (time)
+        # Vertical grid lines (time) + a two-row X axis: hour labels on the
+        # first row, the wider "Tue (Day N)" day marker on a second row below it
+        # (in the accent colour), so the day string never collides with the
+        # dense hourly ticks. Hour labels are thinned when the per-tick spacing
+        # is narrower than a label.
+        label_y = chart.y + chart.height + 2
+        day_y = label_y + self.font_sm.get_linesize()
+        hour_label_w = self.font_sm.size("00:00")[0] + self._s(8)
+        step_px = max(1.0, interval_steps * self.pixels_per_step)
+        hour_every = max(1, int(np.ceil(hour_label_w / step_px)))
+
         first_line = (start // interval_steps) * interval_steps
-        for step in range(first_line, end + 1, interval_steps):
+        for tick, step in enumerate(range(first_line, end + 1, interval_steps)):
             px = self._step_to_x(step, chart)
             if px < chart.x or px > chart.x + chart.width:
                 continue
@@ -563,14 +573,14 @@ class Visualizer:
             width = 2 if is_day else 1
             pygame.draw.line(self.buffer, color, (int(px), chart.y), (int(px), chart.y + chart.height), width)
 
-            # Time label
-            label = format_time(step)
+            if is_day or tick % hour_every == 0:
+                draw_text(self.buffer, self.font_sm, format_time(step),
+                          int(px) + 3, label_y, TEXT_DIM)
             if is_day:
                 day_num = step // STEPS_PER_DAY + 1
                 dow = (DISPLAY_START_DOW + (step // STEPS_PER_DAY)) % 7
-                label = f"{DAY_NAMES[dow]} (Day {day_num})"
-            draw_text(self.buffer, self.font_sm, label,
-                      int(px) + 3, chart.y + chart.height + 2, TEXT_DIM)
+                draw_text(self.buffer, self.font_sm, f"{DAY_NAMES[dow]} (Day {day_num})",
+                          int(px) + 3, day_y, ACCENT)
 
         # Y axis for visible curves — draw on right side of each curve's area
         # We'll draw Y labels on the far right
