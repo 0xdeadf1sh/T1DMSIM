@@ -105,14 +105,14 @@ integrates a 13-state stiff ODE every minute.
 
 | Simulated days | T1DMSIM (s) | UVA/Padova (s) | T1DMSIM ms/day | UVA/Padova ms/day | Speedup |
 |---|---|---|---|---|---|
-| 1 | 0.004 | 3.55 | 3.64 | 3550 | ×975 |
-| 3 | 0.013 | 10.81 | 4.17 | 3604 | ×865 |
-| 7 | 0.030 | 25.61 | 4.26 | 3659 | ×859 |
-| 14 | 0.061 | 51.05 | 4.38 | 3647 | ×833 |
+| 1 | 0.004 | 3.54 | 3.79 | 3541 | ×935 |
+| 3 | 0.012 | 10.83 | 4.02 | 3608 | ×897 |
+| 7 | 0.030 | 25.47 | 4.25 | 3638 | ×856 |
+| 14 | 0.062 | 50.89 | 4.41 | 3635 | ×825 |
 
-* T1DMSIM: **65783** steps/s
-* UVA/Padova: **395** ODE-minutes/s
-* End-to-end speedup at the longest horizon: **×833**
+* T1DMSIM: **65333** steps/s
+* UVA/Padova: **396** ODE-minutes/s
+* End-to-end speedup at the longest horizon: **×825**
 
 ![Speed benchmark](figures/speed_bench.png)
 

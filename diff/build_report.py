@@ -33,6 +33,7 @@ import json
 import os
 import re
 import sys
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -53,7 +54,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 from compare_all_datasets import (  # noqa: E402
     load_ohio_patients, load_shanghai_patients,
     load_azt1d_patients, load_azt1d_events,
-    regularize_bg, regularize_bg_15min,
+    regularize_bg, regularize_bg_15min, OHIO_DIR,
 )
 from simulator import T1DMSimulator  # noqa: E402
 
@@ -754,6 +755,411 @@ def fig_azt1d_events(az_stats, sim_stats, path):
 
 
 # ============================================================================
+# Unexplained-excursion analysis (§7.3)
+# ============================================================================
+# An excursion is a >= EXC_AMP mg/dL monotone swing (MAGE-style turning-point
+# detection on lightly smoothed CGM). It is "explained" if a logged meal
+# precedes a rise / a logged bolus or exercise precedes a fall; otherwise
+# "unexplained" — an unlogged event or a genuinely endogenous movement (dawn
+# phenomenon, post-hypo rebound, stress, illness, sensor artefact). The
+# simulator is held to the identical test, its meal / bolus / exercise events
+# taken as the rising edges of the corresponding factor channels.
+EXC_AMP = 40.0          # mg/dL minimum excursion amplitude
+EXC_REVERSAL = 15.0     # mg/dL turning-point confirmation threshold
+EXC_CARB_MIN = 10.0     # g minimum logged carbs to count as a meal cause
+EXC_INS_MIN = 0.5       # U minimum logged bolus to count as an insulin cause
+EXC_RISE_PRE, EXC_RISE_POST = 60.0, 15.0   # min: meal window around a rise
+EXC_FALL_PRE, EXC_FALL_POST = 90.0, 15.0   # min: bolus window around a fall
+EXC_EX_PRE, EXC_EX_POST = 60.0, 15.0       # min: exercise window around a fall
+EXC_GREEN = "#1B5E20"
+EXC_CRIMSON = "#B0143C"
+EXC_GREY = "#8a8a8a"
+
+
+def _exc_smooth(x, w=3):
+    if len(x) < w:
+        return x
+    return np.convolve(x, np.ones(w) / w, mode="same")
+
+
+def _exc_zigzag(seg, reversal):
+    """Alternating extrema [(idx, val, kind)] within a NaN-free segment."""
+    m = len(seg)
+    if m < 3:
+        return []
+    ext = []
+    hi_i = lo_i = 0
+    hi_v = lo_v = seg[0]
+    trend = 0
+    for k in range(1, m):
+        v = seg[k]
+        if v > hi_v:
+            hi_v, hi_i = v, k
+        if v < lo_v:
+            lo_v, lo_i = v, k
+        if trend >= 0 and hi_v - v >= reversal:
+            ext.append((hi_i, hi_v, "peak"))
+            trend = -1
+            lo_v, lo_i = v, k
+            hi_v, hi_i = v, k
+        elif trend <= 0 and v - lo_v >= reversal:
+            ext.append((lo_i, lo_v, "trough"))
+            trend = 1
+            hi_v, hi_i = v, k
+            lo_v, lo_i = v, k
+    return ext
+
+
+def detect_excursions(bg, amp=EXC_AMP, reversal=EXC_REVERSAL):
+    """[(onset_idx, peak_idx, kind, amplitude)] over NaN-bridged segments."""
+    n = len(bg)
+    out = []
+    i = 0
+    while i < n:
+        if np.isnan(bg[i]):
+            i += 1
+            continue
+        j = i
+        while j < n and not np.isnan(bg[j]):
+            j += 1
+        ext = _exc_zigzag(_exc_smooth(bg[i:j].astype(float)), reversal)
+        for a, b in zip(ext, ext[1:]):
+            amplitude = abs(b[1] - a[1])
+            if amplitude >= amp:
+                kind = "rise" if b[1] > a[1] else "fall"
+                out.append((i + a[0], i + b[0], kind, amplitude))
+        i = j
+    return out
+
+
+def _exc_any_in(sorted_min, lo, hi):
+    if len(sorted_min) == 0:
+        return False
+    return np.searchsorted(sorted_min, hi, "right") > \
+        np.searchsorted(sorted_min, lo, "left")
+
+
+def _exc_attribute(onset_min, kind, meals, boluses, exers):
+    if kind == "rise":
+        return _exc_any_in(meals, onset_min - EXC_RISE_PRE,
+                           onset_min + EXC_RISE_POST)
+    ok = _exc_any_in(boluses, onset_min - EXC_FALL_PRE,
+                     onset_min + EXC_FALL_POST)
+    if not ok and len(exers):
+        ok = _exc_any_in(exers, onset_min - EXC_EX_PRE,
+                         onset_min + EXC_EX_POST)
+    return ok
+
+
+def load_ohio_events():
+    """{pid: (meals[(dt,carbs)], boluses[(dt,units)], exercise[dt])}."""
+    out = defaultdict(lambda: ([], [], []))
+    if not os.path.isdir(OHIO_DIR):
+        return out
+    for fn in os.listdir(OHIO_DIR):
+        if not fn.endswith(".xml"):
+            continue
+        pid = fn.split("-")[0]
+        try:
+            root = ET.parse(os.path.join(OHIO_DIR, fn)).getroot()
+        except ET.ParseError:
+            continue
+        m, b, e = out[pid]
+        for tag, lst in (("meal", m), ("bolus", b), ("exercise", e)):
+            for node in root.iter(tag):
+                for ev in node.iter("event"):
+                    ts = ev.get("ts") or ev.get("ts_begin")
+                    if not ts:
+                        continue
+                    try:
+                        dt = datetime.strptime(ts, "%d-%m-%Y %H:%M:%S")
+                    except ValueError:
+                        continue
+                    if tag == "meal":
+                        c = float(ev.get("carbs") or 0)
+                        if c >= EXC_CARB_MIN:
+                            lst.append((dt, c))
+                    elif tag == "bolus":
+                        d = float(ev.get("dose") or 0)
+                        if d >= EXC_INS_MIN:
+                            lst.append((dt, d))
+                    else:
+                        lst.append(dt)
+        out[pid] = (m, b, e)
+    return out
+
+
+def azt1d_event_lists(df):
+    """(meals, boluses, exercise) lists from one AZT1D event DataFrame."""
+    meals, boluses = [], []
+    t = df["EventDateTime"]
+    carb = df.get("CarbSize")
+    food = df.get("FoodDelivered")
+    bol = df.get("TotalBolusInsulinDelivered")
+    for i in range(len(df)):
+        ts = t.iloc[i]
+        if ts is None or (isinstance(ts, float) and np.isnan(ts)):
+            continue
+        ts = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+        c = 0.0
+        if carb is not None and not np.isnan(carb.iloc[i]):
+            c = float(carb.iloc[i])
+        elif food is not None and not np.isnan(food.iloc[i]):
+            c = float(food.iloc[i])
+        if c >= EXC_CARB_MIN:
+            meals.append((ts, c))
+        if bol is not None and not np.isnan(bol.iloc[i]) and bol.iloc[i] >= EXC_INS_MIN:
+            boluses.append((ts, float(bol.iloc[i])))
+    return meals, boluses, []
+
+
+def _exc_onsets(channel, eps, refractory=4):
+    """Rising-edge onsets of a simulator factor channel."""
+    on = []
+    active = False
+    last = -9999
+    for k, v in enumerate(channel):
+        if v >= eps:
+            if not active and k - last >= refractory:
+                on.append(k)
+                last = k
+            active = True
+        else:
+            active = False
+    return on
+
+
+def _exc_to_minutes(times):
+    base = times[0]
+    return np.array([(t - base).total_seconds() / 60.0 for t in times])
+
+
+def _exc_process_record(times, bg, meals, boluses, exers):
+    tmin = _exc_to_minutes(times)
+    meal_min = np.array(sorted((m[0] - times[0]).total_seconds() / 60.0
+                               for m in meals))
+    bol_min = np.array(sorted((b[0] - times[0]).total_seconds() / 60.0
+                              for b in boluses))
+    ex_min = np.array(sorted((e - times[0]).total_seconds() / 60.0
+                             for e in exers))
+    recs = []
+    for onset_i, peak_i, kind, amp in detect_excursions(bg):
+        om = tmin[onset_i]
+        recs.append({
+            "onset_i": onset_i, "peak_i": peak_i, "kind": kind, "amp": amp,
+            "explained": _exc_attribute(om, kind, meal_min, bol_min, ex_min),
+            "hour": times[onset_i].hour + times[onset_i].minute / 60.0,
+        })
+    return recs
+
+
+def _exc_censored_dbg_sd(bg, excs, step_min):
+    mask = np.zeros(len(bg), dtype=bool)
+    for e in excs:
+        if not e["explained"]:
+            mask[e["onset_i"]:e["peak_i"] + 1] = True
+    d = np.diff(bg)
+    keep = ~np.isnan(d)
+    full = float(np.std(d[keep])) if keep.any() else float("nan")
+    cok = keep & ~mask[:-1] & ~mask[1:]
+    cens = float(np.std(d[cok])) if cok.any() else float("nan")
+    return full, cens
+
+
+def unexplained_cohort_real(name, cgm_items, events_fn, step_min=5):
+    excs_all = []
+    records = []
+    for rid, rows in cgm_items:
+        t, bg = regularize_bg(rows)
+        if len(bg) < 200:
+            continue
+        meals, boluses, exers = events_fn(rid)
+        excs = _exc_process_record(t, bg, meals, boluses, exers)
+        for e in excs:
+            e["rid"] = str(rid)
+        excs_all.extend(excs)
+        records.append((str(rid), t, bg, meals, boluses, excs,
+                        len(bg) * step_min / 1440.0))
+    return {"name": name, "excs": excs_all, "records": records,
+            "step_min": step_min}
+
+
+def unexplained_cohort_sim(raw_runs):
+    """Reuse assemble_sim's raw runs — the simulator is not re-exercised."""
+    excs_all = []
+    records = []
+    base = datetime(2024, 1, 1)
+    for seed, d in raw_runs:
+        bg = np.asarray(d["bg_observed"], dtype=float)
+        carb = np.asarray(d["total_carb"], dtype=float)
+        bol = np.asarray(d["bolus_insulin"], dtype=float)
+        exe = np.asarray(d.get("total_exercise", []), dtype=float)
+        n = len(bg)
+        times = [base + timedelta(minutes=5 * i) for i in range(n)]
+        meals = [(times[k], 0.0) for k in _exc_onsets(carb, 0.05)]
+        boluses = [(times[k], 0.0) for k in _exc_onsets(bol, 0.005)]
+        exers = [times[k] for k in _exc_onsets(exe, 0.05)] if len(exe) else []
+        excs = _exc_process_record(times, bg, meals, boluses, exers)
+        for e in excs:
+            e["rid"] = f"seed{seed}"
+        excs_all.extend(excs)
+        records.append((f"seed{seed}", times, bg, meals, boluses, excs,
+                        n * 5 / 1440.0))
+    return {"name": "T1DMSIM", "excs": excs_all, "records": records,
+            "step_min": 5}
+
+
+def unexplained_summarize(coh):
+    excs = coh["excs"]
+    rises = [e for e in excs if e["kind"] == "rise"]
+    falls = [e for e in excs if e["kind"] == "fall"]
+    total_days = sum(r[6] for r in coh["records"])
+
+    def frac_un(lst):
+        return 100.0 * np.mean([not e["explained"] for e in lst]) if lst else 0.0
+
+    def load(expl):
+        v = [e["amp"] for e in excs if e["explained"] == expl]
+        return sum(v) / total_days if total_days else 0.0
+
+    def rate(expl):
+        v = [e for e in excs if e["explained"] == expl]
+        return len(v) / total_days if total_days else 0.0
+
+    def amp(expl):
+        v = [e["amp"] for e in excs if e["explained"] == expl]
+        return float(np.median(v)) if v else float("nan")
+
+    full_sd, cens_sd = [], []
+    for (_rid, _t, bg, _m, _b, excs_r, _d) in coh["records"]:
+        f, c = _exc_censored_dbg_sd(bg, excs_r, coh["step_min"])
+        if not np.isnan(f):
+            full_sd.append(f)
+        if not np.isnan(c):
+            cens_sd.append(c)
+    return {
+        "name": coh["name"], "n_exc": len(excs), "n_rise": len(rises),
+        "n_fall": len(falls), "days": float(total_days),
+        "rise_unexpl_pct": frac_un(rises), "fall_unexpl_pct": frac_un(falls),
+        "all_unexpl_pct": frac_un(excs),
+        "rate_expl": rate(True), "rate_unexpl": rate(False),
+        "load_expl": load(True), "load_unexpl": load(False),
+        "amp_expl": amp(True), "amp_unexpl": amp(False),
+        "dbg_sd_full": float(np.mean(full_sd)) if full_sd else float("nan"),
+        "dbg_sd_cens": float(np.mean(cens_sd)) if cens_sd else float("nan"),
+    }
+
+
+def fig_unexplained_summary(summ, real_pool, path):
+    fig, ax = plt.subplots(1, 3, figsize=(15, 4.2))
+    names = [s["name"] for s in summ]
+    x = np.arange(len(names))
+
+    w = 0.38
+    ax[0].bar(x - w / 2, [s["rise_unexpl_pct"] for s in summ], w,
+              label="rises (no logged meal)", color="#c44e52")
+    ax[0].bar(x + w / 2, [s["fall_unexpl_pct"] for s in summ], w,
+              label="falls (no logged insulin/exercise)", color="#4c72b0")
+    ax[0].set_xticks(x)
+    ax[0].set_xticklabels(names)
+    ax[0].set_ylabel("% of excursions unexplained")
+    ax[0].set_title("(a) Unexplained fraction by direction")
+    ax[0].legend(fontsize=8, frameon=False)
+    ax[0].grid(axis="y", alpha=0.3)
+
+    for label, excs, days, col in real_pool:
+        un = [e["hour"] for e in excs if not e["explained"]]
+        h, edges = np.histogram(un, bins=np.arange(0, 25, 2))
+        centers = (edges[:-1] + edges[1:]) / 2
+        ax[1].plot(centers, h / days, marker="o", ms=3, label=label, color=col)
+    ax[1].set_xlabel("hour of day")
+    ax[1].set_ylabel("unexplained excursions / day")
+    ax[1].set_title("(b) When unexplained excursions occur")
+    ax[1].set_xticks(range(0, 25, 4))
+    ax[1].legend(fontsize=8, frameon=False)
+    ax[1].grid(alpha=0.3)
+
+    le = [s["load_expl"] for s in summ]
+    lu = [s["load_unexpl"] for s in summ]
+    ax[2].bar(x, le, 0.55, label="explained", color="#5a5a5a")
+    ax[2].bar(x, lu, 0.55, bottom=le, label="unexplained",
+              color=EXC_CRIMSON, hatch="//", edgecolor="white")
+    ax[2].set_xticks(x)
+    ax[2].set_xticklabels(names)
+    ax[2].set_ylabel("excursion load (Σ amplitude, mg/dL/day)")
+    ax[2].set_title("(c) Variability load: explained vs unexplained")
+    ax[2].legend(fontsize=8, frameon=False)
+    ax[2].grid(axis="y", alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+
+
+def fig_unexplained_gallery(real_cohorts, path):
+    from matplotlib.patches import Patch
+    import matplotlib.dates as mdates
+    picks = []
+    for coh in real_cohorts:
+        cands = [(rec, e) for rec in coh["records"] for e in rec[5]
+                 if not e["explained"] and e["amp"] >= 55]
+        cands.sort(key=lambda ce: -ce[1]["amp"])
+        seen = set()
+        for rec, e in cands:
+            if rec[0] in seen:
+                continue
+            seen.add(rec[0])
+            picks.append((coh["name"], rec, e))
+            if len(seen) >= 3:
+                break
+    picks = picks[:6]
+
+    fig, axes = plt.subplots(3, 2, figsize=(13, 10))
+    for ax, (cname, rec, e) in zip(axes.ravel(), picks):
+        rid, t, bg, meals, boluses, excs, _days = rec
+        c = (e["onset_i"] + e["peak_i"]) // 2
+        half = int(8 * 60 / 5)
+        lo, hi = max(0, c - half), min(len(bg), c + half)
+        tt = t[lo:hi]
+        ax.plot(tt, bg[lo:hi], color="#222", lw=1.1, zorder=3)
+        ax.axhspan(70, 180, color="#2ca02c", alpha=0.07, zorder=0)
+        for ee in excs:
+            if ee["peak_i"] < lo or ee["onset_i"] > hi:
+                continue
+            a, b = max(lo, ee["onset_i"]), min(hi - 1, ee["peak_i"])
+            col = EXC_CRIMSON if not ee["explained"] else EXC_GREY
+            ax.axvspan(t[a], t[b], color=col,
+                       alpha=0.22 if not ee["explained"] else 0.12, zorder=1)
+        t0, t1 = tt[0], tt[-1]
+        for (mt, _c) in meals:
+            if t0 <= mt <= t1:
+                ax.plot(mt, 30, marker="^", color=EXC_GREEN, ms=7, zorder=4)
+        for (bt, _u) in boluses:
+            if t0 <= bt <= t1:
+                ax.plot(bt, 30, marker="v", color="#1f5fb0", ms=7, zorder=4)
+        ax.set_title(f"{cname} · {rid} · unexplained "
+                     f"{e['kind']} {e['amp']:.0f} mg/dL", fontsize=9)
+        ax.set_ylim(20, 400)
+        ax.tick_params(labelsize=7)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    legend = [
+        Patch(facecolor=EXC_CRIMSON, alpha=0.3, label="unexplained excursion"),
+        Patch(facecolor=EXC_GREY, alpha=0.2, label="explained excursion"),
+        plt.Line2D([], [], marker="^", color=EXC_GREEN, ls="",
+                   label="logged meal"),
+        plt.Line2D([], [], marker="v", color="#1f5fb0", ls="",
+                   label="logged bolus"),
+    ]
+    fig.legend(handles=legend, loc="lower center", ncol=4, frameon=False,
+               fontsize=9, bbox_to_anchor=(0.5, -0.01))
+    fig.suptitle("Unexplained excursions in real CGM (no logged meal before a "
+                 "rise / no logged insulin before a fall)", fontsize=11)
+    fig.tight_layout(rect=(0, 0.03, 1, 0.97))
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ============================================================================
 # Distribution distance metrics
 # ============================================================================
 def distribution_distances(a, b, bins=None):
@@ -1003,7 +1409,7 @@ def fig_risk_indices(cohorts, path):
             vals = [p[key] for p in cohorts[n]["per"]
                     if key in p and not np.isnan(p[key])]
             data.append(vals)
-        bp = ax.boxplot(data, labels=ORDER, patch_artist=True, widths=0.55,
+        bp = ax.boxplot(data, tick_labels=ORDER, patch_artist=True, widths=0.55,
                         medianprops=dict(color="black", lw=2))
         for patch, n in zip(bp["boxes"], ORDER):
             patch.set_facecolor(COL[n])
@@ -1044,7 +1450,7 @@ def fig_episode_durations(cohorts, path):
     for ax, key, title in [(axes[0], "hypo_durs", "Hypo <70 mg/dL"),
                            (axes[1], "hyper_durs", "Hyper >180 mg/dL")]:
         data = [cohorts[n][key] for n in ORDER]
-        bp = ax.boxplot(data, labels=ORDER, patch_artist=True, widths=0.55,
+        bp = ax.boxplot(data, tick_labels=ORDER, patch_artist=True, widths=0.55,
                         medianprops=dict(color="black", lw=2),
                         flierprops=dict(marker=".", alpha=0.4, markersize=3))
         for patch, n in zip(bp["boxes"], ORDER):
@@ -1074,7 +1480,7 @@ def fig_variability_metrics(cohorts, path):
         for n in ORDER:
             data.append([p[key] for p in cohorts[n]["per"]
                          if key in p and not np.isnan(p[key])])
-        bp = ax.boxplot(data, labels=ORDER, patch_artist=True, widths=0.55,
+        bp = ax.boxplot(data, tick_labels=ORDER, patch_artist=True, widths=0.55,
                         medianprops=dict(color="black", lw=2))
         for patch, n in zip(bp["boxes"], ORDER):
             patch.set_facecolor(COL[n])
@@ -1138,7 +1544,7 @@ def fig_qq(cohorts, path):
 def fig_recovery(cohorts, path):
     fig, ax = plt.subplots(figsize=(10, 5.5))
     data = [cohorts[n]["recov_times"] for n in ORDER]
-    bp = ax.boxplot(data, labels=ORDER, patch_artist=True, widths=0.55,
+    bp = ax.boxplot(data, tick_labels=ORDER, patch_artist=True, widths=0.55,
                     medianprops=dict(color="black", lw=2),
                     flierprops=dict(marker=".", alpha=0.4, markersize=3))
     for patch, n in zip(bp["boxes"], ORDER):
@@ -1486,7 +1892,7 @@ simulator's pooled BG distribution is
 
 def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
                     pooled_risk, cohort_summaries, recov_summaries,
-                    az_event_stats, sim_event_stats, path):
+                    az_event_stats, sim_event_stats, unexpl_stats, path):
     """Template the full markdown report from computed stats.
 
     Tables are filled programmatically from the same numbers that go into
@@ -1571,6 +1977,58 @@ def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
                 f"{r['p75']:.0f} | {r['p90']:.0f} | {r['p99']:.0f} | {r['max']:.0f} |")
 
     rec_table = "\n".join(rec_row(x) for x in ORDER)
+
+    # §7.3 unexplained-excursion table + neutral decomposition prose
+    ueO, ueA, ueM = unexpl_stats["Ohio"], unexpl_stats["AZT1D"], unexpl_stats["Sim"]
+    real_load_un = (ueO["load_unexpl"] + ueA["load_unexpl"]) / 2
+    real_all_un = (ueO["all_unexpl_pct"] + ueA["all_unexpl_pct"]) / 2
+
+    def _uerow(label, key, fmt="{:.1f}"):
+        return (f"| {label} | {fmt.format(ueO[key])} | "
+                f"{fmt.format(ueA[key])} | {fmt.format(ueM[key])} |")
+
+    unexpl_section = f"""A fraction of CGM excursions (≥ {EXC_AMP:.0f} mg/dL monotone swings, MAGE-style
+turning-point detection) carry no proximate logged cause: a rise with no meal
+(≥ {EXC_CARB_MIN:.0f} g) logged within [−{EXC_RISE_PRE:.0f}, +{EXC_RISE_POST:.0f}] min of onset, or a fall
+with no bolus (≥ {EXC_INS_MIN:.1f} U) or exercise logged within
+[−{EXC_FALL_PRE:.0f}, +{EXC_FALL_POST:.0f}] min. This counts both unlogged events and genuinely
+endogenous movements (dawn phenomenon, post-hypo rebound, stress, illness,
+sensor artefact). ShanghaiT1DM is omitted — its dietary column is almost
+entirely "data not available". The simulator is held to the identical test,
+its meal / bolus / exercise events taken as the rising edges of the
+corresponding factor channels.
+
+![Unexplained-excursion summary](figures/unexplained_summary.png)
+
+![Unexplained excursions in real CGM](figures/unexplained_gallery.png)
+
+| Quantity | OhioT1DM | AZT1D | T1DMSIM |
+|---|---:|---:|---:|
+{_uerow("Excursions detected", "n_exc", "{:.0f}")}
+{_uerow("&nbsp;&nbsp;rises unexplained (%)", "rise_unexpl_pct")}
+{_uerow("&nbsp;&nbsp;falls unexplained (%)", "fall_unexpl_pct")}
+{_uerow("&nbsp;&nbsp;all unexplained (%)", "all_unexpl_pct")}
+{_uerow("Explained load (mg/dL/day)", "load_expl", "{:.0f}")}
+{_uerow("Unexplained load (mg/dL/day)", "load_unexpl", "{:.0f}")}
+{_uerow("Median amplitude, explained (mg/dL)", "amp_expl", "{:.0f}")}
+{_uerow("Median amplitude, unexplained (mg/dL)", "amp_unexpl", "{:.0f}")}
+{_uerow("Δ-BG SD, full trace (mg/dL)", "dbg_sd_full", "{:.2f}")}
+{_uerow("Δ-BG SD, unexplained censored (mg/dL)", "dbg_sd_cens", "{:.2f}")}
+
+Across the two real cohorts with complete logs, roughly {real_all_un:.0f}% of
+excursions carry no proximate logged cause (OhioT1DM {ueO['all_unexpl_pct']:.1f}%,
+AZT1D {ueA['all_unexpl_pct']:.1f}%); rises are more often unexplained than falls,
+and the asymmetry is starkest in the closed-loop AID cohort (AZT1D
+{ueA['rise_unexpl_pct']:.0f}% of rises vs {ueA['fall_unexpl_pct']:.0f}% of falls),
+where the pump logs insulin automatically while meals stay user-announced. The
+simulator's unexplained fraction is {ueM['all_unexpl_pct']:.1f}%. Splitting the
+per-day excursion load into explained and unexplained components, the
+simulator's unexplained load ({ueM['load_unexpl']:.0f} mg/dL/day) sits near the
+real cohorts ({real_load_un:.0f}); its per-excursion amplitude runs larger in
+both buckets (explained {ueM['amp_expl']:.0f} vs {ueO['amp_expl']:.0f}/{ueA['amp_expl']:.0f},
+unexplained {ueM['amp_unexpl']:.0f} vs {ueO['amp_unexpl']:.0f}/{ueA['amp_unexpl']:.0f}), and the
+step-to-step Δ-BG SD is essentially unchanged when unexplained-excursion
+segments are censored."""
 
     # Synthesis tables — produce neutral side-by-side rows with Δ columns.
     def syn_row(label, sim_val, ohio_val, shang_val, az_val, fmt=".1f", unit=""):
@@ -1878,6 +2336,10 @@ Time from the first sub-70 sample to the next ≥ 80 sample:
 |---|---:|---:|---:|---:|---:|---:|
 {rec_table}
 
+### 7.3 Unexplained excursions
+
+{unexpl_section}
+
 ---
 
 ## 8. Per-record (per-patient) heterogeneity
@@ -2080,6 +2542,30 @@ def main():
     az_event_stats = azt1d_event_summary(az_events)
     sim_event_stats = sim_event_summary(sim_raw)
 
+    # Unexplained-excursion analysis (§7.3) — reuse the already-loaded CGM and
+    # event logs plus the sim raw runs (the simulator is not exercised again).
+    print("Unexplained-excursion analysis…")
+    ohio_ev = load_ohio_events()
+    az_lists = {k: azt1d_event_lists(v) for k, v in az_events.items()}
+    u_ohio = unexplained_cohort_real(
+        "OhioT1DM", sorted(ohio_p.items()),
+        lambda pid: ohio_ev.get(pid, ([], [], [])))
+    u_az = unexplained_cohort_real(
+        "AZT1D", sorted(az_p.items()),
+        lambda sid: az_lists.get(sid, ([], [], [])))
+    u_sim = unexplained_cohort_sim(sim_raw)
+    unexpl_stats = {
+        "Ohio": unexplained_summarize(u_ohio),
+        "AZT1D": unexplained_summarize(u_az),
+        "Sim": unexplained_summarize(u_sim),
+        "params": {"amp_mg_dl": EXC_AMP, "reversal_mg_dl": EXC_REVERSAL,
+                   "carb_min_g": EXC_CARB_MIN, "ins_min_U": EXC_INS_MIN},
+    }
+    real_excs = u_ohio["excs"] + u_az["excs"]
+    real_days = (sum(r[6] for r in u_ohio["records"])
+                 + sum(r[6] for r in u_az["records"]))
+    sim_days = sum(r[6] for r in u_sim["records"])
+
     # Distribution distances — all sim/real pairs + every real/real baseline.
     distances = {}
     bins = np.arange(40, 401, 5)
@@ -2127,6 +2613,13 @@ def main():
     fig_class_balance(cohorts, os.path.join(FIGS, "class_balance.png"))
     fig_azt1d_events(az_event_stats, sim_event_stats,
                      os.path.join(FIGS, "azt1d_event_panel.png"))
+    fig_unexplained_summary(
+        [unexpl_stats["Ohio"], unexpl_stats["AZT1D"], unexpl_stats["Sim"]],
+        [("Ohio+AZT1D (real)", real_excs, real_days, "#1f77b4"),
+         ("T1DMSIM", u_sim["excs"], sim_days, COL["Sim"])],
+        os.path.join(FIGS, "unexplained_summary.png"))
+    fig_unexplained_gallery([u_ohio, u_az],
+                            os.path.join(FIGS, "unexplained_gallery.png"))
 
     # Recovery-time summary per cohort
     recov_summaries = {n: recovery_summary(cohorts[n]["recov_times"]) for n in ORDER}
@@ -2156,6 +2649,7 @@ def main():
         "distances": distances,
         "azt1d_events": az_event_stats,
         "sim_events": sim_event_stats,
+        "unexplained_excursions": unexpl_stats,
     }
     out = os.path.join(DIFF, "stats.json")
     with open(out, "w") as f:
@@ -2166,7 +2660,7 @@ def main():
     report_path = os.path.join(DIFF, "README.md")
     write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
                     pooled_risk, cohort_summaries, recov_summaries,
-                    az_event_stats, sim_event_stats,
+                    az_event_stats, sim_event_stats, unexpl_stats,
                     report_path)
     print(f"Wrote {report_path}")
     print(f"Figures in {FIGS}")

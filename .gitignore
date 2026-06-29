@@ -17,3 +17,6 @@ env/
 
 # Real-world datasets (not redistributable)
 datasets/
+
+# Ignore the paper for now
+paper/
