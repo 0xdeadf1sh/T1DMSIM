@@ -43,8 +43,7 @@ The ultimate goal is to provide a near-unlimited stream of synthetic factor curv
 ## Pregenerated Dataset
 
 There is a pregenerated dataset released to the public domain that is available for download [here](https://drive.google.com/drive/folders/1UhxoJNiUSOwUGybmdxbyspKQYYN9UqOm?usp=sharing).
-
-The pool is **100 million** independent simulated T1D patient trajectories, each 55.5 h of post-warmup CGM at 5-min cadence (666 steps; the first 48 h of warmup are discarded before caching). Stored as raw `.npy` memmaps — 8 per-step channels + `icr`, uncompressed.
+It contains **100 million** independent simulated T1D patient trajectories, each 55.5 h of post-warmup CGM at 5-min cadence (666 steps; the first 48 h of warmup are discarded before caching). Stored as raw `.npy` memmaps — 8 per-step channels + `icr`, uncompressed.
 
 | Quantity | Value | Basis |
 |---|---|---|
