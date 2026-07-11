@@ -77,7 +77,7 @@ Visualizer key bindings are documented in the module docstring at the top of `vi
 
 - Use multiple seeds (0-20) over 72-hour runs to verify BG distributions
 - Check TIR (70-180), TBR (<70), TAR (>180), severe-low (<55), mean BG across seeds
-- Population averages should track the pooled real-CGM cohort (OhioT1DM + ShanghaiT1DM) within the small-sample noise of those datasets (n = 6 + 13). Don't pin to a specific TBR/TIR/TAR triple — match the *shape* of the pooled distribution (central moments, percentiles, episode counts) as reported in `reports/REPORT.md`. Mean BG ≈ 160–165 mg/dL, GMI ≈ 7.2.
+- Population averages should track the pooled real-CGM cohort (OhioT1DM + ShanghaiT1DM) within the small-sample noise of those datasets (n = 6 + 12). Don't pin to a specific TBR/TIR/TAR triple — match the *shape* of the pooled distribution (central moments, percentiles, episode counts) as reported in `reports/REPORT.md`. Mean BG ≈ 160–165 mg/dL, GMI ≈ 7.2.
 - **Hypo episode shape (critical clinical invariant — non-negotiable):**
   - Severe-hypo (<55) episodes: max duration ≤ 1h, mean ≤ 0.15h, **zero** > 2h
   - Mild hypo (55-70) episodes: median ~0.75h, p90 ~1.4h, max ~6-7h (rare outliers)

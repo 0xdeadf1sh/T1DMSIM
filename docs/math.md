@@ -53,7 +53,7 @@ Basal (long-acting): Bateman one-compartment PK curve from `basal_curve()` —
 
     f(t) = exp(-BASAL_KE_PER_HOUR · t) − exp(-BASAL_KA_PER_HOUR · t)
 
-modelling subcutaneous depot absorption (rate `ka`) followed by first-order elimination (rate `ke`). With the default `ka = 0.6/h` and `ke = 0.09/h` the curve rises smoothly from zero, peaks at `tmax = ln(ka/ke)/(ka − ke) ≈ 3.7 h` post-injection, and then decays with a ~7.7 h elimination half-life, matching the long-acting glargine-like profile. There is no flat plateau and no slope discontinuity. A smootherstep window over the last `BASAL_TAIL_CLIP_HOURS` tapers the late residual to zero so consecutive daily doses join without a tail-step. Normalized so the area equals the dose.
+modelling subcutaneous depot absorption (rate `ka`) followed by first-order elimination (rate `ke`). With the default `ka = 0.30/h` and `ke = 0.07/h` the curve rises smoothly from zero, peaks at `tmax = ln(ka/ke)/(ka − ke) ≈ 6.3 h` post-injection, and then decays with a ~9.9 h elimination half-life — a broad-peaked long-acting profile sitting between the glargine and degludec time-action curves. There is no flat plateau and no slope discontinuity. A smootherstep window over the last `BASAL_TAIL_CLIP_HOURS` tapers the late residual to zero so consecutive daily doses join without a tail-step. Normalized so the area equals the dose.
 
 ### Injection site quality (lipohypertrophy)
 

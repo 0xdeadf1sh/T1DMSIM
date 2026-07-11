@@ -57,7 +57,7 @@ It contains **100 million** independent simulated T1D patient trajectories, each
 | **Carbs eaten** | **≈ 39,000 tonnes** (3.90×10¹⁰ g) | est. — 390 g/patient, 168.7 g/day |
 | **Meals eaten** | **≈ 732 million** | est. — 7.3/patient, 3.16/day |
 | **Insulin delivered** | **≈ 9.87 billion U** (~98,700 L of U-100) | est. — 98.7 U/patient, 42.7 U/day |
-| └ basal : bolus split | ≈ 44% : 56% | est. (matches sim's ~55/45 design note) |
+| └ basal : bolus split | ≈ 62% : 38% | est. (basal-majority, as designed) |
 | Boluses | ~one per meal (~3/day) by construction | detector undercounts (overlapping PK tails) |
 | Exercise | active 5.2% of time; ~0.96 sessions/patient | est. |
 | BG mean | 157 mg/dL | est. |
@@ -272,7 +272,7 @@ All parameters are uppercase constants at the top of `simulator.py`. They are gr
 
 ## Comparison Against Real-World Datasets
 
-The simulator output is compared against three non-redistributable real CGM corpora — **OhioT1DM** (6 US adults, 5-min Dexcom CGM), **ShanghaiT1DM** (13 patients / 16 records, 15-min cadence, mixed CSII + MDI), and **AZT1D** (25 US adults on Tandem t:slim X2 Control-IQ AID systems, 5-min Dexcom G6 plus full pump event log: basal rate, bolus type, correction-vs-meal split, carb size, device mode) — on distributional moments, KS / Wasserstein / JS distances, LBGI / HBGI, MAGE / CONGA / MODD / SampEn, autocorrelation across nine lags, diurnal envelopes, weekday × hour heatmaps, episode counts and durations, hypo recovery time, per-record TIR / TBR scatter, and (AZT1D only) a head-to-head insulin / carb behaviour panel.
+The simulator output is compared against three non-redistributable real CGM corpora — **OhioT1DM** (6 US adults, 5-min Medtronic Enlite CGM), **ShanghaiT1DM** (12 patients / 16 records, 15-min cadence, mixed CSII + MDI), and **AZT1D** (25 US adults on Tandem t:slim X2 Control-IQ AID systems, 5-min Dexcom G6 plus full pump event log: basal rate, bolus type, correction-vs-meal split, carb size, device mode) — on distributional moments, KS / Wasserstein / JS distances, LBGI / HBGI, MAGE / CONGA / MODD / SampEn, autocorrelation across nine lags, diurnal envelopes, weekday × hour heatmaps, episode counts and durations, hypo recovery time, per-record TIR / TBR scatter, and (AZT1D only) a head-to-head insulin / carb behaviour panel.
 
 The full report — tables, figures, and methodology — lives at [`diff/README.md`](diff/README.md). All three datasets are gitignored and live under `datasets/` (subject to data-use agreements). Reproduce with:
 
@@ -315,7 +315,7 @@ The comparison report in [`diff/README.md`](diff/README.md) benchmarks the simul
 
 - **OhioT1DM** — Marling, C., and Bunescu, R. *The OhioT1DM Dataset for Blood Glucose Level Prediction: Update 2020.* Proceedings of the 5th International Workshop on Knowledge Discovery in Healthcare Data (KDH @ ECAI 2020), CEUR Workshop Proceedings, vol. 2675, pp. 71–74. Distributed under a data-use agreement via Ohio University; please request access through the maintainers' instructions before redistributing.
 
-- **ShanghaiT1DM** — Zhao, Q., Zhu, J., Shen, X., Lin, C., Zhang, Y., Liang, Y., Cao, B., Li, J., Liu, X., Rao, W., and Wang, C. *Chinese Diabetes Datasets for Data-Driven Machine Learning.* Scientific Data 10, 35 (2023). doi:10.1038/s41597-023-01940-7. The T1DM portion contains 13 patients / 16 records of paired CGM, insulin, and dietary data.
+- **ShanghaiT1DM** — Zhao, Q., Zhu, J., Shen, X., Lin, C., Zhang, Y., Liang, Y., Cao, B., Li, J., Liu, X., Rao, W., and Wang, C. *Chinese Diabetes Datasets for Data-Driven Machine Learning.* Scientific Data 10, 35 (2023). doi:10.1038/s41597-023-01940-7. The T1DM portion contains 12 patients / 16 records of paired CGM, insulin, and dietary data.
 
 - **AZT1D** — Khamesian, S., Arefeen, A., Thompson, B. M., Grando, M. A., and Ghasemzadeh, H. *AZT1D: A Real-World Dataset for Type 1 Diabetes.* Dataset of 25 individuals with T1D on Automated Insulin Delivery (Tandem t:slim X2 Control-IQ) collected at Mayo Clinic Arizona over 6–8 weeks per patient, including CGM, basal/bolus insulin (with correction-specific amounts and bolus types), carbohydrate intake, and device-mode annotations (regular / sleep / exercise). See the accompanying manuscript (Mayo Clinic / Arizona State University, 2025) for full study design and IRB protocol (#23-003065).
 
