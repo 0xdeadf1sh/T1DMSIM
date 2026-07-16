@@ -58,6 +58,12 @@ def isolated_biology(monkeypatch):
     monkeypatch.setattr(simulator, 'POSTPRANDIAL_IR_PENALTY_FACTOR', 0.0)
     monkeypatch.setattr(simulator, 'SITE_QUALITY_SIGMA_BASE', 0.0)
     monkeypatch.setattr(simulator, 'GLUCOTOX_MAX_IS_INCREASE', 0.0)
+    # Glucose-effectiveness / OU equilibrium is an always-on mean-reversion pull
+    # toward a stochastic equilibrium — orthogonal to the dose math under test
+    # here, and it would drag BG toward the anchor regardless of meal/bolus
+    # balance. GE_RATE=0 with GE_RATE_MIN=0 makes each patient's Sg exactly 0.
+    monkeypatch.setattr(simulator, 'GE_RATE', 0.0)
+    monkeypatch.setattr(simulator, 'GE_RATE_MIN', 0.0)
     monkeypatch.setattr(simulator, 'CARB_ABSORPTION_NOISE_SIGMA', 0.0)
     monkeypatch.setattr(simulator, 'INSULIN_ABSORPTION_NOISE_SIGMA', 0.0)
     # Circadian HGO would skew the 8h measurement window (which straddles the

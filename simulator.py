@@ -579,15 +579,18 @@ SEVERE_HYPO_GLUCAGON_RATE = 2.0  # Extra mg/dL per step at severity=1.0
 # GE_RATE is the population-mean per-step reversion fraction; per-patient Sg is
 # sampled lognormally around it (real Sg varies ~2-3x across individuals) so
 # heterogeneity is preserved. See ge_setpoint_for_hour for the diurnal target.
-GE_RATE = 0.030            # [GE-FIX] population-mean per-step glucose-effectiveness reversion (co-calibrated with BG_SCALE_FACTOR and the diurnal setpoint below; a stronger pull over-peaks the distribution — IQR/kurtosis drift off Ohio — so 0.030 keeps the spread realistic)
-GE_SETPOINT_NIGHT = 148.0  # [GE-FIX] overnight equilibrium the Sg pull targets
-GE_SETPOINT_DAY = 156.0    # [GE-FIX] daytime (waking-hours) equilibrium. NOTE: because the Sg pull dominates the daytime mean, raising this lifts the afternoon but injects a stronger daily-periodic component into the mid-lag ACF — a direct trade. With the unbolused afternoon snack added (real forcing that Sg partly clears), a modest swing is the balance point; the afternoon elevation is ultimately Sg-setpoint-limited, not meal-limited.
+GE_RATE = 0.060            # [GE-OU] strong Sg so BG tracks the fast-wandering equilibrium (short correlation time -> acf(8h)~0)
+GE_EQ_ANCHOR_MEAN = 132.0  # [GE-OU] population-mean equilibrium anchor (lands pooled mean ~155 after the IR-tied per-patient offset)
+GE_EQ_ANCHOR_SIGMA = 12.0  # [GE-OU] between-patient spread of the anchor (per-patient mean heterogeneity)
+GE_EQ_SIGMA = 70.0         # [GE-OU] stationary std of the equilibrium wandering; large so BG spread stays ~Ohio-wide despite the strong Sg pull
+GE_EQ_TAU_HOURS = 2.0      # [GE-OU] OU timescale (2h): decorrelates well before 8h so no long-lag memory
+GE_EQ_DAY_BOOST = 10.0     # [GE-OU] diurnal lift of the anchor over waking hours
 GE_DAY_START_HOUR = 7.0    # setpoint ramps up around wake
 GE_DAY_END_HOUR = 22.0     # ramps back down in the late evening
 GE_DAY_RAMP_HOURS = 3.0    # smootherstep ramp width for the day/night setpoint transitions
 GE_REL_SIGMA = 0.30        # per-patient lognormal spread of Sg around GE_RATE (~2x inter-individual range)
 GE_RATE_MIN = 0.004        # floor so no patient is a pure (undamped) integrator
-GE_RATE_MAX = 0.060        # cap on per-patient Sg
+GE_RATE_MAX = 0.150        # [GE-OU] raised so the strong per-patient Sg (lognormal around GE_RATE) is not clipped
 
 # CGM noise
 # CGM interstitial lag. The sensor sits in interstitial fluid, which trails
@@ -756,6 +759,7 @@ class PatientProfile:
     icr: float = 10.0
     correction_factor: float = 40.0
     glucose_effectiveness: float = GE_RATE  # per-patient Bergman Sg (per-step reversion)
+    ge_anchor: float = GE_EQ_ANCHOR_MEAN    # per-patient equilibrium anchor (OU reverts to this + diurnal lift)
     basal_dose: float = 20.0
 
     # Insulin analogue assignment (one rapid bolus + one long-acting basal per
@@ -954,15 +958,11 @@ def bolus_pk_for_dose(dose_units: float,
     return gamma_k, theta, duration_h * 60.0
 
 
-def ge_setpoint_for_hour(hour_of_day: float) -> float:
-    """Diurnal glucose-effectiveness setpoint (mg/dL).
-
-    Elevated (GE_SETPOINT_DAY) through the waking window and lower
-    (GE_SETPOINT_NIGHT) overnight, joined by smootherstep ramps. A single
-    constant setpoint pulled the afternoon/evening BG down into a daytime
-    trough real CGM does not show; this time-varying target keeps the daytime
-    plateau up while leaving the aperiodic restoring dynamics (which set the
-    ACF) unchanged.
+def ge_day_weight(hour_of_day: float) -> float:
+    """Smootherstep 0..1 waking-hours weight for the diurnal lift of the
+    glucose-effectiveness equilibrium anchor (1 through the day, 0 overnight).
+    The anchor is raised by GE_EQ_DAY_BOOST * this weight to keep the daytime
+    plateau, without imposing a fixed daytime target the OU wander can't leave.
     """
     def _sstep(x: float, a: float, b: float) -> float:
         if b <= a:
@@ -972,8 +972,7 @@ def ge_setpoint_for_hour(hour_of_day: float) -> float:
 
     ramp_up = _sstep(hour_of_day, GE_DAY_START_HOUR, GE_DAY_START_HOUR + GE_DAY_RAMP_HOURS)
     ramp_down = 1.0 - _sstep(hour_of_day, GE_DAY_END_HOUR - GE_DAY_RAMP_HOURS, GE_DAY_END_HOUR)
-    day_weight = ramp_up * ramp_down
-    return GE_SETPOINT_NIGHT + (GE_SETPOINT_DAY - GE_SETPOINT_NIGHT) * day_weight
+    return ramp_up * ramp_down
 
 
 def envelope_intensity(time_idx: int, start_idx: int, end_idx: int,
@@ -1058,6 +1057,13 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     profile.glucose_effectiveness = float(np.clip(
         GE_RATE * np.exp(rng.normal(0.0, GE_REL_SIGMA)),
         GE_RATE_MIN, GE_RATE_MAX))
+    # Per-patient equilibrium anchor (the level the stochastic equilibrium
+    # reverts to). Its between-patient spread carries the per-patient mean
+    # heterogeneity; loosely tied to insulin resistance so resistant patients
+    # sit a little higher.
+    profile.ge_anchor = float(np.clip(
+        rng.normal(GE_EQ_ANCHOR_MEAN + 12.0 * (ir - 1.0), GE_EQ_ANCHOR_SIGMA),
+        110.0, 210.0))
     profile.dawn_hgo_amplitude = max(0.0, rng.normal(DAWN_HGO_AMPLITUDE_MEAN, DAWN_HGO_AMPLITUDE_SIGMA))
     profile.night_hgo_dip_amplitude = max(0.0, rng.normal(NIGHT_HGO_DIP_AMPLITUDE_MEAN, NIGHT_HGO_DIP_AMPLITUDE_SIGMA))
     profile.exercise_duration_mean_min = float(np.clip(
@@ -1191,6 +1197,8 @@ class T1DMSimulator:
         self._ar_cgm: float = 0.0
         # Interstitial glucose state for the CGM lag (see CGM_LAG_MINUTES).
         self._interstitial_bg: float = float(self.state.bg)
+        # Ornstein-Uhlenbeck glucose-effectiveness equilibrium (see GE_EQ_*).
+        self._ge_equilibrium: float = float(self.patient.ge_anchor)
 
         # Pre-generate day plan
         self._plan_day()
@@ -1238,6 +1246,7 @@ class T1DMSimulator:
         self._ar_insulin = 0.0
         self._ar_cgm = 0.0
         self._interstitial_bg = float(self.state.bg)
+        self._ge_equilibrium = float(self.patient.ge_anchor)
 
         self._pending_events = []
 
@@ -2301,11 +2310,20 @@ class T1DMSimulator:
         glucose_out = total_insulin * p.icr / insulin_resistance_factor
         bg_delta = BG_SCALE_FACTOR * (glucose_in - glucose_out)
 
-        # Glucose effectiveness (Bergman Sg): insulin-independent, always-on
-        # restoring pull toward the equilibrium setpoint. Supplies the in-band
-        # mean reversion the gated renal/counter-regulatory terms below do not,
-        # giving BG a finite correlation time instead of a random-walk ACF tail.
-        bg_delta += p.glucose_effectiveness * (ge_setpoint_for_hour(hour_of_day) - s.bg)
+        # Glucose effectiveness (Bergman Sg): insulin-independent restoring pull
+        # toward a STOCHASTIC equilibrium E(t). E is an Ornstein-Uhlenbeck
+        # process — it mean-reverts (timescale GE_EQ_TAU_HOURS) toward the
+        # patient's anchor plus a diurnal lift, perturbed each step by Gaussian
+        # noise of stationary std GE_EQ_SIGMA. The fast Sg pull gives BG a short
+        # correlation time (low 8h ACF); E's wandering adds distributional
+        # spread but decorrelates within hours, so it does not re-inject long-lag
+        # autocorrelation — decoupling spread from the ACF.
+        ge_mu = p.ge_anchor + GE_EQ_DAY_BOOST * ge_day_weight(hour_of_day)
+        ge_rho = float(np.exp(-DT_MINUTES / (GE_EQ_TAU_HOURS * 60.0)))
+        self._ge_equilibrium = (
+            ge_mu + ge_rho * (self._ge_equilibrium - ge_mu)
+            + np.sqrt(1.0 - ge_rho * ge_rho) * GE_EQ_SIGMA * self.rng.normal())
+        bg_delta += p.glucose_effectiveness * (self._ge_equilibrium - s.bg)
 
         # Physiological guardrails
         if s.bg > RENAL_THRESHOLD:
