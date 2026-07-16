@@ -138,15 +138,24 @@ def modd(times, bg, step_min):
     return float(np.mean(d)) if len(d) > 0 else float("nan")
 
 
-def sample_entropy(x, m=2, r_frac=0.2, subsample=2500):
-    """Sample entropy SampEn(m, r). r = r_frac * std(x). To keep this cheap on
-    long traces we randomly subsample down to `subsample` points."""
+def sample_entropy(x, m=2, r_frac=0.2, step_min=5, interval_min=15, max_pts=4000):
+    """Sample entropy SampEn(m, r), r = r_frac * std(x), measured at a FIXED
+    effective sampling interval (`interval_min`) so it is comparable across records
+    of different length and native cadence.
+
+    The previous version random-subsampled to a fixed COUNT, which made the effective
+    spacing scale with record length: for one and the same process a 60-day trace
+    read a far higher SampEn than a 14-day one (the sim's SampEn rose monotonically
+    0.34 -> 1.11 as the run grew from 10 to 70 days). Striding on the grid to a fixed
+    interval removes that confound; SampEn is then N-stable, so a generous `max_pts`
+    cap only bounds cost. Stride BEFORE dropping gap NaNs so the true interval is
+    preserved across dropouts."""
     x = np.asarray(x, dtype=float)
+    stride = max(1, int(round(interval_min / step_min)))
+    x = x[::stride]
     x = x[~np.isnan(x)]
-    if len(x) > subsample:
-        rng = np.random.default_rng(0)
-        idx = np.sort(rng.choice(len(x), subsample, replace=False))
-        x = x[idx]
+    if len(x) > max_pts:
+        x = x[:max_pts]
     n = len(x)
     if n < m + 2:
         return float("nan")
@@ -345,7 +354,7 @@ def assemble_cohort(name, items, regularize_fn, step_min):
         rec["hyper_median_min"] = float(np.median(H)) if H else 0.0
         rec["hyper_p90_min"] = float(np.percentile(H, 90)) if H else 0.0
         rec.update({"lag_acf": autocorr_lags(bg, step_min, lags_min)})
-        rec["sample_entropy"] = sample_entropy(bg)
+        rec["sample_entropy"] = sample_entropy(bg, step_min=step_min)
         diff_rec = np.diff(bg)
         diff_rec = diff_rec[~np.isnan(diff_rec)]
         rec["delta_std"] = float(np.std(diff_rec)) if len(diff_rec) else float("nan")

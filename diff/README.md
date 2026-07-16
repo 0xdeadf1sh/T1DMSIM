@@ -335,7 +335,7 @@ Per-record mean ± std.
 | CONGA-1h (mg/dL)    | 39.4 ± 5.6 | 34.2 ± 7.2 | 37.6 ± 5.4 | 38.2 ± 6.5 |
 | CONGA-4h (mg/dL)    | 76.1 ± 11.4 | 75.1 ± 17.7 | 63.4 ± 12.1 | 74.7 ± 8.6 |
 | MODD (mg/dL)        | 61.1 ± 8.9     | 53.3 ± 12.8     | 42.6 ± 8.2     | **62.6 ± 7.1**     |
-| Sample entropy      | 0.87 ± 0.10 | 0.44 ± 0.08¹ | 0.92 ± 0.12 | 1.09 ± 0.07 |
+| Sample entropy      | 0.63 ± 0.07 | 0.44 ± 0.08¹ | 0.75 ± 0.10 | 0.63 ± 0.04 |
 
 ¹ Shanghai SampEn is computed on 15-min samples, which collapses the
   fine-scale jitter that drives SampEn at 5 min — the lower value is mostly a
