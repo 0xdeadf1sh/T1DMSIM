@@ -591,6 +591,7 @@ GE_DAY_RAMP_HOURS = 3.0    # smootherstep ramp width for the day/night setpoint 
 GE_REL_SIGMA = 0.30        # per-patient lognormal spread of Sg around GE_RATE (~2x inter-individual range)
 GE_RATE_MIN = 0.004        # floor so no patient is a pure (undamped) integrator
 GE_RATE_MAX = 0.150        # [GE-OU] raised so the strong per-patient Sg (lognormal around GE_RATE) is not clipped
+GE_EQ_FLOOR = 75.0         # [GE-OU] hard floor on the wandering equilibrium: the glucose-effectiveness restoring target is never hypoglycemic, so the Sg pull aids (never opposes) the counter-regulatory rescue in a low. Also lifts the distribution's low tail toward the real cohorts.
 
 # CGM noise
 # CGM interstitial lag. The sensor sits in interstitial fluid, which trails
@@ -2323,6 +2324,7 @@ class T1DMSimulator:
         self._ge_equilibrium = (
             ge_mu + ge_rho * (self._ge_equilibrium - ge_mu)
             + np.sqrt(1.0 - ge_rho * ge_rho) * GE_EQ_SIGMA * self.rng.normal())
+        self._ge_equilibrium = max(self._ge_equilibrium, GE_EQ_FLOOR)
         bg_delta += p.glucose_effectiveness * (self._ge_equilibrium - s.bg)
 
         # Physiological guardrails
