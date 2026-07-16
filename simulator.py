@@ -573,26 +573,32 @@ SEVERE_HYPO_GLUCAGON_RATE = 2.0  # Extra mg/dL per step at severity=1.0
 # Glucose effectiveness (Bergman minimal-model Sg): the insulin-INDEPENDENT
 # glucose disposal + hepatic-glucose-output autoregulation that clears a
 # glucose load even at basal insulin. Modeled as an always-on linear restoring
-# pull of the BG delta toward an equilibrium setpoint:
-#     bg_delta += glucose_effectiveness * (ge_setpoint_for_hour(hour) - bg)
-# where the setpoint is DIURNAL (GE_SETPOINT_DAY by day, GE_SETPOINT_NIGHT
-# overnight): a single constant setpoint sagged the afternoon/evening into a
-# daytime trough real CGM lacks; the diurnal target restores the daytime
-# plateau while preserving the aperiodic restoring dynamics that fix the ACF.
-# This is the mean-reverting force the renal/counter-regulatory guardrails do
-# NOT supply inside the normal 70-180 band (they are gated to BG>180 / BG<70).
-# Without it, within-band BG is an under-damped integrator of net flux — a
-# slowly-corrected random walk — so the level autocorrelation decays far too
-# slowly (acf at 8h ~0.3 vs ~0 in real CGM). Sg gives BG a finite correlation
-# time and simultaneously tightens the distribution, so it (unlike lowering
-# BG_SCALE_FACTOR) improves the ACF tail WITHOUT flattening excursions.
-# GE_RATE is the population-mean per-step reversion fraction; per-patient Sg is
-# sampled lognormally around it (real Sg varies ~2-3x across individuals) so
-# heterogeneity is preserved. See ge_setpoint_for_hour for the diurnal target.
+# pull of the BG delta toward a STOCHASTIC equilibrium E(t):
+#     bg_delta += glucose_effectiveness * (E(t) - bg)
+# E(t) is an Ornstein-Uhlenbeck process: each step it mean-reverts (timescale
+# GE_EQ_TAU_HOURS) toward the patient's anchor plus a daytime lift
+# (ge_anchor + GE_EQ_DAY_BOOST * ge_day_weight(hour)), perturbed by Gaussian
+# noise of stationary std GE_EQ_SIGMA, then floored at GE_EQ_FLOOR so the
+# restoring target is never *severely* hypoglycemic (the floor sits above the
+# 55 mg/dL severe threshold). Sg is the mean-reverting force the
+# renal/counter-regulatory guardrails do NOT supply inside the normal 70-180
+# band (they are gated to BG>180 / BG<70). Without it, within-band BG is an
+# under-damped integrator of net flux — a slowly-corrected random walk — so the
+# level autocorrelation decays far too slowly (acf at 8h ~0.3 vs ~0 in real CGM).
+# The strong, fast Sg pull gives BG a short correlation time (low 8h ACF); E's
+# wandering supplies distributional spread but decorrelates within hours, so it
+# does NOT re-inject long-lag memory — decoupling spread from the ACF, which a
+# fixed setpoint could not do (a fixed target damped the ACF only by homogenizing
+# the distribution). GE_RATE is the population-mean per-step reversion fraction;
+# per-patient Sg is sampled lognormally around it (real Sg varies ~2-3x across
+# individuals) so heterogeneity is preserved. The GE_EQ_FLOOR is what keeps the
+# Sg pull *upward* in a low (aiding, never opposing, the severe-hypo rescue) and
+# simultaneously anchors the pooled mean/low-tail onto the real cohorts. See
+# ge_day_weight for the diurnal lift and the OU update in generate().
 GE_RATE = 0.060            # [GE-OU] strong Sg so BG tracks the fast-wandering equilibrium (short correlation time -> acf(8h)~0)
-GE_EQ_ANCHOR_MEAN = 132.0  # [GE-OU] population-mean equilibrium anchor (lands pooled mean ~155 after the IR-tied per-patient offset)
+GE_EQ_ANCHOR_MEAN = 131.0  # [GE-OU] population-mean equilibrium anchor (co-tuned with GE_EQ_SIGMA / GE_EQ_FLOOR to land the pooled mean ~162 on Ohio; with a large sigma the floor-clipping largely sets the mean, so the anchor is a fine trim)
 GE_EQ_ANCHOR_SIGMA = 12.0  # [GE-OU] between-patient spread of the anchor (per-patient mean heterogeneity)
-GE_EQ_SIGMA = 70.0         # [GE-OU] stationary std of the equilibrium wandering; large so BG spread stays ~Ohio-wide despite the strong Sg pull
+GE_EQ_SIGMA = 105.0        # [GE-OU][OHIO-CARB] stationary std of the equilibrium wandering. Raised 70->105 after the meal generator was trimmed to Ohio's carb load (~194 g/day): smaller meals carry less BG variance, so the OU channel picks up the slack to keep the pooled BG spread (std ~61, MAGE ~101) on Ohio.
 GE_EQ_TAU_HOURS = 2.0      # [GE-OU] OU timescale (2h): decorrelates well before 8h so no long-lag memory
 GE_EQ_DAY_BOOST = 10.0     # [GE-OU] diurnal lift of the anchor over waking hours
 GE_DAY_START_HOUR = 7.0    # setpoint ramps up around wake
@@ -601,7 +607,7 @@ GE_DAY_RAMP_HOURS = 3.0    # smootherstep ramp width for the day/night setpoint 
 GE_REL_SIGMA = 0.30        # per-patient lognormal spread of Sg around GE_RATE (~2x inter-individual range)
 GE_RATE_MIN = 0.004        # floor so no patient is a pure (undamped) integrator
 GE_RATE_MAX = 0.150        # [GE-OU] raised so the strong per-patient Sg (lognormal around GE_RATE) is not clipped
-GE_EQ_FLOOR = 75.0         # [GE-OU] hard floor on the wandering equilibrium: the glucose-effectiveness restoring target is never hypoglycemic, so the Sg pull aids (never opposes) the counter-regulatory rescue in a low. Also lifts the distribution's low tail toward the real cohorts.
+GE_EQ_FLOOR = 60.0         # [GE-OU][OHIO-CARB] floor on the wandering equilibrium, kept above the severe-hypo threshold (SEVERE_HYPO_THRESHOLD=55) so the Sg pull stays upward across a severe low (aids, never opposes, the rescue). Lowered 75->60 alongside the GE_EQ_SIGMA=105 bump: with a large sigma the floor-clipping inflates the pooled mean, so a lower floor is needed to hold the mean on Ohio. The smaller Ohio-matched meals make gentler crashes, so severe episodes stay bounded (>2h = 0, max ~70 min) at the lower floor.
 
 # CGM noise
 # CGM interstitial lag. The sensor sits in interstitial fluid, which trails

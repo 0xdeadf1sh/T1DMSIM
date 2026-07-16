@@ -27,6 +27,7 @@ Key design decisions:
 - Exercise is modeled as negative food intake, plus a 10h post-exercise IS sensitivity boost (`EXERCISE_IS_DURATION_HOURS`).
 - Illness gradually ramps insulin sensitivity via a target/ramp system.
 - Physiological guardrails: renal clearance above 180 mg/dL, counter-regulatory response below 70 mg/dL, additional glucagon dump below SEVERE_HYPO_THRESHOLD.
+- Glucose effectiveness (Bergman minimal-model Sg): an always-on insulin-independent restoring pull `bg_delta += glucose_effectiveness * (E − bg)` toward a *stochastic* equilibrium `E(t)`. `E` is an Ornstein–Uhlenbeck process — each step it mean-reverts (timescale `GE_EQ_TAU_HOURS`) toward `ge_anchor + GE_EQ_DAY_BOOST * ge_day_weight(hour)`, is perturbed by Gaussian noise of stationary std `GE_EQ_SIGMA`, then floored at `GE_EQ_FLOOR` (kept above the 55 mg/dL severe threshold). This is the mean-reversion the renal/counter-regulatory guardrails do NOT supply inside the 70–180 band; without it within-band BG is an under-damped integrator of net flux whose 8h autocorrelation decays far too slowly (~0.3 vs ~0 in real CGM). The strong, fast Sg pull gives BG a short correlation time (low 8h ACF) while `E`'s wandering supplies distributional spread that decorrelates within hours — decoupling spread from the ACF, which a *fixed* setpoint could achieve only by homogenizing the distribution. Per-patient Sg is sampled lognormally around `GE_RATE` (real Sg varies ~2–3× across individuals). `GE_EQ_FLOOR` is load-bearing: because the restoring target is never *severely* hypoglycemic, the Sg pull is always *upward* in a severe low (it aids, never opposes, the severe-hypo rescue — this is what keeps the >2h severe tail at zero), and it anchors the pooled mean and low tail onto the real cohorts. `GE_EQ_SIGMA`, `GE_EQ_FLOOR`, and `GE_EQ_ANCHOR_MEAN` are co-tuned with the meal carb load (see `MEAL_CARB_SCALE` / `MEAL_APPETITE_LOG_SIGMA`): the OU supplies whatever BG variance the Ohio-sized meals do not, so trimming the meals to Ohio required raising `GE_EQ_SIGMA` (more OU variance) and lowering `GE_EQ_FLOOR` (a large sigma's floor-clipping otherwise inflates the pooled mean). Together they land the pooled BG on OhioT1DM (mean/std/GMI/J-index/M-value/TIR/TAR and every percentile within noise; pooled KS ≈ 0.02). The two behavioural dose-balance tests disable Sg (`GE_RATE = GE_RATE_MIN = 0`) via the `isolated_biology` fixture since the always-on pull would otherwise drag BG off the exact-dose-match assumption.
 - Weekday/weekend/holiday patterns, alcohol (additional HGO suppression on top of insulin's), and stress events (transient IS increase) add behavioral realism.
 - Curve contributions are pre-accumulated into numpy arrays for O(1) per-step reads.
 
@@ -34,7 +35,7 @@ Key design decisions:
 
 - `simulator.py` -- core simulation engine, all parameters, patient generator, BG computation
 - `visualizer.py` -- Pygame interactive visualizer (forces X11 on Wayland)
-- `tests/` -- pytest suite (49 tests): test_curves, test_patient, test_simulator, test_balance
+- `tests/` -- pytest suite (58 tests): test_curves, test_patient, test_simulator, test_balance
 - `scripts/batch_test.py` -- run multiple seeds and print TIR/mean BG summary
 - `docs/math.md` -- mathematical formulation reference
 
