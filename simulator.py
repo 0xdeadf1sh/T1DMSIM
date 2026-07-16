@@ -450,14 +450,11 @@ HGO_INSULIN_SMOOTHING_ALPHA = 0.25  # EMA factor for the insulin level fed into 
 # dawn rise. Per-patient amplitude is sampled in generate_patient (see
 # patient.dawn_hgo_amplitude / patient.night_hgo_dip_amplitude) so individuals
 # can have stronger or weaker dawn effects.
-DAWN_HGO_PEAK_HOUR = 6.0             # Hour of peak dawn HGO surge. 4.5 → 6.0: at 4.5 the
-                                     # surge peaked before patients woke and breakfast carbs
-                                     # arrived, putting the simulator diurnal maximum at hour
-                                     # 6-7 instead of the hour-8 peak seen in Ohio/Shanghai.
-                                     # 6.0 (the cortisol-driven dawn-phenomenon canonical
-                                     # time) stacks the tail of the surge with breakfast
-                                     # absorption at hour 9, producing the morning BG peak
-                                     # roughly an hour later than the old 4.5 placement.
+DAWN_HGO_PEAK_HOUR = 8.0             # [DIURNAL] Hour of peak dawn HGO surge. 6.0 -> 8.0: at 6.0 the
+                                     # fast HGO surge dominated the morning rise and put the sim's
+                                     # diurnal maximum at hour 6-7, an hour early vs Ohio's hour-8 peak.
+                                     # 8.0 aligns the surge with waking and the GE dawn profile (also
+                                     # h8), landing the morning BG peak on hour 8 as in the real cohorts.
 DAWN_HGO_SIGMA_HOURS = 2.5           # Gaussian width. Narrowed back from 3.5 → 2.5 so the surge
                                      # spans roughly midnight-to-noon rather than 5am-10am.
                                      # Wider sigma raises the daily HGO integral, intentionally
@@ -476,9 +473,13 @@ DAWN_HGO_AMPLITUDE_MEAN = 6.0        # [GE-FIX] 8.5→6.0 — trimmed so the mor
 DAWN_HGO_AMPLITUDE_SIGMA = 4.0  # [HIVAR 2x] 2.0→4.0 — dawn-surge spread
 NIGHT_HGO_DIP_HOUR = 2.0             # Hour of deep-sleep HGO trough
 NIGHT_HGO_DIP_SIGMA_HOURS = 2.5      # Narrower so it ends before dawn surge starts
-NIGHT_HGO_DIP_AMPLITUDE_MEAN = 0.3   # Mean peak HGO reduction in g/hr. Small magnitude — a larger dip
-                                     # drives a nocturnal-hypo bulge (peak hypo concentration at 3 am)
-                                     # far above the OhioT1DM cohort's flat-by-hour hypo distribution.
+NIGHT_HGO_DIP_AMPLITUDE_MEAN = 3.5   # [DIURNAL] 0.3 -> 3.5. Mean deep-sleep HGO reduction in g/hr. A
+                                     # strong overnight HGO trough (deep sleep + fasting genuinely
+                                     # suppress hepatic output) is what pulls the overnight window BELOW
+                                     # the daytime, giving Ohio's real day>night diurnal — the small 0.3
+                                     # left the sim inverted (night>day) under the delayed-HGO dinner
+                                     # rebound. The larger dip only mildly raises TBR (2.6->2.8) here
+                                     # because the GE floor + basal feedback keep the overnight lows bounded.
 NIGHT_HGO_DIP_AMPLITUDE_SIGMA = 0.5  # [HIVAR 2x] 0.25→0.5 — night-dip spread
 # Daily-integrated contribution (Gaussian: A * sigma * √(2π)):
 #   dawn ≈ 9.0 * 1.8 * √(2π) ≈ 40.6 g/day extra
@@ -532,8 +533,8 @@ SITE_QUALITY_MAX = 1.65  # [HIVAR 2x] 1.4→1.65 — absorption-surge ceiling
 # later (delayed gluconeogenesis from amino acids + cortisol response). This
 # is the mechanism behind nocturnal hyperglycemia after a big dinner.
 DELAYED_HGO_MEAL_THRESHOLD_GRAMS = 60.0  # Meals above this trigger a rebound
-DELAYED_HGO_PER_GRAM = 0.02  # g/hr of HGO bump per gram of meal carbs above threshold
-DELAYED_HGO_MAX_BUMP = 5.0  # Cap on HGO bump magnitude (g/hr)
+DELAYED_HGO_PER_GRAM = 0.015  # [DIURNAL] 0.02->0.015 g/hr of HGO bump per gram of meal carbs above threshold — the dinner rebound (nocturnal hyperglycemia) is retained but trimmed so the strengthened night HGO dip can land the overnight window below the day
+DELAYED_HGO_MAX_BUMP = 3.5  # [DIURNAL] 5.0->3.5 Cap on HGO bump magnitude (g/hr)
 DELAYED_HGO_DELAY_HOURS_MIN = 3.5  # Earliest onset after meal
 DELAYED_HGO_DELAY_HOURS_MAX = 5.5  # Latest onset
 DELAYED_HGO_DURATION_HOURS_MIN = 2.7  # [HIVAR 2x] 3.0→2.7 — rebound-duration span
@@ -596,7 +597,7 @@ SEVERE_HYPO_GLUCAGON_RATE = 2.0  # Extra mg/dL per step at severity=1.0
 # simultaneously anchors the pooled mean/low-tail onto the real cohorts. See
 # ge_day_weight for the diurnal lift and the OU update in generate().
 GE_RATE = 0.060            # [GE-OU] strong Sg so BG tracks the fast-wandering equilibrium (short correlation time -> acf(8h)~0)
-GE_EQ_ANCHOR_MEAN = 137.0  # [GE-OU] population-mean equilibrium anchor (co-tuned with GE_EQ_SIGMA / GE_EQ_FLOOR to land the pooled mean ~162 on Ohio; with a large sigma the floor-clipping largely sets the mean, so the anchor is a fine trim)
+GE_EQ_ANCHOR_MEAN = 138.0  # [GE-OU] population-mean equilibrium anchor (co-tuned with GE_EQ_SIGMA / GE_EQ_FLOOR to land the pooled mean ~162 on Ohio; with a large sigma the floor-clipping largely sets the mean, so the anchor is a fine trim)
 GE_EQ_ANCHOR_SIGMA = 12.0  # [GE-OU] between-patient spread of the anchor (per-patient mean heterogeneity)
 GE_EQ_SIGMA = 95.0                # [GE-OU][OHIO-CARB][DAWN] stationary std of the equilibrium's APERIODIC wandering. Was 105; lowered to 95 when the structured dawn rhythm (GE_EQ_DAWN_AMPLITUDE) took over part of the equilibrium's variance — the point of the dawn work is to trade opaque aperiodic wander for day-to-day-consistent, learnable variance while holding the pooled BG spread (std ~61) on Ohio.
 GE_EQ_TAU_HOURS = 3.0      # [GE-OU][TEXTURE] OU timescale. 2.0 -> 3.0: a slightly longer correlation time smooths the equilibrium's step-to-step wander, cutting the excess signal complexity / hyper-episode fragmentation (SampEn ~1.07 -> ~0.9, hyper/day 3.0 -> 2.8 toward the real cohorts) AND raising the mid-lag autocorrelation (2h/4h) toward Ohio, which the too-short 2h timescale left below the real values. Still << 8h, so the 8h ACF stays ~0 (no long-lag memory).
@@ -617,7 +618,7 @@ GE_DAY_RAMP_HOURS = 3.0    # smootherstep ramp width for the day/night setpoint 
 GE_REL_SIGMA = 0.30        # per-patient lognormal spread of Sg around GE_RATE (~2x inter-individual range)
 GE_RATE_MIN = 0.004        # floor so no patient is a pure (undamped) integrator
 GE_RATE_MAX = 0.150        # [GE-OU] raised so the strong per-patient Sg (lognormal around GE_RATE) is not clipped
-GE_EQ_FLOOR = 60.0         # [GE-OU][OHIO-CARB] floor on the wandering equilibrium, kept above the severe-hypo threshold (SEVERE_HYPO_THRESHOLD=55) so the Sg pull stays upward across a severe low (aids, never opposes, the rescue). Lowered 75->60 alongside the GE_EQ_SIGMA=105 bump: with a large sigma the floor-clipping inflates the pooled mean, so a lower floor is needed to hold the mean on Ohio. The smaller Ohio-matched meals make gentler crashes, so severe episodes stay bounded (>2h = 0, max ~70 min) at the lower floor.
+GE_EQ_FLOOR = 64.0         # [GE-OU][OHIO-CARB][DIURNAL] floor on the wandering equilibrium, kept above the severe-hypo threshold (SEVERE_HYPO_THRESHOLD=55) so the Sg pull stays upward across a severe low (aids, never opposes, the rescue). Journey 75->60 (OU/carb co-tune) then 60->64 (diurnal fix): the strengthened deep-sleep HGO dip that gives the real day>night shape also removes overnight glucose, so a slightly higher floor lifts the low tail back onto Ohio's mean AND strengthens the overnight rescue pull (TBR 3.3->3.1), while severe episodes stay bounded (>2h = 0).
 
 # CGM noise
 # CGM interstitial lag. The sensor sits in interstitial fluid, which trails
