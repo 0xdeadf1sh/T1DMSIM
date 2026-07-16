@@ -60,8 +60,18 @@ MEAL_CARB_MEANS = [32.0, 42.0, 20.0, 35.0]  # breakfast, lunch, afternoon snack 
                                        # 10. Real T1Ds in published cohorts cluster nearer
                                        # 40-60g for the main meals. Daily total of ~155 g still
                                        # within Ohio's range once snacks/weekend jitter add ~30g.
-MEAL_CARB_SIGMA = 44.0  # [HIVAR 2x] 22.0→44.0 — meal-size spread (floored at 0)
+MEAL_CARB_SIGMA = 16.0  # [OHIO-CARB] 44→16 — per-meal size spread. The prior 44 with the max(0,·) floor truncated a wide Gaussian at zero, which inflated every meal's realised mean far above target (the population ate ~273 g/day vs Ohio's ~194). A realistic per-meal SD that barely clips typical 20-42g meals; between-patient spread now comes from meal_appetite, not per-meal noise.
 MEAL_CARB_DISCIPLINE_SCALE = 0.7  # How much s1 reduces carb intake
+# [OHIO-CARB] Per-patient multiplicative appetite: a lognormal "how much this
+# person eats" trait, orthogonal to skill (discipline already trims carbs via
+# MEAL_CARB_DISCIPLINE_SCALE). Lognormal gives median 1.0 with a right tail, so
+# the population carbs/day picks up Ohio's right skew (mean 194 > median 163) and
+# its wide between-patient spread (sd ~90, range ~90-373) that per-meal noise
+# cannot supply. Applied to carb AMOUNT only, never meal count/timing, so the
+# ACF-relevant meal shocks are untouched.
+MEAL_APPETITE_LOG_SIGMA = 0.45  # [OHIO-CARB] between-patient appetite spread (lognormal sigma) — tuned so pooled carbs/day sd ~90 g matches Ohio
+MEAL_APPETITE_CLIP = (0.45, 2.05)  # [OHIO-CARB] clip the lognormal tails (smallest/largest eaters ~90 / ~370+ g/day)
+MEAL_CARB_SCALE = 1.08  # [OHIO-CARB] global fine-tune on all meal carb amounts to land the population mean on Ohio (~194 g/day)
 SNACK_CARB_MEAN = 20.0
 SNACK_CARB_SIGMA = 20.0  # [HIVAR 2x] 10.0→20.0 — unused by generation
 
@@ -786,6 +796,7 @@ class PatientProfile:
     wake_time_hours: float = 8.0
     sleep_duration_hours: float = 7.5
     slow_carb_preference: float = 0.5
+    meal_appetite: float = 1.0
     cgm_check_interval_min: float = 60.0
     patience_time_min: float = 120.0
     carb_count_error_sigma: float = 0.15
@@ -1113,6 +1124,9 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     profile.sleep_duration_hours = rng.normal(SLEEP_DURATION_MEAN_HOURS, SLEEP_DURATION_SIGMA_HOURS)
 
     profile.slow_carb_preference = SLOW_CARB_PREFERENCE_BASE + SLOW_CARB_PREFERENCE_SKILL_BONUS * s1
+    profile.meal_appetite = float(np.clip(
+        np.exp(rng.normal(0.0, MEAL_APPETITE_LOG_SIGMA)),
+        MEAL_APPETITE_CLIP[0], MEAL_APPETITE_CLIP[1]))
     profile.cgm_check_interval_min = (CGM_CHECK_INTERVAL_ATTENTIVE +
                                        (CGM_CHECK_INTERVAL_INATTENTIVE - CGM_CHECK_INTERVAL_ATTENTIVE) * (1 - s2))
     profile.patience_time_min = (PATIENCE_TIME_INCOMPETENT +
@@ -1585,9 +1599,11 @@ class T1DMSimulator:
             weekend_factor = 1.0
             if is_special_day:
                 weekend_factor = 1.0 + self.rng.uniform(0, WEEKEND_CARB_INCREASE_FRACTION)
-            discipline_carb_sigma = MEAL_CARB_SIGMA * (1.0 + 0.5 * (1.0 - eff_s1))
+            discipline_carb_sigma = (MEAL_CARB_SIGMA * (1.0 + 0.5 * (1.0 - eff_s1))
+                                     * p.meal_appetite)
             carb_amount = max(0.0, self.rng.normal(
-                carb_mean * discipline_factor * weekend_factor, discipline_carb_sigma))
+                carb_mean * discipline_factor * weekend_factor
+                * p.meal_appetite * MEAL_CARB_SCALE, discipline_carb_sigma))
 
             # --- Mixed-meal multi-component carbs ---
             # Each meal is composed of 2-5 overlapping gamma absorption curves
