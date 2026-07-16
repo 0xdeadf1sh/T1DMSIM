@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from simulator import (
     generate_patient, SKILL_MIN, SKILL_MAX, HGO_BASE_GRAMS_PER_HOUR,
     BASAL_DOSE_SIGMA,
-    BASAL_DURATION_HOURS_MIN, BASAL_DURATION_HOURS_MAX,
+    BOLUS_VARIANTS, BASAL_VARIANTS, BASAL_DOSE_INTERVAL_HOURS,
 )
 
 
@@ -97,29 +97,32 @@ class TestPhysiologicalParameters:
             assert 5.0 <= p.basal_dose <= 80.0, (
                 f"seed={seed}: basal_dose={p.basal_dose:.1f} outside [5, 80]")
 
-    def test_basal_duration_hours_within_range(self):
-        """Per-patient basal duration of action must lie in
-        [BASAL_DURATION_HOURS_MIN, BASAL_DURATION_HOURS_MAX] (18-30h).
-
-        The duration drives both the PK curve length and the injection cadence,
-        so any sample outside the configured range silently breaks the 24h
-        average-dose invariant.
-        """
+    def test_basal_duration_matches_assigned_analogue(self):
+        """Each patient is assigned one long-acting basal analogue; its PK
+        action duration must equal that analogue's action_hours, and the
+        injection cadence is once-daily (decoupled from the action duration)."""
         for seed in range(200):
             p = make_patient(seed)
-            assert BASAL_DURATION_HOURS_MIN <= p.basal_duration_hours <= BASAL_DURATION_HOURS_MAX, (
-                f"seed={seed}: basal_duration_hours={p.basal_duration_hours:.2f} outside "
-                f"[{BASAL_DURATION_HOURS_MIN}, {BASAL_DURATION_HOURS_MAX}]")
+            assert p.basal_type in BASAL_VARIANTS, (
+                f"seed={seed}: unknown basal_type {p.basal_type!r}")
+            expected = BASAL_VARIANTS[p.basal_type]["action_hours"]
+            assert p.basal_duration_hours == expected, (
+                f"seed={seed}: basal_duration_hours={p.basal_duration_hours:.2f} "
+                f"!= {p.basal_type} action_hours={expected}")
+            assert p.basal_dose_interval_hours == BASAL_DOSE_INTERVAL_HOURS
+            assert p.bolus_type in BOLUS_VARIANTS, (
+                f"seed={seed}: unknown bolus_type {p.bolus_type!r}")
 
-    def test_basal_duration_hours_spans_range(self):
-        """The sampled durations should cover both ends of the [18, 30] range,
-        not cluster at one bound. A degenerate uniform sampler that returned a
-        constant or near-constant value would fail this."""
-        durations = [make_patient(s).basal_duration_hours for s in range(300)]
-        assert min(durations) < 20.0, (
-            f"no short-duration patients generated: min={min(durations):.2f}")
-        assert max(durations) > 28.0, (
-            f"no long-duration patients generated: max={max(durations):.2f}")
+    def test_both_insulin_analogues_appear(self):
+        """Across many seeds both bolus analogues (lispro/aspart) and both
+        basal analogues (glargine/degludec) must be assigned; a degenerate
+        selector returning a constant would fail this."""
+        bolus = {make_patient(s).bolus_type for s in range(300)}
+        basal = {make_patient(s).basal_type for s in range(300)}
+        assert bolus == set(BOLUS_VARIANTS), (
+            f"missing bolus analogues: {set(BOLUS_VARIANTS) - bolus}")
+        assert basal == set(BASAL_VARIANTS), (
+            f"missing basal analogues: {set(BASAL_VARIANTS) - basal}")
 
 
 class TestBehavioralParameters:

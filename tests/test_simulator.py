@@ -420,6 +420,7 @@ class TestHypoFollowupSnack:
             s = sim.state
             s.bg = 40.0
             s.bg_observed = 40.0
+            sim._interstitial_bg = 40.0  # reset CGM interstitial-lag state to match the forced BG
             s.last_cgm_check_idx = -9999
             s.last_hypo_correction_idx = -9999
             sim._today_wake_idx = 0
@@ -554,8 +555,8 @@ class TestBolusPKForDoseIntegration:
         real_helper = sim_module.bolus_pk_for_dose
         calls = []
 
-        def spy(dose):
-            result = real_helper(dose)
+        def spy(dose, *args, **kwargs):
+            result = real_helper(dose, *args, **kwargs)
             calls.append((float(dose), result))
             return result
 
@@ -583,13 +584,12 @@ class TestBolusPKForDoseIntegration:
 
 
 class TestBasalInjectionCadence:
-    """Per-patient basal injection cadence must equal patient.basal_duration_hours.
+    """Basal injection cadence must equal patient.basal_dose_interval_hours.
 
-    An 18h-duration patient injects every 18h; a 30h-duration patient every
-    30h (often skipping a calendar day). This invariant keeps the
-    24h-average insulin delivery aligned with `basal_dose` regardless of the
-    sampled duration; if cadence drifts away from duration, the patient is
-    silently over- or under-dosed.
+    Real glargine and degludec are dosed once daily, so the cadence is 24h
+    regardless of the analogue's PK action duration (glargine 26h, degludec
+    42h). Each once-daily dose delivers the full 24h basal_dose, keeping the
+    24h-average insulin delivery aligned with `basal_dose`.
     """
 
     def test_basal_cadence_matches_patient_duration(self):
@@ -618,10 +618,10 @@ class TestBasalInjectionCadence:
             median_spacing_h = float(np.median(spacings_steps)) * DT_MINUTES / 60.0
             # Per-dose ±30 min jitter + max(current_idx, ...) clamp can drift
             # individual spacings; the median should still land within 1.5h.
-            assert abs(median_spacing_h - sim.patient.basal_duration_hours) < 1.5, (
+            assert abs(median_spacing_h - sim.patient.basal_dose_interval_hours) < 1.5, (
                 f"seed={seed}: median basal spacing {median_spacing_h:.2f}h "
-                f"!= patient.basal_duration_hours "
-                f"{sim.patient.basal_duration_hours:.2f}h")
+                f"!= patient.basal_dose_interval_hours "
+                f"{sim.patient.basal_dose_interval_hours:.2f}h")
 
 
 class TestInjectCurveUpdatesTotals:

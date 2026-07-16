@@ -242,10 +242,10 @@ class Visualizer:
         steps_per_hour = 60 // DT_MINUTES
         self.pixels_per_step = self._chart_rect().width / (DEFAULT_ZOOM_HOURS * steps_per_hour)
         # One visibility flag per entry in CURVES, in the same order. Defaults:
-        # BG (1), carbs (2), total insulin (3), basal (4), IR (6) visible; the
-        # rest hidden but toggleable via the digit keys bound in each CURVES
-        # entry's `toggle_key` field.
-        self.curve_visible = [True, True, True, True, False, True, False, False, False, False]
+        # BG (1), carbs (2), total insulin (3), IR (6), hepatic output (9)
+        # visible; the rest hidden but toggleable via the digit keys bound in
+        # each CURVES entry's `toggle_key` field.
+        self.curve_visible = [True, True, True, False, False, True, False, False, True, False]
         self.hovered_step = None     # Step under mouse cursor
 
         # Transient "screenshot saved" modal: path string + epoch deadline.

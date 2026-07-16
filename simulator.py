@@ -27,9 +27,9 @@ STEPS_PER_DAY = 24 * 60 // DT_MINUTES  # 288 steps per day
 
 # Skill correlation
 SKILL_CORRELATION = 0.7  # Off-diagonal correlation in skill covariance matrix
-SKILL_VARIANCE = 0.30  # Lower = more patients near average, fewer extremes.
-SKILL_MIN = 0.25  # Lowest possible skill level (0 = no skill)
-SKILL_MAX = 0.95  # Highest possible skill level (1 = perfect)
+SKILL_VARIANCE = 0.6  # [HIVAR 2x] 0.3→0.6 — wider skill spread
+SKILL_MIN = 0.15  # [HIVAR 2x] 0.25→0.15 — low-skill floor
+SKILL_MAX = 0.98  # [HIVAR 2x] 0.95→0.98 — high-skill ceiling
 
 # Wake/sleep
 WAKE_TIME_MEAN_HOURS = 7.5  # Mean wake time (hours from midnight). At 6.5 the dawn HGO
@@ -38,14 +38,14 @@ WAKE_TIME_MEAN_HOURS = 7.5  # Mean wake time (hours from midnight). At 6.5 the d
                             # breakfast at ~08:00 so the breakfast-absorption peak lands at
                             # ~09:30, stacking with the (now later) dawn HGO peak to put
                             # the diurnal maximum at hour 8 rather than hour 6-7.
-WAKE_TIME_SIGMA_BASE = 0.5  # Base sigma for wake time (hours), scaled by 1/s4
+WAKE_TIME_SIGMA_BASE = 1.0  # [HIVAR 2x] 0.5→1.0 — wake-time scatter
 SLEEP_DURATION_MEAN_HOURS = 7.5
-SLEEP_DURATION_SIGMA_HOURS = 1.0
+SLEEP_DURATION_SIGMA_HOURS = 2.0  # [HIVAR 2x] 1.0→2.0 — sleep-length scatter
 
 # Meals
-MEALS_BASE = 3  # Base number of meals per day
+MEALS_BASE = 4  # [GE-FIX] 3→4 — added a mid-afternoon eating occasion (see MEAL_TIME_OFFSETS_HOURS) to fill the lunch->dinner gap that left the afternoon BG sagging ~15 mg/dL below Ohio; heavy meal-timing jitter keeps it aperiodic (real forcing, not a deterministic daily bump)
 MEALS_EXTRA_LAMBDA = 3.5  # Extra meals Poisson lambda, scaled by (1 - s1). High value provides sub-day stochastic shocks that decorrelate the BG trace at mid-range lags.
-MEAL_TIME_OFFSETS_HOURS = [0.5, 5.0, 12.0]  # Breakfast, lunch, dinner offset from wake.
+MEAL_TIME_OFFSETS_HOURS = [0.5, 5.0, 8.5, 12.0]  # Breakfast, lunch, afternoon snack, dinner (offset from wake); the wake+8.5 (~16:00) slot fills the old lunch->dinner gap.
                                              # Dinner at wake+12 = 19:30 for the 7:30 wake
                                              # population — the physiologic norm. Earlier
                                              # values (10.0) placed dinner at 16:30, ending
@@ -53,17 +53,17 @@ MEAL_TIME_OFFSETS_HOURS = [0.5, 5.0, 12.0]  # Breakfast, lunch, dinner offset fr
                                              # 18:00-00:00 window covered only by basal,
                                              # which over-cleared into a -24 mg/dL post-
                                              # dinner crash between hour 21 and midnight.
-MEAL_TIME_JITTER_BASE_MIN = 15.0  # Base jitter in minutes, scaled by 1/s4
-MEAL_CARB_MEANS = [32.0, 42.0, 35.0]  # Mean carbs (g) per meal slot. Dinner cut to 35g:
+MEAL_TIME_JITTER_BASE_MIN = 120.0  # [GE-FIX] 30→120 — real T1D meal times scatter by hours; this aperiodic timing spread decorrelates the deterministic daily BG hump that otherwise dominated the 4-12h autocorrelation once the trace was tightened by Sg
+MEAL_CARB_MEANS = [32.0, 42.0, 20.0, 35.0]  # breakfast, lunch, afternoon snack (20g), dinner. Dinner cut to 35g:
                                        # the prior [48, 63, 75] over-shot Ohio's evening BG by
                                        # +50 mg/dL at hour 21 and the morning BG by +27 at hour
                                        # 10. Real T1Ds in published cohorts cluster nearer
                                        # 40-60g for the main meals. Daily total of ~155 g still
                                        # within Ohio's range once snacks/weekend jitter add ~30g.
-MEAL_CARB_SIGMA = 22.0  # Sigma for carb amount
+MEAL_CARB_SIGMA = 44.0  # [HIVAR 2x] 22.0→44.0 — meal-size spread (floored at 0)
 MEAL_CARB_DISCIPLINE_SCALE = 0.7  # How much s1 reduces carb intake
 SNACK_CARB_MEAN = 20.0
-SNACK_CARB_SIGMA = 10.0
+SNACK_CARB_SIGMA = 20.0  # [HIVAR 2x] 10.0→20.0 — unused by generation
 
 # Protein/fat baseline — peak around 75 min (k=4, θ=25). Earlier value (k=3.5)
 # regressed mean BG; original k=6 dragged the cohort envelope peak past 200 min.
@@ -102,8 +102,8 @@ HYPO_FOLLOWUP_GAMMA_THETA = 30.0   # Tail extends ~5h
 HYPO_FOLLOWUP_SKILL_THRESHOLD = 0.30  # Most patients eat the follow-up; only the very lowest-skill skip it.
 
 # Carb curve noise
-CARB_CURVE_K_NOISE = 0.1  # Relative noise on gamma k
-CARB_CURVE_THETA_NOISE = 0.1  # Relative noise on gamma theta
+CARB_CURVE_K_NOISE = 0.2  # [HIVAR 2x] 0.1→0.2 — absorption-shape scatter
+CARB_CURVE_THETA_NOISE = 0.2  # [HIVAR 2x] 0.1→0.2 — absorption-shape scatter
 
 # Mixed-meal composition (each meal becomes 2-5 overlapping carb components)
 MIXED_MEAL_MIN_COMPONENTS = 2
@@ -134,26 +134,23 @@ MIXED_MEAL_MED_WEIGHT_BASE = 0.4  # Base weight for medium-speed components
 # axes are independent so a thin-IR patient and an obese-sensitive patient
 # both exist.
 BODY_WEIGHT_MEAN_KG = 75.0
-BODY_WEIGHT_SIGMA_KG = 18.0
-BODY_WEIGHT_MIN_KG = 45.0
-BODY_WEIGHT_MAX_KG = 130.0
-IR_LOGNORMAL_SIGMA = 0.08       # σ of log(insulin_resistance_factor); tight to bound the heavy hyper tail
-IR_FACTOR_MIN = 0.50            # Floor on the IR axis — wider would re-introduce sensitive-seed TBR drift
-IR_FACTOR_MAX = 1.50            # Cap on the IR axis; allows ~3× population IR span vs the floor
-IR_TO_IS_NOISE_SIGMA = 0.10     # Additional per-patient noise so is_base isn't a deterministic
-                                 # function of ir_factor (real ICR/IS are correlated, not identical)
-IR_TO_ICR_NOISE_SIGMA = 0.12    # Same for ICR
+BODY_WEIGHT_SIGMA_KG = 36.0  # [HIVAR 2x] 18.0→36.0 — body-weight spread
+BODY_WEIGHT_MIN_KG = 42.0  # [HIVAR 2x] 45.0→42.0 — light-weight floor
+BODY_WEIGHT_MAX_KG = 150.0  # [HIVAR 2x] 130.0→150.0 — heavy-weight ceiling
+IR_LOGNORMAL_SIGMA = 0.16  # [HIVAR 2x] 0.08→0.16 — insulin-resistance spread
+IR_FACTOR_MIN = 0.4  # [HIVAR 2x] 0.5→0.4 — sensitive end
+IR_FACTOR_MAX = 2.0  # [HIVAR 2x] 1.5→2.0 — resistant end
+IR_TO_IS_NOISE_SIGMA = 0.2  # [HIVAR 2x] 0.1→0.2 — is_base decoupling
+IR_TO_ICR_NOISE_SIGMA = 0.24  # [HIVAR 2x] 0.12→0.24 — ICR decoupling
 
 # Insulin sensitivity. is_base is derived from insulin_resistance_factor
 # rather than sampled independently; this constant stays as the reference
 # centerpoint for the lognormal draw and isn't directly used in generation.
 IS_BASE_MEAN = 1.0
 IS_BASE_SIGMA = 0.2
-IS_DAILY_DRIFT_SIGMA = 0.10  # Day-to-day drift (scaled per-patient by (1.5 - s4)). Modest magnitude;
-                             # larger values blow CV above real-cohort levels and push TBR1
-                             # well above OhioT1DM's ~3%.
-IS_FAST_NOISE_SIGMA = 0.025  # Step-to-step noise; small for the same reason as IS_DAILY_DRIFT_SIGMA.
-IS_DAWN_PHASE_DAILY_SIGMA = 1.5  # Hours of day-to-day variation in dawn phenomenon timing
+IS_DAILY_DRIFT_SIGMA = 0.2  # [HIVAR 2x] 0.1→0.2 — day-to-day sensitivity drift
+IS_FAST_NOISE_SIGMA = 0.0  # [MINNOISE] step-to-step insulin-resistance noise minimized to zero
+IS_DAWN_PHASE_DAILY_SIGMA = 3.0  # [HIVAR 2x] 1.5→3.0 — dawn-timing scatter
 IS_DRIFT_TRANSITION_HOURS = 4.0  # Smooth blend across midnight from prev to today's drift/phase
 
 # Insulin sensitivity diurnal components (multiple peaks). All amplitudes are
@@ -181,14 +178,14 @@ IS_NIGHT_DIP_AMPLITUDE = 0.15 # How much more sensitive at night
 ILLNESS_PROBABILITY_BASE = 0.06  # Per-day probability of getting sick
 ILLNESS_HEALTH_WEIGHT = 0.8  # How much s4 reduces illness probability
 ILLNESS_RECOVERY_PROB = 0.2  # Geometric distribution parameter
-ILLNESS_IS_FACTOR_MIN = 1.3
-ILLNESS_IS_FACTOR_MAX = 2.5
+ILLNESS_IS_FACTOR_MIN = 1.25  # [HIVAR 2x] 1.3→1.25 — illness IR range
+ILLNESS_IS_FACTOR_MAX = 3.0  # [HIVAR 2x] 2.5→3.0 — illness IR range
 ILLNESS_IS_RAMP_RATE = 0.4  # How fast illness IS factor changes per day (0 to 1)
 
 # Basal insulin (long-acting)
 # Note: ideal basal dose is derived from HGO and ICR in generate_patient().
-BASAL_DOSE_SIGMA = 4.5  # Sigma around the HGO/ICR-derived ideal dose (inter-patient)
-BASAL_DOSE_COMPETENCE_NOISE = 0.05  # Day-to-day relative noise on basal dose, scaled by 1/s3.
+BASAL_DOSE_SIGMA = 9.0  # [HIVAR 2x] 4.5→9.0 — inter-patient basal-dose scatter
+BASAL_DOSE_COMPETENCE_NOISE = 0.1  # [HIVAR 2x] 0.05→0.1 — day-to-day basal-dose noise
                                     # Tightened from 0.15: real intra-individual basal CV is 5-15%
                                     # for modern long-acting analogues (glargine ~12%, degludec ~6%),
                                     # not 20-30%. Larger values produced visible "uneven hill" basal
@@ -199,8 +196,8 @@ BASAL_DURATION_HOURS = 28.0  # Population reference duration of action (kept for
                               # [BASAL_DURATION_HOURS_MIN, BASAL_DURATION_HOURS_MAX] range
                               # below, and the patient's injection cadence matches it
                               # (e.g. an 18h-duration patient injects every 18h).
-BASAL_DURATION_HOURS_MIN = 18.0   # Shortest plausible long-acting basal duration (per patient)
-BASAL_DURATION_HOURS_MAX = 30.0   # Longest plausible long-acting basal duration (per patient)
+BASAL_DURATION_HOURS_MIN = 15.0  # [HIVAR 2x] 18.0→15.0 — basal-duration span
+BASAL_DURATION_HOURS_MAX = 34.0  # [HIVAR 2x] 30.0→34.0 — basal-duration span
 BASAL_MISS_PROB_BASE = 0.02  # Base probability of fully skipping a basal dose. Lowered from
                               # 0.10: at the legacy rate even high-skill patients missed ~1%, and
                               # low-skill patients missed ~35%, producing long full-cadence zero
@@ -288,12 +285,48 @@ BOLUS_TIMING_COMPETENT_MEAN = -15.0 # Minutes before meal (negative = before). D
 # caused the cohort-aligned post-meal envelope to dip below baseline before
 # rising, which is not seen in real CGM data.
 BOLUS_TIMING_INCOMPETENT_MEAN = 10.0  # Minutes after meal
-BOLUS_TIMING_SIGMA_BASE = 5.0  # Base timing variance
+BOLUS_TIMING_SIGMA_BASE = 10.0  # [HIVAR 2x] 5.0→10.0 — bolus-timing scatter
+
+# ---------------------------------------------------------------------------
+# Real-world insulin analogues. Each patient is assigned exactly one
+# rapid-acting bolus analogue and one long-acting basal analogue in
+# generate_patient(). PK/PD parameters are sourced from prescribing
+# information and published pharmacology reviews (cited inline). The
+# glucose-lowering *action* profile — not the plasma concentration — is what
+# the curves represent, since the curve drives glucose_out over time.
+#
+# Bolus analogues (rapid-acting) → gamma_curve; action peak = (k-1)*theta min,
+# dia_base_hours = duration of action at the 5U reference dose (the dose
+# scaling in bolus_pk_for_dose via BOLUS_DIA_*/BOLUS_THETA_DOSE_SLOPE is kept).
+#   aspart  (NovoLog/NovoRapid): onset ~0.25h, peak ~1h,   DIA ~4h.
+#       [StatPearls NBK500030; Fast-acting aspart review, PMC7007438]
+#   lispro  (Humalog):           onset 0.25-0.5h, peak 1-2h, DIA ~5h.
+#       [StatPearls NBK507840]
+BOLUS_VARIANTS = {
+    "aspart": {"gamma_k": 3.0, "gamma_theta": 30.0, "dia_base_hours": 4.0},  # peak ~60 min
+    "lispro": {"gamma_k": 3.0, "gamma_theta": 37.5, "dia_base_hours": 5.0},  # peak ~75 min
+}
+
+# Basal analogues (long-acting) → basal_curve (Bateman one-compartment PK,
+# f(t)=exp(-ke t)-exp(-ka t)); action peak tmax = ln(ka/ke)/(ka-ke). Both are
+# dosed once daily (BASAL_DOSE_INTERVAL_HOURS cadence); the per-analogue
+# action_hours sets the steady-state overlap and hence the flatness.
+#   glargine U100 (Lantus): half-life ~12h (ke≈0.058/h), duration ~24h,
+#       effective mainly over the first 12-18h; here tmax≈6.8h, action 26h.
+#       [BEGIN Once Long, Diabetes Care 35:2464; glargine PI]
+#   degludec (Tresiba): half-life >25h (ke≈0.028/h), duration >42h, plasma
+#       peak 10-12h; here tmax≈11.5h (matches the sourced peak), action 42h.
+#       [Clin Pharmacokinet review, PMC4156782]
+BASAL_VARIANTS = {
+    "glargine": {"ka": 0.30, "ke": 0.058, "action_hours": 26.0, "tail_clip_hours": 4.0},
+    "degludec": {"ka": 0.20, "ke": 0.028, "action_hours": 42.0, "tail_clip_hours": 6.0},
+}
+BASAL_DOSE_INTERVAL_HOURS = 24.0  # Both analogues are injected once daily.
 
 # Carb counting error — relative SD around the true carb amount. A high
 # sigma is the dominant source of meal-bolus crashes that push TBR1 well
 # above the real-cohort band, so this is kept modest.
-CARB_COUNT_ERROR_SIGMA_BASE = 0.30  # Relative error, scaled by 1/s3. The symmetric "over-count" tail of larger values is what generates post-meal hypos.
+CARB_COUNT_ERROR_SIGMA_BASE = 0.60  # [HIVAR] 0.30→0.60 — wider carb-count error (drives more post-meal excursions both ways).
 
 # Asymmetric carb-count bias. Real T1D patients err on the side of under-bolusing
 # because they fear hypos more than mild post-meal hypers (the classic "round
@@ -316,7 +349,7 @@ PATIENCE_TIME_COMPETENT = 120  # Minutes before re-correcting (competent). IOB-a
                                # well below the real-cohort rate.
 PATIENCE_TIME_INCOMPETENT = 60  # Minutes before re-correcting (incompetent)
 CORRECTION_FACTOR_MEAN = 40.0  # mg/dL drop per unit of insulin
-CORRECTION_FACTOR_SIGMA = 10.0
+CORRECTION_FACTOR_SIGMA = 20.0  # [HIVAR 2x] 10.0→20.0 — correction-factor scatter
 BG_TARGET = 158.0  # Target BG for corrections. Aims near the real-cohort median (155–157) — corrections targeting lower routinely overshoot into hypo because absorbed insulin keeps acting after BG arrives at target. Sits well above the ATTD ideal (~110) — sim correction
                    # kinetics + delivery lag tend to overshoot, so a higher target keeps median BG
                    # near the real OhioT1DM ~157 and TBR1 near real's ~3% rather than runaway hypo.
@@ -333,7 +366,9 @@ BOLUS_SKIP_HYPO_BG = 75.0          # Below this, the meal bolus is skipped entir
 BOLUS_REDUCE_BG = 105.0            # Below this (but above SKIP), bolus is reduced. Sits well above the hypo edge so the BG-aware gate engages on borderline-low entries.
 BOLUS_REDUCE_FACTOR_BASE = 0.3     # Reduction floor — multiplied by (1 + 0.3*dosing_competence). When the BG-aware gate engages near borderline-low, the bolus is halved (or more) rather than scaled down marginally.
 BOLUS_BG_CHECK_BASE_PROB = 0.95    # Probability a patient checks CGM before bolusing; +0.05*attentiveness. Essentially every bolus is gated.
-MEAL_BOLUS_SKIP_BASE_PROB = 0.12   # Real patients occasionally forget the main-meal bolus. Weighted by (1 - s3): low-skill miss ~9% of main meals, high-skill <1%. Acts as a sub-day decorrelating shock for the residual mid-range ACF.
+MEAL_BOLUS_SKIP_BASE_PROB = 0.25   # [GE-FIX] 0.12→0.25 — real missed/mistimed main-meal boluses are common; weighted by (1 - s3). A sub-day aperiodic shock that (with the wider meal-timing jitter) dilutes the daily pattern and drives long-lag ACF toward the real-CGM ~0.
+AFTERNOON_SNACK_SLOT = 2            # [GE-FIX] index into MEAL_TIME_OFFSETS_HOURS of the mid-afternoon eating occasion
+AFTERNOON_SNACK_BOLUS_SKIP_BASE = 0.55  # [GE-FIX] afternoon grazing is frequently UN-bolused — the mechanism that keeps real T1D afternoons elevated (a bolused snack clears too fast to lift the plateau). Weighted by (1 - 0.5*s3) so even skilled patients skip some; the resulting sustained, aperiodic afternoon rises fill the lunch->dinner sag, restore the too-low hyper rate, and add mid-lag decorrelating churn.
 
 # Hypo correction
 HYPO_CORRECTION_BASE_GRAMS = 8.0  # Base correction (still under rule-of-15 of 15g). Kept at 8 — raising further makes the severe-hypo deficit-scaling formula (`14 + 0.35*deficit`) no longer dominate, breaking the test that deeper hypo yields strictly more rescue carbs.
@@ -349,14 +384,14 @@ EXERCISE_TIME_MEAN_OFFSET_HOURS = 11.0  # Typical time: wake + 11h. For the 7:30
                                         # (9.0 → ~16:30) clustered with the old 16:30 dinner; with dinner now at
                                         # 19:30 the exercise offset is shifted in step so the two events stay
                                         # ordered (exercise → dinner) rather than overlapping.
-EXERCISE_TIME_SIGMA_HOURS = 2.0
+EXERCISE_TIME_SIGMA_HOURS = 4.0  # [HIVAR] 2→4 — wider exercise-timing scatter.
 EXERCISE_DURATION_MEAN_MIN = 75.0       # Population-mean session length. Real OhioT1DM mean ≈ 86 min,
                                         # σ across patients ≈ 57; the previous 40-min mean represented
                                         # only short walkers. Each patient now samples their own mean
                                         # from N(75, 45) so the population spans walkers to cyclists.
-EXERCISE_DURATION_MEAN_SIGMA_MIN = 45.0  # σ for the per-patient mean (across-patient spread)
-EXERCISE_DURATION_MEAN_MIN_CLAMP = (15.0, 200.0)
-EXERCISE_DURATION_SIGMA_MIN = 20.0       # Within-patient day-to-day session-length variance
+EXERCISE_DURATION_MEAN_SIGMA_MIN = 90.0  # [HIVAR] 45→90 — wider across-patient session-length spread.
+EXERCISE_DURATION_MEAN_MIN_CLAMP = (12.0, 225.0)  # [HIVAR 2x] (15.0, 200.0)→(12.0, 225.0) — session-length clamp
+EXERCISE_DURATION_SIGMA_MIN = 40.0  # [HIVAR 2x] 20.0→40.0 — within-patient session-length noise
 EXERCISE_CARB_EQUIV_PER_MIN = 0.5  # Negative carb equivalent per minute of exercise
 EXERCISE_GAMMA_K = 3.0
 EXERCISE_GAMMA_THETA = 15.0
@@ -391,7 +426,7 @@ HGO_INSULIN_HALF_MAX = 0.0198  # Insulin per step at which HGO is half-suppresse
                                 # 8.25*2.25/(96*9.75) ≈ 0.0198. Mild change from 0.025 so
                                 # the Hill curve remains close to its previous shape and
                                 # meal-bolus HGO suppression dynamics are preserved.
-HGO_NOISE_SIGMA = 0.02  # Relative per-step noise (matched to IS_FAST_NOISE_SIGMA for visual consistency)
+HGO_NOISE_SIGMA = 0.0  # [MINNOISE] step-to-step hepatic-output noise minimized to zero
 HGO_INSULIN_SMOOTHING_ALPHA = 0.25  # EMA factor for the insulin level fed into the Hill function.
 # Models plasma-insulin lag behind SC absorption (~10-15 min), and prevents HGO
 # from stepping when a new bolus curve activates. Half-life ≈ 12 min at α=0.25.
@@ -420,7 +455,7 @@ DAWN_HGO_SIGMA_HOURS = 2.5           # Gaussian width. Narrowed back from 3.5 �
                                      # midnight-to-6am overnight rise that Ohio and Shanghai
                                      # both show. Per-patient amplitude noise is unchanged
                                      # so individual variability is preserved.
-DAWN_HGO_AMPLITUDE_MEAN = 8.5        # Mean peak HGO surge in g/hr (additive). 9 → 11 → 8.5:
+DAWN_HGO_AMPLITUDE_MEAN = 6.0        # [GE-FIX] 8.5→6.0 — trimmed so the morning BG peak (~186 like Ohio, was ~193) doesn't overshoot and inflate the daily amplitude. Mean peak HGO surge in g/hr (additive). 9 → 11 → 8.5:
                                      # to drive the overnight BG rise that real cohorts show
                                      # (Ohio: +24 mg/dL from midnight to 6am; sim used to be
                                      # −33 over the same window). Combined with the wider
@@ -428,13 +463,13 @@ DAWN_HGO_AMPLITUDE_MEAN = 8.5        # Mean peak HGO surge in g/hr (additive). 9
                                      # from ~40 to ~96 g/day. Compensated by smaller meals
                                      # (MEAL_CARB_MEANS trimmed) so net daily glucose budget
                                      # is roughly preserved.
-DAWN_HGO_AMPLITUDE_SIGMA = 2.0       # Per-patient SD on dawn amplitude — wide so patient diversity is visible
+DAWN_HGO_AMPLITUDE_SIGMA = 4.0  # [HIVAR 2x] 2.0→4.0 — dawn-surge spread
 NIGHT_HGO_DIP_HOUR = 2.0             # Hour of deep-sleep HGO trough
 NIGHT_HGO_DIP_SIGMA_HOURS = 2.5      # Narrower so it ends before dawn surge starts
 NIGHT_HGO_DIP_AMPLITUDE_MEAN = 0.3   # Mean peak HGO reduction in g/hr. Small magnitude — a larger dip
                                      # drives a nocturnal-hypo bulge (peak hypo concentration at 3 am)
                                      # far above the OhioT1DM cohort's flat-by-hour hypo distribution.
-NIGHT_HGO_DIP_AMPLITUDE_SIGMA = 0.25 # Per-patient SD (scaled with amplitude)
+NIGHT_HGO_DIP_AMPLITUDE_SIGMA = 0.5  # [HIVAR 2x] 0.25→0.5 — night-dip spread
 # Daily-integrated contribution (Gaussian: A * sigma * √(2π)):
 #   dawn ≈ 9.0 * 1.8 * √(2π) ≈ 40.6 g/day extra
 #   dip  ≈ 0.7 * 2.5 * √(2π) ≈ 4.4  g/day reduction
@@ -479,10 +514,9 @@ POSTPRANDIAL_IR_PENALTY_HALF = 1.5  # g/step active carb at half-max penalty
 # Injection site quality (lipohypertrophy) — per-dose multiplier on the
 # delivered insulin. Sigma scales inversely with lifestyle_consistency (poor
 # rotation discipline → more variance and occasional poor sites).
-SITE_QUALITY_SIGMA_BASE = 0.10  # Base relative sigma, scaled by (1.5 - s4). Kept tight — a wider
-                                # range allows lucky-site doses to deliver 1.3× expected insulin and crash BG.
-SITE_QUALITY_MIN = 0.5  # Minimum effective absorption multiplier
-SITE_QUALITY_MAX = 1.4  # Maximum (rare absorption surge)
+SITE_QUALITY_SIGMA_BASE = 0.2  # [HIVAR 2x] 0.1→0.2 — per-dose absorption scatter
+SITE_QUALITY_MIN = 0.35  # [HIVAR 2x] 0.5→0.35 — malabsorption floor
+SITE_QUALITY_MAX = 1.65  # [HIVAR 2x] 1.4→1.65 — absorption-surge ceiling
 
 # Delayed-meal HGO rebound — large meals trigger a positive HGO bump 4-6h
 # later (delayed gluconeogenesis from amino acids + cortisol response). This
@@ -492,46 +526,78 @@ DELAYED_HGO_PER_GRAM = 0.02  # g/hr of HGO bump per gram of meal carbs above thr
 DELAYED_HGO_MAX_BUMP = 5.0  # Cap on HGO bump magnitude (g/hr)
 DELAYED_HGO_DELAY_HOURS_MIN = 3.5  # Earliest onset after meal
 DELAYED_HGO_DELAY_HOURS_MAX = 5.5  # Latest onset
-DELAYED_HGO_DURATION_HOURS_MIN = 3.0
-DELAYED_HGO_DURATION_HOURS_MAX = 6.0  # Narrow rebound envelope — wider durations push the half-day BG ACF tail above real-cohort levels.
+DELAYED_HGO_DURATION_HOURS_MIN = 2.7  # [HIVAR 2x] 3.0→2.7 — rebound-duration span
+DELAYED_HGO_DURATION_HOURS_MAX = 7.0  # [HIVAR 2x] 6.0→7.0 — rebound-duration span
 DELAYED_HGO_RAMP_HOURS = 1.0  # Trapezoidal ramp up/down for the rebound envelope
 
 # Per-step absorption noise on the carb/insulin reads. Models gut absorption
 # variability (mixing, blood flow) and subcutaneous depot dissolution variance.
 # Multiplicative — only matters when the underlying curve is non-zero.
-CARB_ABSORPTION_NOISE_SIGMA = 0.02
-INSULIN_ABSORPTION_NOISE_SIGMA = 0.02
+CARB_ABSORPTION_NOISE_SIGMA = 0.0  # [MINNOISE] step-to-step carb-absorption noise minimized to zero
+INSULIN_ABSORPTION_NOISE_SIGMA = 0.0  # [MINNOISE] per-step insulin-absorption noise removed — basal/bolus curves were sawtoothing
 
 # BG computation
-BG_SCALE_FACTOR = 4.0  # Alpha: converts abstract units to mg/dL per step
-BG_CLAMP_MIN = 20.0  # Hard backstop — should rarely fire thanks to soft damping below
-BG_CLAMP_MAX = 500.0
+BG_SCALE_FACTOR = 3.5  # [GE-FIX] 1.5→3.5 — restored toward the pre-DAMP scale now that glucose effectiveness (below) supplies the in-band restoring force. The prior 1.5 damped every flux term including the patient's own correction insulin, slowing the correction loop and lengthening the BG memory (long-lag ACF). With Sg bounding excursions, alpha can carry realistic 5-min delta scale and faster correction dynamics again.
+BG_CLAMP_MIN = 40.0  # [HIVAR] 20→40 — match real CGM device floor (Ohio/AZT1D min = 40).
+BG_CLAMP_MAX = 400.0  # [HIVAR] 500→400 — match real CGM device ceiling (Ohio/AZT1D max = 400).
 BG_INITIAL_MEAN = 120.0
-BG_INITIAL_SIGMA = 30.0
+BG_INITIAL_SIGMA = 60.0  # [HIVAR] 30→60 — wider warmup start (washes out over the run).
 
 # Soft BG bounds: in the approach zone, a single step can close at most
 # SOFT_APPROACH_FRACTION of the remaining headroom to the hard bound. This
 # gives geometric asymptotic decay toward the floor/ceiling — BG never
 # actually reaches the hard clamp under normal dynamics, regardless of how
 # large the raw delta is. The hard clamp is kept only as a backstop.
-BG_SOFT_FLOOR = 50.0           # Cap kicks in when BG drops below this
-BG_SOFT_CEILING = 400.0        # Cap kicks in when BG rises above this
-SOFT_APPROACH_FRACTION = 0.3   # Max gap-fraction a single negative/positive step can close
+BG_SOFT_FLOOR = 50.0           # Cap kicks in when BG drops below this (10 mg/dL runway above the 40 hard floor)
+BG_SOFT_CEILING = 385.0        # [HIVAR] 400→385 — keep a soft runway below the new 400 hard ceiling
+SOFT_APPROACH_FRACTION = 0.15  # [DAMP] 0.3→0.15 — stronger delta-damping as BG nears the bounds.
 
 # BG regulatory computation
 RENAL_THRESHOLD = 180.0  # Kidneys start excreting glucose above this
-RENAL_CLEARANCE_RATE = 0.005  # Fraction of excess BG cleared per step
+RENAL_CLEARANCE_RATE = 0.015  # [DAMP] 0.005→0.015 — arrest hyper excursions faster (shorter/shallower highs).
 COUNTER_REGULATORY_THRESHOLD = 70.0  # Body releases glucagon below this
-COUNTER_REGULATORY_RATE = 0.8  # mg/dL added per step when below threshold
+COUNTER_REGULATORY_RATE = 1.5  # [DAMP] 0.8→1.5 — arrest hypo excursions faster.
 SEVERE_HYPO_THRESHOLD = 55.0  # Below this, glucagon dump kicks in
 SEVERE_HYPO_GLUCAGON_RATE = 2.0  # Extra mg/dL per step at severity=1.0
 
+# Glucose effectiveness (Bergman minimal-model Sg): the insulin-INDEPENDENT
+# glucose disposal + hepatic-glucose-output autoregulation that clears a
+# glucose load even at basal insulin. Modeled as an always-on linear restoring
+# pull of the BG delta toward an equilibrium setpoint:
+#     bg_delta += glucose_effectiveness * (ge_setpoint_for_hour(hour) - bg)
+# where the setpoint is DIURNAL (GE_SETPOINT_DAY by day, GE_SETPOINT_NIGHT
+# overnight): a single constant setpoint sagged the afternoon/evening into a
+# daytime trough real CGM lacks; the diurnal target restores the daytime
+# plateau while preserving the aperiodic restoring dynamics that fix the ACF.
+# This is the mean-reverting force the renal/counter-regulatory guardrails do
+# NOT supply inside the normal 70-180 band (they are gated to BG>180 / BG<70).
+# Without it, within-band BG is an under-damped integrator of net flux — a
+# slowly-corrected random walk — so the level autocorrelation decays far too
+# slowly (acf at 8h ~0.3 vs ~0 in real CGM). Sg gives BG a finite correlation
+# time and simultaneously tightens the distribution, so it (unlike lowering
+# BG_SCALE_FACTOR) improves the ACF tail WITHOUT flattening excursions.
+# GE_RATE is the population-mean per-step reversion fraction; per-patient Sg is
+# sampled lognormally around it (real Sg varies ~2-3x across individuals) so
+# heterogeneity is preserved. See ge_setpoint_for_hour for the diurnal target.
+GE_RATE = 0.030            # [GE-FIX] population-mean per-step glucose-effectiveness reversion (co-calibrated with BG_SCALE_FACTOR and the diurnal setpoint below; a stronger pull over-peaks the distribution — IQR/kurtosis drift off Ohio — so 0.030 keeps the spread realistic)
+GE_SETPOINT_NIGHT = 148.0  # [GE-FIX] overnight equilibrium the Sg pull targets
+GE_SETPOINT_DAY = 156.0    # [GE-FIX] daytime (waking-hours) equilibrium. NOTE: because the Sg pull dominates the daytime mean, raising this lifts the afternoon but injects a stronger daily-periodic component into the mid-lag ACF — a direct trade. With the unbolused afternoon snack added (real forcing that Sg partly clears), a modest swing is the balance point; the afternoon elevation is ultimately Sg-setpoint-limited, not meal-limited.
+GE_DAY_START_HOUR = 7.0    # setpoint ramps up around wake
+GE_DAY_END_HOUR = 22.0     # ramps back down in the late evening
+GE_DAY_RAMP_HOURS = 3.0    # smootherstep ramp width for the day/night setpoint transitions
+GE_REL_SIGMA = 0.30        # per-patient lognormal spread of Sg around GE_RATE (~2x inter-individual range)
+GE_RATE_MIN = 0.004        # floor so no patient is a pure (undamped) integrator
+GE_RATE_MAX = 0.060        # cap on per-patient Sg
+
 # CGM noise
-# NOTE: CGM_LAG_MINUTES is reserved for a future interstitial-lag implementation
-# in `_compute_cgm_observation` (lookup of true BG from `CGM_LAG_MINUTES` ago).
-# It is currently DEFINED BUT UNUSED — the CGM reads instantaneous BG.
-CGM_LAG_MINUTES = 10
-CGM_NOISE_FRACTION = 0.060  # Stationary σ of the AR(1) sensor-noise process
+# CGM interstitial lag. The sensor sits in interstitial fluid, which trails
+# plasma glucose by a first-order diffusion process (Rebrin/Steil):
+#   dIG/dt = (BG - IG) / tau,  tau = CGM_LAG_MINUTES.
+# Applied in `_compute_cgm_observation` before the sensor noise, so every
+# consumer of bg_observed (corrections, hypo detection, the exported CGM
+# channel) sees the delayed-and-smoothed interstitial value, not instant BG.
+CGM_LAG_MINUTES = 15
+CGM_NOISE_FRACTION = 0.060  # [GE-FIX] 0.120→0.060 — reverted the HIVAR 2x back to the value calibrated for the ~5.8 mg/dL Δ5min-std target; the true-BG delta scale is now carried by BG_SCALE_FACTOR, and observed acf(8h) stays ~true (~0.03) since sensor noise no longer dilutes it.
                             # (~9 mg/dL drift around BG=150). Bumped from 0.018 to compensate
                             # for the AR(1) step-to-step variance reduction; preserves the
                             # 5.81 mg/dL Δ5min std target while producing the smooth,
@@ -550,7 +616,7 @@ NOISE_AR1_INNOV_METABOLIC = float(np.sqrt(1.0 - NOISE_AR1_RHO_METABOLIC ** 2))
 NOISE_AR1_INNOV_SENSOR = float(np.sqrt(1.0 - NOISE_AR1_RHO_SENSOR ** 2))
 
 # Rare events
-RARE_EVENT_PROBABILITY = 0.02  # Per-day probability of a rare/chaotic day
+RARE_EVENT_PROBABILITY = 0.04  # [HIVAR 2x] 0.02→0.04 — chaotic-day rate
 RARE_EVENT_SKILL_REDUCTION = 0.3  # Even skilled people have bad days sometimes
 
 # Hypo correction refractory + post-hypo basal stand-down. Without the basal
@@ -689,10 +755,24 @@ class PatientProfile:
     is_base: float = 1.0
     icr: float = 10.0
     correction_factor: float = 40.0
+    glucose_effectiveness: float = GE_RATE  # per-patient Bergman Sg (per-step reversion)
     basal_dose: float = 20.0
-    basal_duration_hours: float = BASAL_DURATION_HOURS  # Per-patient action duration
-                                                         # AND injection cadence (patient
-                                                         # boluses every basal_duration_hours).
+
+    # Insulin analogue assignment (one rapid bolus + one long-acting basal per
+    # patient; see BOLUS_VARIANTS / BASAL_VARIANTS). basal_duration_hours is now
+    # the PK *action* duration of the chosen basal analogue; the injection
+    # cadence is basal_dose_interval_hours (once daily), decoupled from it.
+    bolus_type: str = "aspart"
+    basal_type: str = "glargine"
+    bolus_gamma_k: float = BOLUS_GAMMA_K
+    bolus_gamma_theta: float = BOLUS_GAMMA_THETA
+    bolus_dia_base_hours: float = BOLUS_DIA_BASE_HOURS
+    basal_ka: float = BASAL_KA_PER_HOUR
+    basal_ke: float = BASAL_KE_PER_HOUR
+    basal_duration_hours: float = BASAL_DURATION_HOURS  # PK action duration (h)
+    basal_tail_clip_hours: float = BASAL_TAIL_CLIP_HOURS
+    basal_dose_interval_hours: float = BASAL_DOSE_INTERVAL_HOURS  # injection cadence (h)
+
     dawn_hgo_amplitude: float = DAWN_HGO_AMPLITUDE_MEAN
     night_hgo_dip_amplitude: float = NIGHT_HGO_DIP_AMPLITUDE_MEAN
     exercise_duration_mean_min: float = EXERCISE_DURATION_MEAN_MIN
@@ -850,21 +930,50 @@ def basal_curve(total_amount: float, duration_minutes: float,
     return curve
 
 
-def bolus_pk_for_dose(dose_units: float) -> tuple:
+def bolus_pk_for_dose(dose_units: float,
+                      gamma_k: float = BOLUS_GAMMA_K,
+                      gamma_theta: float = BOLUS_GAMMA_THETA,
+                      dia_base_hours: float = BOLUS_DIA_BASE_HOURS) -> tuple:
     """Return (k, theta, duration_minutes) for a bolus of the given dose.
 
     Subcutaneous insulin DIA scales with dose: larger depots dissolve more
     slowly, peak slightly later, and act for longer. Scaling is centered on a
-    5U reference dose so a typical meal bolus matches BOLUS_DIA_BASE_HOURS.
+    5U reference dose so a typical meal bolus matches ``dia_base_hours``.
+
+    ``gamma_k`` / ``gamma_theta`` / ``dia_base_hours`` default to the legacy
+    reference bolus but are overridden per patient with the chosen rapid-acting
+    analogue's parameters (see BOLUS_VARIANTS).
     """
     dose = max(0.5, dose_units)
     sqrt_excess = float(np.sqrt(dose) - np.sqrt(5.0))
     duration_h = float(np.clip(
-        BOLUS_DIA_BASE_HOURS + BOLUS_DIA_DOSE_SCALE * sqrt_excess,
+        dia_base_hours + BOLUS_DIA_DOSE_SCALE * sqrt_excess,
         BOLUS_DIA_MIN_HOURS, BOLUS_DIA_MAX_HOURS,
     ))
-    theta = BOLUS_GAMMA_THETA * (1.0 + BOLUS_THETA_DOSE_SLOPE * sqrt_excess)
-    return BOLUS_GAMMA_K, theta, duration_h * 60.0
+    theta = gamma_theta * (1.0 + BOLUS_THETA_DOSE_SLOPE * sqrt_excess)
+    return gamma_k, theta, duration_h * 60.0
+
+
+def ge_setpoint_for_hour(hour_of_day: float) -> float:
+    """Diurnal glucose-effectiveness setpoint (mg/dL).
+
+    Elevated (GE_SETPOINT_DAY) through the waking window and lower
+    (GE_SETPOINT_NIGHT) overnight, joined by smootherstep ramps. A single
+    constant setpoint pulled the afternoon/evening BG down into a daytime
+    trough real CGM does not show; this time-varying target keeps the daytime
+    plateau up while leaving the aperiodic restoring dynamics (which set the
+    ACF) unchanged.
+    """
+    def _sstep(x: float, a: float, b: float) -> float:
+        if b <= a:
+            return 1.0 if x >= b else 0.0
+        t = min(1.0, max(0.0, (x - a) / (b - a)))
+        return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+
+    ramp_up = _sstep(hour_of_day, GE_DAY_START_HOUR, GE_DAY_START_HOUR + GE_DAY_RAMP_HOURS)
+    ramp_down = 1.0 - _sstep(hour_of_day, GE_DAY_END_HOUR - GE_DAY_RAMP_HOURS, GE_DAY_END_HOUR)
+    day_weight = ramp_up * ramp_down
+    return GE_SETPOINT_NIGHT + (GE_SETPOINT_DAY - GE_SETPOINT_NIGHT) * day_weight
 
 
 def envelope_intensity(time_idx: int, start_idx: int, end_idx: int,
@@ -943,6 +1052,12 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     profile.is_base = max(0.3, ir * np.exp(rng.normal(0.0, IR_TO_IS_NOISE_SIGMA)))
     profile.icr = max(3.0, (ICR_MEAN / ir) * np.exp(rng.normal(0.0, IR_TO_ICR_NOISE_SIGMA)))
     profile.correction_factor = max(10.0, rng.normal(CORRECTION_FACTOR_MEAN, CORRECTION_FACTOR_SIGMA) / ir)
+    # Per-patient glucose effectiveness (Sg), lognormal around the population
+    # mean so real ~2-3x inter-individual spread is preserved; floored so no
+    # patient is a pure integrator (which would re-open the long-ACF tail).
+    profile.glucose_effectiveness = float(np.clip(
+        GE_RATE * np.exp(rng.normal(0.0, GE_REL_SIGMA)),
+        GE_RATE_MIN, GE_RATE_MAX))
     profile.dawn_hgo_amplitude = max(0.0, rng.normal(DAWN_HGO_AMPLITUDE_MEAN, DAWN_HGO_AMPLITUDE_SIGMA))
     profile.night_hgo_dip_amplitude = max(0.0, rng.normal(NIGHT_HGO_DIP_AMPLITUDE_MEAN, NIGHT_HGO_DIP_AMPLITUDE_SIGMA))
     profile.exercise_duration_mean_min = float(np.clip(
@@ -965,14 +1080,25 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     # need 60+ U basal/day (e.g., 110kg patient with IR=1.8).
     profile.basal_dose = float(np.clip(rng.normal(ideal_basal, noise_scale), 5.0, 80.0))
 
-    # Per-patient long-acting basal duration of action. The patient also
-    # injects at this same cadence (an 18h-duration patient injects every
-    # 18h; a 30h-duration patient injects every 30h, often skipping a
-    # calendar day). basal_dose stays as the 24h-equivalent total need so
-    # the HGO/ICR balance invariant is unchanged; the per-injection amount
-    # is scaled by basal_duration_hours/24 at scheduling time.
-    profile.basal_duration_hours = float(rng.uniform(
-        BASAL_DURATION_HOURS_MIN, BASAL_DURATION_HOURS_MAX))
+    # Insulin analogue assignment — one rapid-acting bolus and one long-acting
+    # basal per patient, drawn uniformly. PK params come from the variant
+    # tables; the basal PK action duration replaces the old sampled duration.
+    # Both basals are dosed once daily (basal_dose_interval_hours), so the
+    # per-injection amount is the full 24h basal_dose (per_dose_factor = 1.0)
+    # and the HGO/ICR balance invariant is unchanged.
+    profile.bolus_type = str(rng.choice(list(BOLUS_VARIANTS.keys())))
+    bv = BOLUS_VARIANTS[profile.bolus_type]
+    profile.bolus_gamma_k = bv["gamma_k"]
+    profile.bolus_gamma_theta = bv["gamma_theta"]
+    profile.bolus_dia_base_hours = bv["dia_base_hours"]
+
+    profile.basal_type = str(rng.choice(list(BASAL_VARIANTS.keys())))
+    av = BASAL_VARIANTS[profile.basal_type]
+    profile.basal_ka = av["ka"]
+    profile.basal_ke = av["ke"]
+    profile.basal_duration_hours = av["action_hours"]
+    profile.basal_tail_clip_hours = av["tail_clip_hours"]
+    profile.basal_dose_interval_hours = BASAL_DOSE_INTERVAL_HOURS
 
     # Behavioral parameters derived from skills
     wake_sigma = WAKE_TIME_SIGMA_BASE / (0.3 + 0.7 * s4)
@@ -1063,6 +1189,8 @@ class T1DMSimulator:
         self._ar_carb: float = 0.0
         self._ar_insulin: float = 0.0
         self._ar_cgm: float = 0.0
+        # Interstitial glucose state for the CGM lag (see CGM_LAG_MINUTES).
+        self._interstitial_bg: float = float(self.state.bg)
 
         # Pre-generate day plan
         self._plan_day()
@@ -1109,6 +1237,7 @@ class T1DMSimulator:
         self._ar_carb = 0.0
         self._ar_insulin = 0.0
         self._ar_cgm = 0.0
+        self._interstitial_bg = float(self.state.bg)
 
         self._pending_events = []
 
@@ -1365,18 +1494,17 @@ class T1DMSimulator:
             0.5, 1.6))
 
         # --- Schedule all basals that fall inside today's window ---
-        # Cadence between consecutive injections = patient.basal_duration_hours
-        # (the patient is aware of their basal's duration of action and
-        # re-doses on that schedule). For an 18h-duration patient this means
-        # ~4 injections every 3 days; for a 30h-duration patient ~4 every 5
-        # days. Some days will have zero injections (long duration) and some
-        # will have two (short duration, schedule alignment) — both fine.
+        # Real glargine and degludec are dosed once daily, so the injection
+        # cadence is basal_dose_interval_hours (24h) regardless of the
+        # analogue's PK action duration. Each once-daily dose delivers the
+        # full 24h basal_dose (per_dose_factor = 1.0), so 24h-average delivery
+        # stays at p.basal_dose / 24h and the HGO/ICR balance is unchanged.
+        # The analogue's action_hours (glargine 26h, degludec 42h) drives the
+        # PK curve length: degludec's long tail overlaps ~1.75 doses at steady
+        # state (very flat), glargine's ~1 dose (mild end-of-day waning).
         day_end_idx = day_start_idx + STEPS_PER_DAY
-        basal_duration_steps = max(1, int(p.basal_duration_hours * 60 / DT_MINUTES))
-        # Per-injection amount scales with cadence so 24h-average insulin
-        # delivery stays at p.basal_dose / 24h regardless of duration:
-        # a 30h-cadence dose is larger because it has to last longer.
-        per_dose_factor = p.basal_duration_hours / 24.0
+        basal_interval_steps = max(1, int(p.basal_dose_interval_hours * 60 / DT_MINUTES))
+        per_dose_factor = p.basal_dose_interval_hours / 24.0
 
         if s.next_basal_due_idx < 0:
             # First-ever basal — anchor at today's wake_idx (un-jittered;
@@ -1397,17 +1525,19 @@ class T1DMSimulator:
                 actual_dose = max(0.5, p.basal_dose * per_dose_factor
                                   * s.basal_dose_drift * dose_noise
                                   * basal_adjustment * site_q)
-                duration = p.basal_duration_hours * (1.0 + BASAL_PK_OVERLAP_FRACTION) * 60
-                curve = basal_curve(float(actual_dose), duration)
+                duration = p.basal_duration_hours * 60
+                curve = basal_curve(float(actual_dose), duration,
+                                    ka_per_hour=p.basal_ka, ke_per_hour=p.basal_ke,
+                                    tail_clip_hours=p.basal_tail_clip_hours)
                 self._pending_events.append((dose_idx, 'basal', {
                     'curve': curve,
-                    'label': f'Basal {actual_dose:.1f}U ({p.basal_duration_hours:.1f}h)',
+                    'label': (f'Basal {actual_dose:.1f}U '
+                              f'{p.basal_type} ({p.basal_duration_hours:.0f}h)'),
                 }))
 
-            # Advance whether or not the injection was missed — patient still
-            # intended to inject at this slot, so the next attempt is one
-            # full duration of action later.
-            s.next_basal_due_idx = dose_idx + basal_duration_steps
+            # Advance whether or not the injection was missed — the patient
+            # still intended to inject at this once-daily slot.
+            s.next_basal_due_idx = dose_idx + basal_interval_steps
 
         # --- Meals ---
         if s.is_rare_event_day:
@@ -1535,7 +1665,9 @@ class T1DMSimulator:
             # low-skill patients miss the occasional main-meal bolus too.
             # The main-meal skips are also a source of decorrelating shocks
             # that knock down mid-range BG autocorrelation.
-            if i >= MEALS_BASE:
+            if i == AFTERNOON_SNACK_SLOT:
+                bolus_skip_prob = AFTERNOON_SNACK_BOLUS_SKIP_BASE * (1 - 0.5 * eff_s3)
+            elif i >= MEALS_BASE:
                 bolus_skip_prob = 0.1 * (1 - eff_s3)
             else:
                 bolus_skip_prob = MEAL_BOLUS_SKIP_BASE_PROB * (1 - eff_s3)
@@ -1547,7 +1679,9 @@ class T1DMSimulator:
 
                 # PK shape is determined by the intended dose; site quality
                 # only modulates the absorbed amount.
-                base_k, base_theta, bolus_duration = bolus_pk_for_dose(intended_dose)
+                base_k, base_theta, bolus_duration = bolus_pk_for_dose(
+                    intended_dose, p.bolus_gamma_k, p.bolus_gamma_theta,
+                    p.bolus_dia_base_hours)
                 bolus_k = base_k * (1 + self.rng.normal(0, 0.05))
                 bolus_theta = base_theta * (1 + self.rng.normal(0, 0.05))
                 delivered_dose = intended_dose * self._site_quality(eff_s4)
@@ -1735,18 +1869,26 @@ class T1DMSimulator:
         return max(0.2, is_val)
 
     def _compute_cgm_observation(self, true_bg: float) -> float:
-        """Compute CGM reading with proportional noise.
+        """Compute the CGM reading: interstitial lag then proportional noise.
 
-        NOTE: interstitial lag (CGM_LAG_MINUTES) is not currently applied —
-        the observation tracks instantaneous true BG plus noise. See the
-        constant's comment for the future implementation hook.
+        Interstitial glucose trails plasma by a first-order diffusion lag
+        (Rebrin/Steil): ``IG += (BG - IG) * (1 - exp(-dt/tau))`` with
+        ``tau = CGM_LAG_MINUTES``. The sensor then reports this delayed-and-
+        smoothed value plus AR(1) noise, so it never sees instantaneous BG.
         """
+        if CGM_LAG_MINUTES > 0:
+            alpha_lag = 1.0 - np.exp(-DT_MINUTES / float(CGM_LAG_MINUTES))
+            self._interstitial_bg += alpha_lag * (true_bg - self._interstitial_bg)
+            sensed_bg = self._interstitial_bg
+        else:
+            sensed_bg = true_bg
+
         # AR(1) sensor noise: real CGMs show smoothly-drifting offsets over
         # 30-60 min windows, not white-noise spikes. The Perlin-like wobble is
-        # produced by ρ=0.92 (~42 min half-life) with σ scaled by true BG.
+        # produced by ρ=0.92 (~42 min half-life) with σ scaled by BG.
         self._ar_cgm = (NOISE_AR1_RHO_SENSOR * self._ar_cgm
                         + NOISE_AR1_INNOV_SENSOR * self.rng.normal(0, CGM_NOISE_FRACTION))
-        observed = true_bg * (1.0 + self._ar_cgm)
+        observed = sensed_bg * (1.0 + self._ar_cgm)
         return np.clip(observed, BG_CLAMP_MIN, BG_CLAMP_MAX)
 
     def _check_and_correct(self, time_idx: int):
@@ -1912,7 +2054,9 @@ class T1DMSimulator:
                         rage_mult = self.rng.uniform(RAGE_BOLUS_MULTIPLIER_MIN, RAGE_BOLUS_MULTIPLIER_MAX)
                         correction_dose *= rage_mult
 
-                base_k, base_theta, corr_duration = bolus_pk_for_dose(correction_dose)
+                base_k, base_theta, corr_duration = bolus_pk_for_dose(
+                    correction_dose, p.bolus_gamma_k, p.bolus_gamma_theta,
+                    p.bolus_dia_base_hours)
                 delivered_dose = correction_dose * self._site_quality(p.lifestyle_consistency)
                 bolus_curve = gamma_curve(delivered_dose, base_k, base_theta, corr_duration)
                 self.inject_curve(bolus_curve, time_idx, 'bolus',
@@ -1933,7 +2077,9 @@ class T1DMSimulator:
                     if self.rng.random() < p.attentiveness:
                         projected_rise = trend * TREND_CORRECTION_WINDOW_STEPS * 2
                         correction_dose = max(0.5, projected_rise * p.attentiveness / p.correction_factor)
-                        base_k, base_theta, corr_duration = bolus_pk_for_dose(correction_dose)
+                        base_k, base_theta, corr_duration = bolus_pk_for_dose(
+                            correction_dose, p.bolus_gamma_k, p.bolus_gamma_theta,
+                            p.bolus_dia_base_hours)
                         delivered_dose = correction_dose * self._site_quality(p.lifestyle_consistency)
                         bolus_curve = gamma_curve(delivered_dose, base_k, base_theta, corr_duration)
                         self.inject_curve(bolus_curve, time_idx, 'bolus',
@@ -2154,6 +2300,12 @@ class T1DMSimulator:
         glucose_in = total_carb + hgo_value - total_exercise
         glucose_out = total_insulin * p.icr / insulin_resistance_factor
         bg_delta = BG_SCALE_FACTOR * (glucose_in - glucose_out)
+
+        # Glucose effectiveness (Bergman Sg): insulin-independent, always-on
+        # restoring pull toward the equilibrium setpoint. Supplies the in-band
+        # mean reversion the gated renal/counter-regulatory terms below do not,
+        # giving BG a finite correlation time instead of a random-walk ACF tail.
+        bg_delta += p.glucose_effectiveness * (ge_setpoint_for_hour(hour_of_day) - s.bg)
 
         # Physiological guardrails
         if s.bg > RENAL_THRESHOLD:
