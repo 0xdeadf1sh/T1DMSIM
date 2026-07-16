@@ -596,11 +596,21 @@ SEVERE_HYPO_GLUCAGON_RATE = 2.0  # Extra mg/dL per step at severity=1.0
 # simultaneously anchors the pooled mean/low-tail onto the real cohorts. See
 # ge_day_weight for the diurnal lift and the OU update in generate().
 GE_RATE = 0.060            # [GE-OU] strong Sg so BG tracks the fast-wandering equilibrium (short correlation time -> acf(8h)~0)
-GE_EQ_ANCHOR_MEAN = 131.0  # [GE-OU] population-mean equilibrium anchor (co-tuned with GE_EQ_SIGMA / GE_EQ_FLOOR to land the pooled mean ~162 on Ohio; with a large sigma the floor-clipping largely sets the mean, so the anchor is a fine trim)
+GE_EQ_ANCHOR_MEAN = 137.0  # [GE-OU] population-mean equilibrium anchor (co-tuned with GE_EQ_SIGMA / GE_EQ_FLOOR to land the pooled mean ~162 on Ohio; with a large sigma the floor-clipping largely sets the mean, so the anchor is a fine trim)
 GE_EQ_ANCHOR_SIGMA = 12.0  # [GE-OU] between-patient spread of the anchor (per-patient mean heterogeneity)
-GE_EQ_SIGMA = 105.0        # [GE-OU][OHIO-CARB] stationary std of the equilibrium wandering. Raised 70->105 after the meal generator was trimmed to Ohio's carb load (~194 g/day): smaller meals carry less BG variance, so the OU channel picks up the slack to keep the pooled BG spread (std ~61, MAGE ~101) on Ohio.
+GE_EQ_SIGMA = 95.0                # [GE-OU][OHIO-CARB][DAWN] stationary std of the equilibrium's APERIODIC wandering. Was 105; lowered to 95 when the structured dawn rhythm (GE_EQ_DAWN_AMPLITUDE) took over part of the equilibrium's variance — the point of the dawn work is to trade opaque aperiodic wander for day-to-day-consistent, learnable variance while holding the pooled BG spread (std ~61) on Ohio.
 GE_EQ_TAU_HOURS = 3.0      # [GE-OU][TEXTURE] OU timescale. 2.0 -> 3.0: a slightly longer correlation time smooths the equilibrium's step-to-step wander, cutting the excess signal complexity / hyper-episode fragmentation (SampEn ~1.07 -> ~0.9, hyper/day 3.0 -> 2.8 toward the real cohorts) AND raising the mid-lag autocorrelation (2h/4h) toward Ohio, which the too-short 2h timescale left below the real values. Still << 8h, so the 8h ACF stays ~0 (no long-lag memory).
-GE_EQ_DAY_BOOST = 10.0     # [GE-OU] diurnal lift of the anchor over waking hours
+GE_EQ_DAY_BOOST = 10.0     # [GE-OU] legacy flat daytime lift — SUPERSEDED by the dawn-phenomenon profile below (kept as a constant for backward-compat); the OU step now uses ge_diurnal_profile instead.
+# [DAWN] Structured dawn-phenomenon rhythm on the OU equilibrium. Replaces the flat
+# day boost with a per-patient daily profile (peaks post-dawn), tied to each patient's
+# dawn trait. This converts opaque OU wander into a signal that is a deterministic
+# function of time-of-day AND a per-patient trait — hence LEARNABLE by a downstream
+# behaviour->BG model (a real dawn rise it can predict), which pure OU noise is not.
+# Co-tuned DOWN against GE_EQ_SIGMA so total spread stays on Ohio while the day-to-day-
+# consistent (periodic) share of the variance rises -> higher acf24h and diurnal amplitude.
+GE_EQ_DAWN_AMPLITUDE_MEAN = 35.0   # [DAWN] population-mean amplitude of the equilibrium's daily rhythm (mg/dL); per-patient value scales with the dawn trait
+GE_DAWN_PEAK_HOUR = 8.0            # [DAWN] hour of the equilibrium's daily peak (Ohio's diurnal peak is h8 / post-waking cortisol rise)
+GE_DAWN_WIDTH_HOURS = 5.5          # [DAWN] Gaussian width of the daily profile — broad, so daytime stays elevated and only the small hours dip
 GE_DAY_START_HOUR = 7.0    # setpoint ramps up around wake
 GE_DAY_END_HOUR = 22.0     # ramps back down in the late evening
 GE_DAY_RAMP_HOURS = 3.0    # smootherstep ramp width for the day/night setpoint transitions
@@ -796,6 +806,7 @@ class PatientProfile:
 
     dawn_hgo_amplitude: float = DAWN_HGO_AMPLITUDE_MEAN
     night_hgo_dip_amplitude: float = NIGHT_HGO_DIP_AMPLITUDE_MEAN
+    ge_dawn_amplitude: float = GE_EQ_DAWN_AMPLITUDE_MEAN
     exercise_duration_mean_min: float = EXERCISE_DURATION_MEAN_MIN
 
     # Derived behavioral parameters
@@ -993,6 +1004,25 @@ def ge_day_weight(hour_of_day: float) -> float:
     return ramp_up * ramp_down
 
 
+def ge_diurnal_profile(hour_of_day: float) -> float:
+    """Mean-zero daily (dawn-phenomenon) profile for the OU equilibrium.
+
+    A wrapped Gaussian peaking at GE_DAWN_PEAK_HOUR, mean-subtracted over the 24h
+    day so the daily component adds rhythm WITHOUT shifting the pooled mean. Scaled
+    per-patient by ge_dawn_amplitude in the OU step. Being a deterministic function
+    of the hour of day (repeated every day), its variance is day-to-day consistent
+    and shows up as 24h autocorrelation and diurnal amplitude — the structure real
+    CGM has that opaque OU noise lacks. A smooth Gaussian (a TRANSIENT morning peak)
+    beats a sustained daytime plateau here: the slow basal-adjustment feedback
+    absorbs a sustained elevation but not a transient dawn rise, so the Gaussian is
+    what actually surfaces as visible diurnal amplitude. The 24h mean of the wrapped
+    Gaussian is ~width*sqrt(2*pi)/24 (tails negligible for width << 24)."""
+    d = ((hour_of_day - GE_DAWN_PEAK_HOUR + 12.0) % 24.0) - 12.0
+    raw = float(np.exp(-0.5 * (d / GE_DAWN_WIDTH_HOURS) ** 2))
+    daily_mean = GE_DAWN_WIDTH_HOURS * 2.5066282746310002 / 24.0
+    return raw - daily_mean
+
+
 def envelope_intensity(time_idx: int, start_idx: int, end_idx: int,
                        ramp_up_steps: int, ramp_down_steps: int) -> float:
     """Trapezoidal envelope for time-bounded effects.
@@ -1084,6 +1114,13 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
         110.0, 210.0))
     profile.dawn_hgo_amplitude = max(0.0, rng.normal(DAWN_HGO_AMPLITUDE_MEAN, DAWN_HGO_AMPLITUDE_SIGMA))
     profile.night_hgo_dip_amplitude = max(0.0, rng.normal(NIGHT_HGO_DIP_AMPLITUDE_MEAN, NIGHT_HGO_DIP_AMPLITUDE_SIGMA))
+    # Equilibrium dawn rhythm scales with the SAME per-patient dawn trait as the HGO
+    # surge (one coherent, learnable "dawn strength" per patient): factor 0 (no dawn)
+    # to ~2 (strong), so strong-dawn patients get both a bigger HGO surge and a bigger
+    # daily equilibrium swing.
+    dawn_factor = (min(2.0, profile.dawn_hgo_amplitude / DAWN_HGO_AMPLITUDE_MEAN)
+                   if DAWN_HGO_AMPLITUDE_MEAN > 0 else 0.0)
+    profile.ge_dawn_amplitude = GE_EQ_DAWN_AMPLITUDE_MEAN * dawn_factor
     profile.exercise_duration_mean_min = float(np.clip(
         rng.normal(EXERCISE_DURATION_MEAN_MIN, EXERCISE_DURATION_MEAN_SIGMA_MIN),
         *EXERCISE_DURATION_MEAN_MIN_CLAMP))
@@ -2341,7 +2378,7 @@ class T1DMSimulator:
         # correlation time (low 8h ACF); E's wandering adds distributional
         # spread but decorrelates within hours, so it does not re-inject long-lag
         # autocorrelation — decoupling spread from the ACF.
-        ge_mu = p.ge_anchor + GE_EQ_DAY_BOOST * ge_day_weight(hour_of_day)
+        ge_mu = p.ge_anchor + p.ge_dawn_amplitude * ge_diurnal_profile(hour_of_day)
         ge_rho = float(np.exp(-DT_MINUTES / (GE_EQ_TAU_HOURS * 60.0)))
         self._ge_equilibrium = (
             ge_mu + ge_rho * (self._ge_equilibrium - ge_mu)
