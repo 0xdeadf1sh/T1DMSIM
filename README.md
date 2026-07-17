@@ -135,6 +135,8 @@ Each virtual patient is defined by four skill dimensions sampled from a multivar
 
 These skills are mapped through a sigmoid and clipped to a configurable range (default 0.25-0.95). From these four numbers, all behavioral parameters are derived: meal sizes, timing jitter, bolus accuracy, correction behavior, exercise habits, and more.
 
+Beyond skill, each patient also carries orthogonal physiological traits sampled independently of the skill profile: body weight, a per-patient insulin-resistance level (which sets baseline insulin needs and carb ratio and shifts the patient's average glucose — more-resistant patients run higher), and a per-patient glucose-variability scale (how widely their glucose wanders within the day). Because these vary from patient to patient, the population shows realistic between-patient spread in both mean glucose and glycemic variability, comparable to the spread seen across the real CGM cohorts.
+
 
 ## Insulin Sensitivity Model
 
@@ -272,12 +274,13 @@ All parameters are uppercase constants at the top of `simulator.py`. They are gr
 
 ## Comparison Against Real-World Datasets
 
-The simulator output is compared against three non-redistributable real CGM corpora — **OhioT1DM** (6 US adults, 5-min Medtronic Enlite CGM), **ShanghaiT1DM** (12 patients / 16 records, 15-min cadence, mixed CSII + MDI), and **AZT1D** (25 US adults on Tandem t:slim X2 Control-IQ AID systems, 5-min Dexcom G6 plus full pump event log: basal rate, bolus type, correction-vs-meal split, carb size, device mode) — on distributional moments, KS / Wasserstein / JS distances, LBGI / HBGI, MAGE / CONGA / MODD / SampEn, autocorrelation across nine lags, diurnal envelopes, weekday × hour heatmaps, episode counts and durations, hypo recovery time, per-record TIR / TBR scatter, and (AZT1D only) a head-to-head insulin / carb behaviour panel.
+The simulator output is compared against three non-redistributable real CGM corpora — **OhioT1DM** (6 US adults, 5-min Medtronic Enlite CGM), **ShanghaiT1DM** (12 patients / 16 records, 15-min cadence, mixed CSII + MDI), and **AZT1D** (25 US adults on Tandem t:slim X2 Control-IQ AID systems, 5-min Dexcom G6 plus full pump event log: basal rate, bolus type, correction-vs-meal split, carb size, device mode) — on distributional moments, KS / Wasserstein / JS distances, LBGI / HBGI, MAGE / CONGA / MODD / SampEn, autocorrelation across nine lags, diurnal envelopes, weekday × hour heatmaps, episode counts and durations, hypo recovery time, per-record TIR / TBR scatter, and (AZT1D only) a head-to-head insulin / carb behaviour panel. An extended-statistics section adds further two-sample distances (energy, Cramér–von Mises, Anderson–Darling, total-variation, Hellinger, histogram-overlap), cadence-fair metrics computed on a common 15-minute grid, temporal-structure measures (Poincaré SD1/SD2, spectral entropy, DFA/Hurst, ACF e-folding time, and a glycemic-band Markov transition matrix with per-band dwell times), cross-seed bootstrap confidence intervals, and a standardised gap score.
 
 The full report — tables, figures, and methodology — lives at [`diff/README.md`](diff/README.md). All three datasets are gitignored and live under `datasets/` (subject to data-use agreements). Reproduce with:
 
 ```bash
-python diff/build_report.py
+python diff/build_report.py                          # default corpus
+python diff/build_report.py --n-seeds 300 --days 70  # larger synthetic corpus
 ```
 
 ## Comparison Against the UVA/Padova Simulator

@@ -117,6 +117,7 @@ At each step:
     glucose_in  = total_carb + HGO - exercise
     glucose_out = total_insulin * ICR / IS(t)
     delta_BG    = BG_SCALE_FACTOR * (glucose_in - glucose_out)
+    delta_BG   += Sg * (E(t) - BG)     # glucose-effectiveness restoring pull (see below)
 
 `IS(t)` now divides the insulin side: insulin-resistant patients (IS > 1) clear less glucose per unit insulin; sensitive patients (IS < 1) clear more. HGO suppression by insulin is handled separately (see Hepatic Glucose Output) — IS only modulates peripheral insulin action.
 
@@ -137,6 +138,26 @@ Final:
     BG(t+1) = clamp(BG(t) + delta_BG, BG_CLAMP_MIN, BG_CLAMP_MAX)
 
 `BG_CLAMP_MIN` is intentionally low (20 mg/dL) so the dynamics, not the clamp, drive the lower tail. The combined counter-regulatory + glucagon-dump terms together with the soft-bound headroom cap are usually strong enough to lift BG before the clamp engages.
+
+### Glucose effectiveness (Bergman Sg) equilibrium
+
+The restoring term `delta_BG += Sg * (E(t) - BG)` is an always-on, insulin-independent pull toward a stochastic equilibrium `E(t)`. It supplies the within-band mean reversion the renal / counter-regulatory guardrails do not; inside 70–180 net flux is otherwise integrated with an over-long autocorrelation. `Sg = glucose_effectiveness` is the per-patient Bergman minimal-model glucose effectiveness (a per-step reversion fraction), sampled lognormally around `GE_RATE` and clipped to `[GE_RATE_MIN, GE_RATE_MAX]` (~2–3× inter-individual spread; the floor prevents a pure integrator).
+
+`E(t)` is an Ornstein–Uhlenbeck process. With `rho = exp(-DT_MINUTES / (GE_EQ_TAU_HOURS * 60))` it mean-reverts each step toward a target `mu`, is perturbed by Gaussian noise, then floored:
+
+    mu = ge_anchor + ge_dawn_amplitude * ge_diurnal_profile(hour)
+    E  = mu + rho * (E_prev - mu) + sqrt(1 - rho^2) * GE_EQ_SIGMA * ge_sigma_mult * N(0, 1)
+    E  = max(E, GE_EQ_FLOOR)
+
+The `sqrt(1 - rho^2)` factor makes the stationary std equal `GE_EQ_SIGMA * ge_sigma_mult`. The strong, fast Sg pull gives BG a short correlation time (8h ACF ≈ 0) while `E`'s wandering supplies distributional spread that decorrelates within hours, decoupling spread from the autocorrelation. `GE_EQ_FLOOR = 64` sits above `SEVERE_HYPO_THRESHOLD = 55`, so the pull is always upward in a severe low (it aids, never opposes, the rescue). `ge_diurnal_profile(hour)` is a mean-zero wrapped-Gaussian dawn-phenomenon rhythm peaking at `GE_DAWN_PEAK_HOUR = 8` with width `GE_DAWN_WIDTH_HOURS = 5.5`, mean-subtracted over the 24h day so it adds rhythm without shifting the pooled mean; its per-patient amplitude `ge_dawn_amplitude` scales with the same dawn trait as the HGO surge.
+
+Per-patient heterogeneity (sampled once in `generate_patient`):
+
+    ir            = clip(exp(N(0, IR_LOGNORMAL_SIGMA)), IR_FACTOR_MIN, IR_FACTOR_MAX)
+    ge_anchor     = clip(N(GE_EQ_ANCHOR_MEAN + GE_ANCHOR_IR_COUPLING * (ir - 1), GE_EQ_ANCHOR_SIGMA), 110, 210)
+    ge_sigma_mult = clip(exp(N(0, GE_SIGMA_REL_SIGMA)), GE_SIGMA_MULT_CLIP)
+
+with `IR_LOGNORMAL_SIGMA = 0.26`, `IR_FACTOR_MIN / IR_FACTOR_MAX = 0.4 / 2.0`, `GE_EQ_ANCHOR_MEAN = 138`, `GE_ANCHOR_IR_COUPLING = 30` (mg/dL per unit `ir - 1`), `GE_EQ_ANCHOR_SIGMA = 15`, `GE_SIGMA_REL_SIGMA = 0.16`, and `GE_SIGMA_MULT_CLIP = (0.68, 1.38)`. The anchor's between-patient spread carries the per-patient mean-glucose heterogeneity; the insulin-resistance coupling raises the anchor for resistant patients (higher `ir` → higher mean glucose) on the high side that `GE_EQ_FLOOR` does not compress. The per-patient `ge_sigma_mult` makes patients differ in *within*-patient variability rather than sharing one global `GE_EQ_SIGMA`. The same `ir` also seeds `is_base`, `icr`, and `correction_factor`.
 
 
 ## CGM Observation Model
@@ -160,7 +181,7 @@ Insulin-suppressed via a Hill function on EMA-smoothed insulin (proxies plasma i
     meal_rebound  = sum over active meal_hgo_effects of (magnitude * envelope_intensity) * (DT_MINUTES / 60)
     HGO(t)        = HGO_baseline + meal_rebound
 
-`HGO_INSULIN_HALF_MAX` is tuned so a typical basal level (~0.07 U/step) yields ~9 g/hr (the legacy balanced rate, preserved so basal sizing — `ideal_basal = HGO_BASE_GRAMS_PER_HOUR * 24 * (body_weight_kg / BODY_WEIGHT_MEAN_KG) * is_base / ICR` — still produces near-zero net delta. The weight factor mirrors the per-step HGO scaling and the `is_base` factor keeps the invariant across baseline insulin needs). At zero insulin, HGO climbs toward `HGO_UNSUPPRESSED_GRAMS_PER_HOUR` (DKA-like). Alcohol additionally suppresses HGO via `alcohol_factor` (trapezoidal envelope around 1.0). The `glycogen_gate` ramps HGO down when the reservoir is depleted (see Glycogen reservoir). The `meal_rebound` term is additive (not multiplicative) — see Delayed-meal HGO rebound below.
+`HGO_INSULIN_HALF_MAX` is tuned so a typical basal level (~0.086 U/step) yields 8.25 g/hr (`HGO_BASE_GRAMS_PER_HOUR`, the balanced reference rate, preserved so basal sizing — `ideal_basal = HGO_BASE_GRAMS_PER_HOUR * 24 * (body_weight_kg / BODY_WEIGHT_MEAN_KG) * is_base / ICR` — still produces near-zero net delta. The weight factor mirrors the per-step HGO scaling and the `is_base` factor keeps the invariant across baseline insulin needs). At zero insulin, HGO climbs toward `HGO_UNSUPPRESSED_GRAMS_PER_HOUR` (DKA-like). Alcohol additionally suppresses HGO via `alcohol_factor` (trapezoidal envelope around 1.0). The `glycogen_gate` ramps HGO down when the reservoir is depleted (see Glycogen reservoir). The `meal_rebound` term is additive (not multiplicative) — see Delayed-meal HGO rebound below.
 
 Helper: `compute_hgo_rate(insulin_per_step) -> g/hr`.
 
