@@ -21,31 +21,31 @@ operating range, isolated post-meal excursions (≥25 g, no
 other ≥20 g meal within ±120 min so the rise and peak
 are clean, a 180-min window) are extracted
 relative to each engine's **own** pre-meal baseline, so what is compared is the
-*response*, not the level. 813 excursions met the criteria.
+*response*, not the level. 751 excursions met the criteria.
 
 ## Excursion amplitude and timing (median, IQR)
 
 | Quantity | T1DMSIM | UVA/Padova |
 |---|---|---|
-| Peak rise (mg/dL) | 46 (10–95) | 37 (24–51) |
-| Time-to-peak (min) | 100 (40–170) | 75 (60–90) |
-| 3-h excursion area (mg/dL·min) | 3830 (381–10749) | 3608 (2116–5501) |
-| Recovery to baseline (min) | 180 (50–180) | 145 (105–180) |
+| Peak rise (mg/dL) | 48 (18–82) | 32 (20–46) |
+| Time-to-peak (min) | 70 (40–140) | 75 (55–90) |
+| 3-h excursion area (mg/dL·min) | 3834 (764–8364) | 3156 (1505–5095) |
+| Recovery to baseline (min) | 145 (65–180) | 140 (90–180) |
 
 Per-meal paired differences (T1DMSIM − UVA/Padova): peak rise
-**+10** mg/dL
-(IQR -20–+55),
-time-to-peak **+20** min
-(IQR -35–+80).
+**+17** mg/dL
+(IQR -14–+48),
+time-to-peak **+0** min
+(IQR -35–+60).
 
 ### By carbohydrate load
 
 | Meal size | n | T1DMSIM peak (mg/dL) | UVA/Padova peak (mg/dL) | T1DMSIM t-peak (min) | UVA/Padova t-peak (min) |
 |---|---|---|---|---|---|
-| 25-40 g | 289 | 23 (2–54) | 24 (17–35) | 85 (20–165) | 75 (55–90) |
-| 40-55 g | 210 | 40 (13–76) | 35 (27–47) | 105 (35–180) | 75 (65–85) |
-| 55-70 g | 141 | 66 (24–130) | 48 (36–63) | 105 (45–170) | 75 (65–90) |
-| 70-200 g | 173 | 98 (52–170) | 52 (44–79) | 100 (55–155) | 75 (65–90) |
+| 25-40 g | 348 | 35 (7–68) | 22 (14–33) | 70 (30–151) | 70 (50–90) |
+| 40-55 g | 194 | 44 (20–71) | 34 (25–48) | 65 (40–134) | 75 (60–90) |
+| 55-70 g | 105 | 67 (38–91) | 40 (32–58) | 70 (45–115) | 75 (60–85) |
+| 70-200 g | 104 | 91 (49–143) | 55 (41–84) | 70 (45–100) | 80 (70–90) |
 
 ![Mean excursion by carbohydrate load](figures/excursion_shape_by_size.png)
 ![Paired peak rise](figures/excursion_peak_scatter.png)

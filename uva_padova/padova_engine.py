@@ -35,17 +35,22 @@ def _install_shims() -> None:
         gym.envs = envs  # type: ignore[attr-defined]
         envs.registration = reg  # type: ignore[attr-defined]
         sys.modules.update({"gym": gym, "gym.envs": envs, "gym.envs.registration": reg})
-    if "pkg_resources" not in sys.modules:
-        if importlib.util.find_spec("pkg_resources") is None:
-            pr = types.ModuleType("pkg_resources")
+    def _resource_filename(package: str, resource: str) -> str:
+        spec = importlib.util.find_spec(package)
+        assert spec is not None and spec.origin is not None
+        return os.path.join(os.path.dirname(spec.origin), resource)
 
-            def _resource_filename(package: str, resource: str) -> str:
-                spec = importlib.util.find_spec(package)
-                assert spec is not None and spec.origin is not None
-                return os.path.join(os.path.dirname(spec.origin), resource)
-
-            pr.resource_filename = _resource_filename  # type: ignore[attr-defined]
-            sys.modules["pkg_resources"] = pr
+    # setuptools>=81 dropped pkg_resources; some builds still ship a partial
+    # stub without resource_filename. Handle both: absent -> full stub;
+    # present-but-incomplete -> patch in the one function simglucose needs.
+    try:
+        import pkg_resources as _pr  # type: ignore
+        if not hasattr(_pr, "resource_filename"):
+            _pr.resource_filename = _resource_filename  # type: ignore[attr-defined]
+    except Exception:
+        pr = types.ModuleType("pkg_resources")
+        pr.resource_filename = _resource_filename  # type: ignore[attr-defined]
+        sys.modules["pkg_resources"] = pr
 
 
 _install_shims()
