@@ -107,13 +107,25 @@ def load_azt1d_patients() -> dict:
         csvs = [f for f in os.listdir(sub_dir) if f.endswith('.csv')]
         if not csvs:
             continue
+        path = os.path.join(sub_dir, csvs[0])
         try:
-            df = pd.read_csv(os.path.join(sub_dir, csvs[0]),
-                             usecols=['EventDateTime', 'CGM'])
+            header = pd.read_csv(path, nrows=0).columns
+        except Exception:
+            continue
+        # Most subjects expose a bare 'CGM' column; Subject 14 alone names it
+        # 'Readings (CGM / BGM)'. Match any header containing 'CGM' so a renamed
+        # column cannot silently drop a subject (was excluding Subject 14, a
+        # low-mean outlier, biasing the AZT1D reference up ~1.7 mg/dL).
+        cgm_col = 'CGM' if 'CGM' in header else next(
+            (c for c in header if 'CGM' in c), None)
+        if cgm_col is None or 'EventDateTime' not in header:
+            continue
+        try:
+            df = pd.read_csv(path, usecols=['EventDateTime', cgm_col])
         except Exception:
             continue
         ts_col = pd.to_datetime(df['EventDateTime'], errors='coerce')
-        bg_col = pd.to_numeric(df['CGM'], errors='coerce')
+        bg_col = pd.to_numeric(df[cgm_col], errors='coerce')
         rows = []
         for ts, val in zip(ts_col, bg_col):
             if pd.isna(ts) or pd.isna(val):
@@ -181,8 +193,14 @@ def _regularize_rows(rows, step_min: int, gap_min: int):
             elif dt1 == 0:
                 v = vals[i]
             else:
-                w = dt0 / dt1
-                v = vals[i] + w * (vals[i + 1] - vals[i])
+                # Snap to the nearer real sample rather than linearly
+                # interpolating. Linear interpolation is a low-pass that shaves
+                # ~5-7% off the real cohorts' short-scale variability (their
+                # Dexcom timestamps drift off the grid), while the on-grid
+                # simulator is passed through untouched — biasing every
+                # high-frequency comparison (Δ-BG SD, short-lag ACF). Nearest
+                # keeps both arms on the same footing.
+                v = vals[i] if 2 * dt0 <= dt1 else vals[i + 1]
         else:
             v = vals[i]
         out_t.append(cur)
@@ -325,7 +343,10 @@ def run_pipeline(name: str, items, regularize_fn, event_rates_fn,
             **variability_metrics(bg, step_min=step_min),
             **event_rates_fn(rid),
         }
-        days = (len(bg) * step_min) / (60 * 24)
+        # Observed (non-NaN) coverage, NOT calendar span: NaN-bridged gap cells
+        # carry no episodes, so counting them as exposure deflates per-day rates
+        # for gappy real cohorts (~8% on Ohio) while the gapless sim is exact.
+        days = (int(np.sum(~np.isnan(bg))) * step_min) / (60 * 24)
         h_d = episodes(bg, 70, below=True, step_min=step_min)
         H_d = episodes(bg, 180, below=False, step_min=step_min)
         rec['hypo_count_per_day'] = len(h_d) / days if days else 0.0

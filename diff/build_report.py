@@ -57,6 +57,7 @@ from compare_all_datasets import (  # noqa: E402
     regularize_bg, regularize_bg_15min, OHIO_DIR,
 )
 from simulator import T1DMSimulator  # noqa: E402
+import extended_stats as es  # noqa: E402
 
 
 # ----- palette -----
@@ -149,28 +150,61 @@ def sample_entropy(x, m=2, r_frac=0.2, step_min=5, interval_min=15, max_pts=4000
     0.34 -> 1.11 as the run grew from 10 to 70 days). Striding on the grid to a fixed
     interval removes that confound; SampEn is then N-stable, so a generous `max_pts`
     cap only bounds cost. Stride BEFORE dropping gap NaNs so the true interval is
-    preserved across dropouts."""
+    preserved across dropouts.
+
+    Template matches are accumulated WITHIN contiguous (gap-free) segments only.
+    Simply dropping NaNs would concatenate the samples on either side of every
+    dropout, so a template window could straddle a bridged gap — joining points
+    hours-to-days apart as if `interval_min` apart. Those false adjacencies inject
+    near-random jumps that inflate SampEn for the gappy real cohorts while leaving
+    the gapless simulator untouched, spuriously collapsing the real-vs-sim
+    complexity gap. Splitting at NaNs removes that artefact; a common `r` from the
+    pooled valid samples keeps every segment on one scale."""
     x = np.asarray(x, dtype=float)
     stride = max(1, int(round(interval_min / step_min)))
     x = x[::stride]
-    x = x[~np.isnan(x)]
-    if len(x) > max_pts:
-        x = x[:max_pts]
-    n = len(x)
-    if n < m + 2:
+    # Cap to the first max_pts VALID samples (preserving gap structure) so both
+    # gapless (sim) and gappy (real) records use the same point budget and cost
+    # — a gapless record must not silently run the full uncapped series.
+    valid_mask = ~np.isnan(x)
+    if int(valid_mask.sum()) > max_pts:
+        cum = np.cumsum(valid_mask)
+        cutoff = int(np.searchsorted(cum, max_pts, side="left")) + 1
+        x = x[:cutoff]
+    valid = x[~np.isnan(x)]
+    if len(valid) < m + 2:
         return float("nan")
-    r = r_frac * np.std(x)
+    r = r_frac * float(np.std(valid))
     if r == 0:
         return float("nan")
 
+    # Contiguous non-NaN runs of the (capped) strided series.
+    segments = []
+    cur = []
+    for v in x:
+        if np.isnan(v):
+            if len(cur) >= m + 1:
+                segments.append(np.asarray(cur, dtype=float))
+            cur = []
+        else:
+            cur.append(v)
+    if len(cur) >= m + 1:
+        segments.append(np.asarray(cur, dtype=float))
+    if not segments:
+        return float("nan")
+
     def phi(mm):
-        # max-norm template matching, exclude self-match
-        templates = np.lib.stride_tricks.sliding_window_view(x, mm)
-        ntemp = len(templates)
+        # max-norm template matching within each segment, exclude self-match;
+        # a window is never allowed to cross a former gap.
         cnt = 0
-        for i in range(ntemp):
-            dists = np.max(np.abs(templates[i + 1:] - templates[i]), axis=1)
-            cnt += int(np.sum(dists <= r))
+        for seg in segments:
+            if len(seg) < mm + 1:
+                continue
+            templates = np.lib.stride_tricks.sliding_window_view(seg, mm)
+            ntemp = len(templates)
+            for i in range(ntemp):
+                dists = np.max(np.abs(templates[i + 1:] - templates[i]), axis=1)
+                cnt += int(np.sum(dists <= r))
         return cnt
 
     a = phi(m + 1)
@@ -268,22 +302,36 @@ def episode_durations(bg, threshold, below=True, step_min=5, min_minutes=15):
     return out
 
 
-def episode_recovery_time(bg, low_thresh=70, normal_thresh=80, step_min=5):
+def episode_recovery_time(bg, low_thresh=70, normal_thresh=80, step_min=5,
+                          min_minutes=15):
     """For each hypo episode, time from first sample <70 to first subsequent
-    sample ≥80. Bridges NaN gaps as in-range."""
+    sample ≥80. Bridges NaN gaps as in-range.
+
+    To keep the recovery-time population consistent with `episode_durations`
+    (which drops <15-min crossings), a dip must stay below `low_thresh` for at
+    least `min_minutes` before it is treated as an episode worth timing. An
+    episode that never re-crosses `normal_thresh` before the record ends is
+    excluded rather than recorded as an (uncapped) end-of-record 'recovery',
+    which would conflate 'never recovered' with 'slow recovery'."""
     bg = bg.copy()
     bg[np.isnan(bg)] = 120.0
     out = []
     n = len(bg)
+    min_samples = max(1, int(round(min_minutes / step_min)))
     i = 0
     while i < n:
         if bg[i] < low_thresh:
+            # measure how long BG stays below low_thresh from here
+            k = i
+            while k < n and bg[k] < low_thresh:
+                k += 1
+            below_run = k - i
             j = i
             while j < n and bg[j] < normal_thresh:
                 j += 1
-            dur = (j - i) * step_min
-            out.append(dur)
-            i = j
+            if below_run >= min_samples and j < n:
+                out.append((j - i) * step_min)
+            i = j if j > i else i + 1
         else:
             i += 1
     return out
@@ -306,6 +354,7 @@ def assemble_cohort(name, items, regularize_fn, step_min):
     """Per-record dict + pooled arrays."""
     per = []
     pooled = []
+    series = []  # per-record regularised bg (with NaN gaps) for extended stats
     diurnals_mean = []
     diurnals_std = []
     diurnals_median = []
@@ -339,7 +388,11 @@ def assemble_cohort(name, items, regularize_fn, step_min):
         rec["conga_1h"] = conga(bg, 1, step_min)
         rec["conga_4h"] = conga(bg, 4, step_min)
         rec["modd"] = modd(t, bg, step_min)
-        days = (len(bg) * step_min) / (60 * 24)
+        # Observed (non-NaN) coverage, NOT calendar span: NaN-bridged gap cells
+        # carry no episodes (the numerator only accrues in real time), so
+        # counting them as exposure deflates every per-day rate for the gappy
+        # real cohorts (~8% Ohio, ~1.5% AZT1D) while the gapless sim stays exact.
+        days = (int(np.sum(~np.isnan(bg))) * step_min) / (60 * 24)
         h = episode_durations(bg, 70, True, step_min)
         H = episode_durations(bg, 180, False, step_min)
         sh = episode_durations(bg, 54, True, step_min)
@@ -360,6 +413,7 @@ def assemble_cohort(name, items, regularize_fn, step_min):
         rec["delta_std"] = float(np.std(diff_rec)) if len(diff_rec) else float("nan")
         per.append(rec)
         pooled.append(bg_clean)
+        series.append(bg)
         for L in lags_min:
             v = rec["lag_acf"][L]
             if not np.isnan(v):
@@ -414,6 +468,8 @@ def assemble_cohort(name, items, regularize_fn, step_min):
         "severe_hypo_durs": severe_hypo_durs,
         "severe_hyper_durs": sev_hyper_durs,
         "recov_times": recov_times,
+        "series": series,
+        "series_step": step_min,
     }
     return cohort
 
@@ -436,7 +492,13 @@ def assemble_sim(n_seeds=30, days=70, warmup_h=24):
         s.generate_hours(warmup_h)
         d = s.generate_hours(days * 24)
         bg = np.asarray(d["bg_observed"], dtype=float)
-        t0 = datetime(2024, 1, 1)
+        # Advance the calendar origin by the warm-up so the harness weekday
+        # matches the simulator's internal day-of-week. The sim starts on a
+        # Monday (SIMULATION_START_DAY_OF_WEEK=0) and 2024-01-01 is a Monday;
+        # the discarded warm-up advances the internal clock, so without this
+        # shift the whole weekday×hour grid is rotated one day relative to the
+        # real (true-calendar) cohorts.
+        t0 = datetime(2024, 1, 1) + timedelta(hours=warmup_h)
         rows = [(t0 + timedelta(minutes=5 * i), float(bg[i])) for i in range(len(bg))]
         items.append((str(seed), rows))
         raw_runs.append((str(seed), d))
@@ -1180,7 +1242,12 @@ def distribution_distances(a, b, bins=None):
     ks_stat, ks_p = sps.ks_2samp(a, b)
     w = float(sps.wasserstein_distance(a, b))
     if bins is None:
-        bins = np.arange(40, 401, 5)
+        # Cover the full plausible support, not just [40,400]. Ohio/AZT1D and
+        # the simulator are hard-clamped to [40,400], but Shanghai is
+        # uncensored (39.6-475.2); a [40,400] window silently drops ~1.3% of
+        # Shanghai's mass — precisely the extreme tail the clamped sim cannot
+        # reproduce — flattering every Shanghai JS pair. Wide bins count it.
+        bins = np.arange(0, 601, 5)
     ha, _ = np.histogram(a, bins=bins, density=True)
     hb, _ = np.histogram(b, bins=bins, density=True)
     js = jensen_shannon(ha, hb)
@@ -1742,12 +1809,32 @@ def _build_ml_section(cohorts, distances, pooled_moments, pooled_percentiles,
     d_oa = distances["Ohio_vs_AZT1D"]
     d_oo = distances["Ohio_vs_Shanghai"]
 
-    # Use the most-similar real-vs-real baseline as the comparison anchor.
+    # Compare like with like: min-sim-vs-min-real AND mean-sim-vs-mean-real,
+    # never the flattering min-sim-vs-mean-real cross.
     real_baselines = [d_oo["wasserstein"], d_oa["wasserstein"],
                       distances["Shanghai_vs_AZT1D"]["wasserstein"]]
-    real_baseline = float(np.mean(real_baselines))
-    sim_best = min(d_so["wasserstein"], d_ss["wasserstein"], d_sa["wasserstein"])
-    closer_than_real = sim_best < real_baseline
+    sim_dists = [d_so["wasserstein"], d_ss["wasserstein"], d_sa["wasserstein"]]
+    real_baseline_min = float(np.min(real_baselines))
+    real_baseline_mean = float(np.mean(real_baselines))
+    sim_best = float(np.min(sim_dists))
+    sim_mean = float(np.mean(sim_dists))
+    closer_than_real = (sim_best < real_baseline_min) and (sim_mean < real_baseline_mean)
+
+    # Guard the overfit note on the actual argmin / floor comparison so a future
+    # retune cannot leave a stale hard-coded assertion in the shipped README.
+    _sim_pairs = [("Ohio", d_so["wasserstein"]), ("Shanghai", d_ss["wasserstein"]),
+                  ("AZT1D", d_sa["wasserstein"])]
+    _argmin_name, _argmin_w = min(_sim_pairs, key=lambda kv: kv[1])
+    if _argmin_w < real_baseline_min:
+        overfit_note = (
+            f"Note the smallest gap is Sim-vs-{_argmin_name} ({_argmin_w:.1f} mg/dL), which "
+            f"falls *below* the {real_baseline_min:.1f} mg/dL real-vs-real floor — the "
+            f"simulator is tuned against OhioT1DM specifically, so a sub-floor distance "
+            f"reflects that tuning, not general realism beyond that cohort.")
+    else:
+        overfit_note = (
+            f"The smallest gap is Sim-vs-{_argmin_name} ({_argmin_w:.1f} mg/dL), at or above "
+            f"the {real_baseline_min:.1f} mg/dL real-vs-real floor.")
 
     def _fmt_lag(min_val):
         if not np.isfinite(min_val):
@@ -1890,18 +1977,20 @@ direct measure of the domain gap that needs to close at inference time.
 | Ohio vs AZT1D    (real-vs-real baseline) | {d_oa['ks_stat']:.3f} | {d_oa['wasserstein']:.1f} | {d_oa['js_div']:.3f} |
 | Shanghai vs AZT1D (real-vs-real baseline) | {distances['Shanghai_vs_AZT1D']['ks_stat']:.3f} | {distances['Shanghai_vs_AZT1D']['wasserstein']:.1f} | {distances['Shanghai_vs_AZT1D']['js_div']:.3f} |
 
-The smallest Sim-vs-real Wasserstein-1 of {sim_best:.1f} mg/dL is
-{'*smaller* than' if closer_than_real else 'comparable to'} the
-mean real-vs-real baseline of {real_baseline:.1f} mg/dL — meaning the
-simulator's pooled BG distribution is
-{'closer to one real cohort than the three real cohorts are to each other on average' if closer_than_real else 'within the same band as the three real cohorts'}.
+Compared like-for-like against the real-vs-real spread: the Sim-vs-real
+Wasserstein-1 distances are {sim_best:.1f} (min) / {sim_mean:.1f} (mean) mg/dL,
+versus a real-vs-real baseline of {real_baseline_min:.1f} (min) /
+{real_baseline_mean:.1f} (mean) mg/dL. The simulator's pooled BG distribution
+therefore sits {'inside' if closer_than_real else 'at the edge of'} the band the
+three real cohorts span among themselves (min-vs-min and mean-vs-mean).
+{overfit_note}
 """
     return md
 
 
 def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
                     pooled_risk, cohort_summaries, recov_summaries,
-                    az_event_stats, sim_event_stats, unexpl_stats, path):
+                    az_event_stats, sim_event_stats, unexpl_stats, ext, path):
     """Template the full markdown report from computed stats.
 
     Tables are filled programmatically from the same numbers that go into
@@ -2052,6 +2141,7 @@ segments are censored."""
     ])) for x in ORDER}
 
     # ML-friendly section (volume, normalization, class balance, autocorr, ...)
+    ext_section_md = _build_extended_section(ext, cohorts)
     ml_section_md = _build_ml_section(cohorts, distances, pooled_moments,
                                        pooled_percentiles, cohort_summaries)
 
@@ -2126,26 +2216,35 @@ transient, then the next 70 days are captured.
 
 ## 2. Methodology
 
-- **Resampling.** Ohio CGM is irregular Dexcom samples; it is linearly
-  interpolated onto a 5 min grid with gaps > 30 min NaN-bridged. Shanghai is
+- **Resampling.** Ohio CGM is irregular Dexcom samples; it is resampled onto a
+  5 min grid by nearest-sample snapping (each grid cell takes the nearer real
+  sample, not a linear interpolation) with gaps > 30 min NaN-bridged. Shanghai is
   similarly resampled to a 15 min grid with > 60 min gaps as NaN. AZT1D is
   natively 5-min and uses the same 30-min gap rule as Ohio. The simulator is
   already on a 5 min grid. All statistics ignore NaN.
 - **Cadence-aware comparison.** Rate-of-change Δ-BG, ACF, CONGA, MAGE, and MODD
-  are computed at each cohort's **native** cadence. Cross-cadence comparison is
-  flagged where it materially affects interpretation (notably Δ-BG std and
-  sample entropy).
+  are computed at each cohort's **native** cadence (5 min for Ohio/AZT1D/Sim,
+  15 min for Shanghai). CONGA and MODD are anchored to a fixed real-time lag and
+  are cadence-robust; Δ-BG std and MAGE are cadence-sensitive, so Shanghai's
+  values there are not directly comparable to the 5-min cohorts (flagged inline).
+  Sample entropy is put on a common 15-min effective interval for **every**
+  cohort (§5), so its cross-cohort comparison is cadence-fair. A dedicated
+  cadence-fair block (§6.4) recomputes the cadence-sensitive metrics for all
+  cohorts on one 15-min grid.
 - **Distribution distances.** KS statistic, KS p-value, Wasserstein-1 distance,
-  and Jensen–Shannon divergence (5 mg/dL bins, 40–400 mg/dL) computed on the
+  and Jensen–Shannon divergence (5 mg/dL bins over the full 0–600 mg/dL support,
+  so no cohort's out-of-range tail is dropped) computed on the
   pooled per-cohort CGM-value vector.
 - **Risk indices.** LBGI / HBGI per Kovatchev (1997), J-index = 10⁻³·(μ+σ)²,
   M-value with reference 120 mg/dL.
 - **MAGE.** Mean amplitude of peak-trough swings exceeding 1·σ_BG.
 - **CONGA-h.** Standard deviation of `bg[t+h] − bg[t]`.
 - **MODD.** Mean of `|bg[t+24h] − bg[t]|`.
-- **Sample entropy.** SampEn(m=2, r=0.2·σ); to bound cost on long traces,
-  records are uniformly subsampled to 2,500 points with a fixed RNG seed (0)
-  before computation.
+- **Sample entropy.** SampEn(m=2, r=0.2·σ), measured at a fixed 15-min effective
+  interval for every cohort (5-min cohorts are strided to 15 min; Shanghai is
+  native 15 min) so the value is stable in record length and comparable across
+  cadences. Template matches are accumulated within contiguous gap-free segments
+  only, so a sensor dropout never joins samples across a bridged gap.
 - **Episodes.** Contiguous runs across a threshold lasting ≥ 15 min, NaN
   gaps treated as in-range so a sensor dropout does not split an episode.
 - **AZT1D event log.** The pump CSV columns are parsed straight from `Subject
@@ -2194,8 +2293,9 @@ transient, then the next 70 days are captured.
 {dist_table}
 
 KS p-values fall to numerical zero in the right tail at these sample sizes
-(Ohio ~85k, AZT1D ~320k, Sim ~600k); the magnitudes of the KS statistic and
-the Wasserstein-1 distance are the meaningful quantities, not p.
+(Ohio {pm[O]['n']/1000:.0f}k, AZT1D {pm[A]['n']/1000:.0f}k, Sim {pm[M]['n']/1e6:.2f}M);
+the magnitudes of the KS statistic and the Wasserstein-1 distance are the
+meaningful quantities, not p.
 
 ---
 
@@ -2242,15 +2342,20 @@ Per-record mean ± std.
 | Metric (native cadence) | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
 |---|---|---|---|---|
 | CV (%)              | {_ms1(sm[O], 'cv_pct')}   | {_ms1(sm[S], 'cv_pct')}   | {_ms1(sm[A], 'cv_pct')}   | **{_ms1(sm[M], 'cv_pct')}**   |
-| MAGE (mg/dL)        | {_ms1(sm[O], 'mage')}     | {_ms1(sm[S], 'mage')}     | {_ms1(sm[A], 'mage')}     | {_ms1(sm[M], 'mage')}     |
+| MAGE (mg/dL)        | {_ms1(sm[O], 'mage')}     | {_ms1(sm[S], 'mage')}¹     | {_ms1(sm[A], 'mage')}     | {_ms1(sm[M], 'mage')}     |
 | CONGA-1h (mg/dL)    | {_ms1(sm[O], 'conga_1h')} | {_ms1(sm[S], 'conga_1h')} | {_ms1(sm[A], 'conga_1h')} | {_ms1(sm[M], 'conga_1h')} |
 | CONGA-4h (mg/dL)    | {_ms1(sm[O], 'conga_4h')} | {_ms1(sm[S], 'conga_4h')} | {_ms1(sm[A], 'conga_4h')} | {_ms1(sm[M], 'conga_4h')} |
 | MODD (mg/dL)        | {_ms1(sm[O], 'modd')}     | {_ms1(sm[S], 'modd')}     | {_ms1(sm[A], 'modd')}     | **{_ms1(sm[M], 'modd')}**     |
-| Sample entropy      | {_ms(sm[O], 'sample_entropy')} | {_ms(sm[S], 'sample_entropy')}¹ | {_ms(sm[A], 'sample_entropy')} | {_ms(sm[M], 'sample_entropy')} |
+| Sample entropy      | {_ms(sm[O], 'sample_entropy')} | {_ms(sm[S], 'sample_entropy')} | {_ms(sm[A], 'sample_entropy')} | {_ms(sm[M], 'sample_entropy')} |
 
-¹ Shanghai SampEn is computed on 15-min samples, which collapses the
-  fine-scale jitter that drives SampEn at 5 min — the lower value is mostly a
-  cadence artefact, not a real complexity difference.
+¹ Shanghai's MAGE is computed on its native 15-min samples; coarser sampling
+  drops small intermediate turning points and lengthens the surviving swings,
+  inflating MAGE ~6–10% relative to a 5-min measurement of the same process, so
+  Shanghai's value is not directly comparable to the 5-min cohorts. Sample
+  entropy carries no such caveat: it is put on a common 15-min effective
+  interval for every cohort, so Shanghai's lower value is a genuine complexity
+  difference, not a cadence artefact. §6.4 recomputes MAGE (and the other
+  cadence-sensitive metrics) for all cohorts on one 15-min grid.
 
 ![Variability and complexity panel](figures/variability_metrics.png)
 
@@ -2459,8 +2564,16 @@ Raw deltas only — no qualitative verdicts. See sections 3–9 for context.
 {syn_row("Hypo p90 duration (min)",      sm[M]['hypo_p90_min']['mean'],   sm[O]['hypo_p90_min']['mean'],   sm[S]['hypo_p90_min']['mean'],   sm[A]['hypo_p90_min']['mean'])}
 {syn_row("Hyper p90 duration (min)",     sm[M]['hyper_p90_min']['mean'],  sm[O]['hyper_p90_min']['mean'],  sm[S]['hyper_p90_min']['mean'],  sm[A]['hyper_p90_min']['mean'])}
 {syn_row("Hypo recovery median (min)",   rec[M]['median'],    rec[O]['median'],    rec[S]['median'],    rec[A]['median'])}
-{syn_row("Wasserstein-1 vs Ohio (mg/dL)",   distances['Sim_vs_Ohio']['wasserstein'],   distances['Ohio_vs_Shanghai']['wasserstein'], distances['Sim_vs_Shanghai']['wasserstein'], distances['Ohio_vs_AZT1D']['wasserstein'])}
-{syn_row("KS statistic vs Ohio",            distances['Sim_vs_Ohio']['ks_stat'],       distances['Ohio_vs_Shanghai']['ks_stat'],     distances['Sim_vs_Shanghai']['ks_stat'], distances['Ohio_vs_AZT1D']['ks_stat'], fmt=".3f")}
+
+Pooled distribution distances do not fit the sim-minus-cohort layout above
+(they are pairwise, not per-cohort), so they are tabulated separately with the
+real-vs-real baselines as the yardstick — a Sim-vs-real distance is only
+"close" relative to how far the real cohorts sit from each other:
+
+| Pooled distance | Sim vs Ohio | Sim vs Shanghai | Sim vs AZT1D | Ohio–Shang | Ohio–AZT1D | Shang–AZT1D |
+|---|---:|---:|---:|---:|---:|---:|
+| Wasserstein-1 (mg/dL) | {distances['Sim_vs_Ohio']['wasserstein']:.1f} | {distances['Sim_vs_Shanghai']['wasserstein']:.1f} | {distances['Sim_vs_AZT1D']['wasserstein']:.1f} | {distances['Ohio_vs_Shanghai']['wasserstein']:.1f} | {distances['Ohio_vs_AZT1D']['wasserstein']:.1f} | {distances['Shanghai_vs_AZT1D']['wasserstein']:.1f} |
+| KS statistic | {distances['Sim_vs_Ohio']['ks_stat']:.3f} | {distances['Sim_vs_Shanghai']['ks_stat']:.3f} | {distances['Sim_vs_AZT1D']['ks_stat']:.3f} | {distances['Ohio_vs_Shanghai']['ks_stat']:.3f} | {distances['Ohio_vs_AZT1D']['ks_stat']:.3f} | {distances['Shanghai_vs_AZT1D']['ks_stat']:.3f} |
 
 ---
 
@@ -2472,9 +2585,11 @@ Raw deltas only — no qualitative verdicts. See sections 3–9 for context.
   point. The simulator was exercised with {len(n[M]['per'])} seeds for this report, but the
   generator is unbounded — production training pipelines can sample as many
   more seeds as they need.
-- **Cadence asymmetry.** Shanghai's 15-min cadence collapses Δ-BG std and
-  sample entropy relative to 5-min cohorts. Cross-cadence ACF below 30 min is
-  not directly comparable.
+- **Cadence asymmetry.** Shanghai's 15-min cadence deflates Δ-BG std and
+  inflates MAGE (~6–10%) relative to 5-min cohorts; cross-cadence ACF below
+  30 min is not directly comparable. Sample entropy is put on a common 15-min
+  effective interval for every cohort, so it is cadence-fair. §6.4 recomputes
+  the cadence-sensitive metrics for all cohorts on one 15-min grid.
 - **No glucose-controller benchmark.** The simulator output is compared to
   three real human cohorts but not to UVA/Padova `simglucose` here.
 - **AID asymmetry.** AZT1D subjects are all on closed-loop AID (Tandem
@@ -2482,17 +2597,21 @@ Raw deltas only — no qualitative verdicts. See sections 3–9 for context.
   mixes CSII and MDI; the simulator models MDI long-acting basal + per-meal
   bolus. Differences in basal-rate variability and time-in-range partly
   reflect these different therapy regimens, not just simulator vs reality.
-- **Sample entropy subsampling.** Records longer than 2,500 points are
-  subsampled with `np.random.default_rng(0)` so the metric is reproducible but
-  is a Monte-Carlo estimate, not the exact value over the full trace.
+- **Sample entropy window.** Sample entropy is strided to a fixed 15-min
+  effective interval and capped to the first 4,000 valid samples per record
+  (deterministic — no random subsampling), so it is a stable estimate over a
+  bounded window rather than the exact value over the full trace.
+
+{ext_section_md}
 
 ---
 
-## 12. Reproduction
+## 13. Reproduction
 
 ```bash
 # regenerates diff/stats.json + diff/README.md + diff/figures/*.png
-python diff/build_report.py
+python diff/build_report.py                       # default 100 seeds x 70 d
+python diff/build_report.py --n-seeds 300 --days 70   # larger synthetic corpus
 ```
 
 `scripts/compare_all_datasets.py` is reused for the dataset loaders and grid
@@ -2505,7 +2624,7 @@ Numbers in this file come from one run of `build_report.py`
 ({len(n[M]['per'])} seeds, {int(round(np.mean([p['days'] for p in n[M]['per']])))} days each, 24 h warm-up discarded). Re-running reproduces
 them exactly because the simulator is seed-deterministic and the real-data
 side is fixed. Generating an arbitrarily larger synthetic corpus is just a
-matter of bumping `n_seeds=` and/or `days=` in the `assemble_sim()` call.
+matter of passing `--n-seeds` / `--days` to `build_report.py`.
 """
     # Column-alignment padding inside f-string bold markers (e.g. `**{x:>5.2f}**`)
     # leaks spaces between the asterisks and the value, which GitHub's renderer
@@ -2517,10 +2636,380 @@ matter of bumping `n_seeds=` and/or `days=` in the `assemble_sim()` call.
         f.write(md)
 
 
+def fig_gap_score(ext, path):
+    """Diverging bar of the standardised sim-vs-real gap z per metric."""
+    gaps = ext["gap_score"]
+    items = [(k, v) for k, v in gaps.items() if np.isfinite(v.get("z", np.nan))]
+    items.sort(key=lambda kv: kv[1]["z"])
+    labels = [k for k, _ in items]
+    zs = [v["z"] for _, v in items]
+
+    def _c(z):
+        a = abs(z)
+        return "#2ca02c" if a < 1 else ("#ff7f0e" if a < 2 else "#d62728")
+    colors = [_c(z) for z in zs]
+    fig, ax = plt.subplots(figsize=(9, max(4, 0.42 * len(labels))))
+    y = np.arange(len(labels))
+    ax.barh(y, zs, color=colors)
+    ax.axvspan(-1, 1, color="#2ca02c", alpha=0.08)
+    for x in (-2, -1, 1, 2):
+        ax.axvline(x, color="grey", lw=0.6, ls=":")
+    ax.axvline(0, color="black", lw=0.9)
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.set_xlabel("standardised gap  z = (sim − mean_real) / sd_between_real")
+    ax.set_title("Where the simulator sits inside vs outside the real cohorts' own spread\n"
+                 "|z|<1 within (green) · 1–2 edge (amber) · >2 outside (red)")
+    ax.grid(alpha=0.25, axis="x")
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+
+
+def fig_band_transitions(ext, path):
+    """5×5 glycemic-band transition-probability heatmaps, one per cohort."""
+    labels = es.BAND_LABELS
+    fig, axes = plt.subplots(1, len(ORDER), figsize=(4.3 * len(ORDER), 4.2))
+    im = None
+    for ax, n in zip(axes, ORDER):
+        m = np.asarray(ext["transitions"][n]["matrix"], dtype=float)
+        im = ax.imshow(m, vmin=0, vmax=1, cmap="magma")
+        ax.set_xticks(range(5)); ax.set_yticks(range(5))
+        ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=7)
+        ax.set_yticklabels(labels, fontsize=7)
+        ax.set_title(n)
+        ax.set_xlabel("to"); ax.set_ylabel("from")
+        for i in range(5):
+            for j in range(5):
+                if m[i, j] >= 0.005:
+                    ax.text(j, i, f"{m[i, j]:.2f}", ha="center", va="center",
+                            color="white" if m[i, j] < 0.6 else "black", fontsize=6)
+    fig.suptitle("Glycemic-band transition probabilities (15-min grid)", fontweight="bold")
+    fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.8, label="P(to | from)")
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ============================================================================
+# Extended statistics (Section 12) — see diff/extended_stats.py
+# ============================================================================
+# Curated metrics for the standardised strength/weakness gap score. Each entry
+# extracts a single scalar per cohort. "hib" = higher-is-*neither*; the score is
+# direction-agnostic (|z| measures distance into/out of the real spread).
+def _pooled_tir(cohorts, n, key):
+    d = cohorts[n]["pooled_bg"]
+    return time_in_ranges(d).get(key, float("nan"))
+
+
+def compute_extended(cohorts, pooled_moments, pooled_risk):
+    """All Section-12 extended statistics.
+
+    Reuses the audited core primitives (mage/conga/autocorr_lags/
+    episode_durations) through extended_stats.cadence_fair, so the cadence-fair
+    block introduces no new metric math — only a common-grid decimation.
+    """
+    ext = {}
+
+    # --- 12.1 Cadence-fair variability (common 15-min grid) ---
+    cf = {}
+    cf_keys = ["mage", "delta_std", "conga_1h", "acf_30m", "acf_60m",
+               "acf_120m", "hypo_per_day", "hyper_per_day"]
+    for n in ORDER:
+        vals = [es.cadence_fair(bg, cohorts[n]["series_step"], mage, conga,
+                                autocorr_lags, episode_durations)
+                for bg in cohorts[n]["series"]]
+        cf[n] = {k: float(np.nanmean([v[k] for v in vals])) if vals
+                 else float("nan") for k in cf_keys}
+    ext["cadence_fair"] = cf
+
+    # --- 12.2 Extra two-sample distances ---
+    # CvM/AD statistics scale with n, so every pair is evaluated at one common
+    # arm size (the smallest pooled cohort, capped) to be cross-comparable.
+    pairs = [("Sim", "Ohio"), ("Sim", "Shanghai"), ("Sim", "AZT1D"),
+             ("Ohio", "Shanghai"), ("Ohio", "AZT1D"), ("Shanghai", "AZT1D")]
+    common_n = int(min(min(int(np.sum(~np.isnan(cohorts[n]["pooled_bg"])))
+                           for n in ORDER), 60000))
+    ext["extra_distances"] = {
+        f"{a}_vs_{b}": es.extra_distances(cohorts[a]["pooled_bg"],
+                                          cohorts[b]["pooled_bg"],
+                                          common_n=common_n)
+        for a, b in pairs}
+
+    # --- 12.3 Temporal structure + band transitions ---
+    temporal = {}
+    transitions = {}
+    for n in ORDER:
+        step = cohorts[n]["series_step"]
+        sd1s, sd2s, ratios, sents, cents, dfas, tcounts = [], [], [], [], [], [], []
+        for bg in cohorts[n]["series"]:
+            grid, eff = es.to_common_grid(bg, step, 15)
+            p = es.poincare_sd(grid, eff)
+            sd1s.append(p["sd1"]); sd2s.append(p["sd2"]); ratios.append(p["sd_ratio"])
+            se = es.spectral_entropy(grid, eff)
+            sents.append(se["spectral_entropy"]); cents.append(se["spectral_centroid_cph"])
+            dfas.append(es.dfa_alpha(grid, eff))
+            tcounts.append(es.band_transition(bg, step, 15)["counts"])
+        temporal[n] = {
+            "sd1": float(np.nanmean(sd1s)) if sd1s else float("nan"),
+            "sd2": float(np.nanmean(sd2s)) if sd2s else float("nan"),
+            "sd_ratio": float(np.nanmean(ratios)) if ratios else float("nan"),
+            "spectral_entropy": float(np.nanmean(sents)) if sents else float("nan"),
+            "spectral_centroid_cph": float(np.nanmean(cents)) if cents else float("nan"),
+            "dfa_alpha": float(np.nanmean(dfas)) if dfas else float("nan"),
+            "acf_efold_min": es.acf_efold_min(cohorts[n]["pooled_acf"]),
+        }
+        transitions[n] = es.pool_transition_counts(tcounts, 15)
+    ext["temporal"] = temporal
+    ext["transitions"] = transitions
+    ext["transition_distance"] = {
+        n: es.transition_matrix_distance(transitions["Sim"]["matrix"],
+                                         transitions[n]["matrix"])
+        for n in REAL_ORDER}
+
+    # --- 12.4 Cross-seed bootstrap CIs on headline pooled scalars ---
+    boot_stats = {
+        "mean": np.mean,
+        "std": np.std,
+        "TIR_pct": lambda x: 100.0 * np.mean((x >= 70) & (x <= 180)),
+        "LBGI": lambda x: kovatchev_risk(x)[0],
+    }
+    boot = {}
+    for n in ORDER:
+        recs = [r[~np.isnan(r)] for r in cohorts[n]["series"]]
+        boot[n] = {name: es.bootstrap_pooled(recs, fn, n_boot=400, rng_seed=0)
+                   for name, fn in boot_stats.items()}
+    ext["bootstrap"] = boot
+
+    # --- 12.5 Standardised strength/weakness gap score ---
+    # metric label -> {cohort: scalar}
+    metric_vals = {}
+    for mk in ("mean", "std", "cv_pct", "skew", "excess_kurt"):
+        metric_vals[mk] = {n: pooled_moments[n].get(mk, float("nan")) for n in ORDER}
+    for band, lab in (("TIR_pct", "TIR%"), ("TBR1_pct", "TBR1%"),
+                      ("TBR2_pct", "TBR2%"), ("TAR2_pct", "TAR2%")):
+        metric_vals[lab] = {n: _pooled_tir(cohorts, n, band) for n in ORDER}
+    metric_vals["LBGI"] = {n: pooled_risk[n]["LBGI_pooled"] for n in ORDER}
+    metric_vals["HBGI"] = {n: pooled_risk[n]["HBGI_pooled"] for n in ORDER}
+    for mk in ("mage", "delta_std", "conga_1h", "hypo_per_day", "hyper_per_day"):
+        metric_vals[f"cf_{mk}"] = {n: cf[n][mk] for n in ORDER}
+    for mk in ("sd_ratio", "spectral_entropy", "dfa_alpha", "acf_efold_min"):
+        metric_vals[mk] = {n: temporal[n][mk] for n in ORDER}
+
+    gaps = {}
+    for label, vals in metric_vals.items():
+        gs = es.gap_score(vals["Sim"], [vals["Ohio"], vals["Shanghai"], vals["AZT1D"]])
+        gs["sim"] = vals["Sim"]
+        gs["ohio"] = vals["Ohio"]; gs["shanghai"] = vals["Shanghai"]; gs["azt1d"] = vals["AZT1D"]
+        gaps[label] = gs
+    ext["gap_score"] = gaps
+    return ext
+
+
+def _build_extended_section(ext, cohorts):
+    """Section 12 markdown from the extended-stats dict. Observational only."""
+    O, S, A, M = "Ohio", "Shanghai", "AZT1D", "Sim"
+    cf = ext["cadence_fair"]
+    tp = ext["temporal"]
+    ed = ext["extra_distances"]
+    bt = ext["transitions"]
+    boot = ext["bootstrap"]
+    gaps = ext["gap_score"]
+
+    def r(v, f=".2f"):
+        return "n/a" if v is None or not np.isfinite(v) else f"{v:{f}}"
+
+    def cf_row(label, key, f=".2f"):
+        return (f"| {label} | {r(cf[O][key], f)} | {r(cf[S][key], f)} | "
+                f"{r(cf[A][key], f)} | **{r(cf[M][key], f)}** |")
+
+    def ed_row(label, key, f=".3f"):
+        return "| " + label + " | " + " | ".join(
+            r(ed[p][key], f) for p in ("Sim_vs_Ohio", "Sim_vs_Shanghai",
+                                       "Sim_vs_AZT1D", "Ohio_vs_Shanghai",
+                                       "Ohio_vs_AZT1D", "Shanghai_vs_AZT1D")) + " |"
+
+    def tp_row(label, key, f=".3f"):
+        return (f"| {label} | {r(tp[O][key], f)} | {r(tp[S][key], f)} | "
+                f"{r(tp[A][key], f)} | **{r(tp[M][key], f)}** |")
+
+    def efold(n):
+        v = tp[n]["acf_efold_min"]
+        if not np.isfinite(v):
+            return ">24 h"
+        return f"{v/60:.1f} h" if v >= 60 else f"{v:.0f} min"
+
+    def dwell_row(band):
+        return (f"| {band} | " + " | ".join(
+            r(bt[n]["dwell_min"].get(band, float('nan')), ".0f") for n in ORDER) + " |")
+
+    def boot_row(label, key, f=".1f"):
+        def cell(n):
+            b = boot[n][key]
+            return f"{r(b['point'], f)} [{r(b['lo'], f)}, {r(b['hi'], f)}]"
+        return f"| {label} | {cell(O)} | {cell(S)} | {cell(A)} | **{cell(M)}** |"
+
+    # gap-score table — ALL metrics (never silently drop a non-finite z, which
+    # would hide a degenerate-SD or never-e-folding outside-envelope weakness).
+    def _znum(v):
+        z = v.get("z")
+        return z if (z is not None and np.isfinite(z)) else None
+
+    def zfmt(v):
+        z = v.get("z")
+        if z is None or (isinstance(z, float) and np.isnan(z)):
+            return "n/a"
+        if not np.isfinite(z):
+            return "+∞" if z > 0 else "−∞"
+        return f"{z:+.2f}"
+
+    def g_class(v):
+        z = _znum(v)
+        if z is None:
+            return "out" if not v["within_envelope"] else "in"
+        a = abs(z)
+        return "in" if a < 1 else ("edge" if a < 2 else "out")
+
+    gitems = sorted(gaps.items(),
+                    key=lambda kv: -(abs(_znum(kv[1])) if _znum(kv[1]) is not None
+                                     else (1e18 if not kv[1]["within_envelope"] else -1.0)))
+
+    def g_row(label, v):
+        env = "yes" if v["within_envelope"] else "**no**"
+        return (f"| {label} | {r(v['sim'])} | {r(v['ohio'])} | {r(v['shanghai'])} | "
+                f"{r(v['azt1d'])} | {zfmt(v)} | {env} |")
+    gap_rows = "\n".join(g_row(k, v) for k, v in gitems)
+    n_within = sum(1 for _, v in gitems if g_class(v) == "in")
+    n_edge = sum(1 for _, v in gitems if g_class(v) == "edge")
+    n_out = sum(1 for _, v in gitems if g_class(v) == "out")
+    td = ext["transition_distance"]
+
+    return f"""---
+
+## 12. Extended statistics
+
+Four metric families added on top of §§3–11 to give the comparison more
+resolution and to make the sim-vs-real position objective. All are computed by
+`diff/extended_stats.py` and ignore NaN / never join samples across a gap.
+
+### 12.1 Cadence-fair variability (common 15-min grid)
+
+The §5 variability metrics are computed at each cohort's native cadence, so
+Shanghai's 15-min values are not directly comparable to the 5-min cohorts.
+Here every cohort — including the 5-min ones and the simulator — is decimated
+to one common 15-min grid before the cadence-sensitive metrics are recomputed,
+so all four columns are finally apples-to-apples.
+
+| Metric (15-min grid) | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
+|---|---:|---:|---:|---:|
+{cf_row("MAGE (mg/dL)", "mage", ".1f")}
+{cf_row("Δ-BG SD, 15-min (mg/dL)", "delta_std", ".2f")}
+{cf_row("CONGA-1h (mg/dL)", "conga_1h", ".2f")}
+{cf_row("ACF @ 30 min", "acf_30m", ".3f")}
+{cf_row("ACF @ 60 min", "acf_60m", ".3f")}
+{cf_row("ACF @ 120 min", "acf_120m", ".3f")}
+{cf_row("Hypo eps / day", "hypo_per_day", ".2f")}
+{cf_row("Hyper eps / day", "hyper_per_day", ".2f")}
+
+### 12.2 Additional two-sample distances (pooled BG)
+
+KS and Wasserstein-1 (§3.3) are complemented by tests with different tail
+weighting, so no single distance drives the verdict. Sim-vs-real is read
+against the real-vs-real baselines on the right.
+
+| Distance | Sim vs Ohio | Sim vs Shang | Sim vs AZT1D | Ohio–Shang | Ohio–AZT1D | Shang–AZT1D |
+|---|---:|---:|---:|---:|---:|---:|
+{ed_row("Energy distance", "energy", ".3f")}
+{ed_row("Cramér–von Mises", "cramer_von_mises", ".1f")}
+{ed_row("Anderson–Darling", "anderson_darling", ".1f")}
+{ed_row("Total variation", "total_variation", ".3f")}
+{ed_row("Hellinger", "hellinger", ".3f")}
+{ed_row("Histogram overlap", "overlap", ".3f")}
+
+CvM/AD statistics scale with sample size, so every pair is evaluated at one
+common {ed['Sim_vs_Ohio']['subsample_n']:,}-sample-per-arm subsample (the smallest pooled cohort) to be
+cross-comparable; energy distance and the histogram rows (total variation,
+Hellinger, overlap) are sample-size-stable and use the full pooled vectors.
+
+### 12.3 Temporal structure (common 15-min grid)
+
+| Metric | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
+|---|---:|---:|---:|---:|
+{tp_row("Poincaré SD1 (mg/dL)", "sd1", ".2f")}
+{tp_row("Poincaré SD2 (mg/dL)", "sd2", ".1f")}
+{tp_row("Poincaré SD1/SD2", "sd_ratio", ".3f")}
+{tp_row("Spectral entropy (0–1)", "spectral_entropy", ".3f")}
+{tp_row("Spectral centroid (cyc/h)", "spectral_centroid_cph", ".3f")}
+{tp_row("DFA α (Hurst)", "dfa_alpha", ".3f")}
+| ACF e-folding (1/e) | {efold(O)} | {efold(S)} | {efold(A)} | **{efold(M)}** |
+
+SD1 is short-term (step-to-step) variability, SD2 long-term; DFA α ≈ 0.5 white,
+1.0 pink/1-f, 1.5 Brownian. Glycemic-band transition structure (15-min grid):
+
+![Band transition heatmaps](figures/band_transitions.png)
+
+Mean dwell time per band (minutes before leaving), and the Frobenius distance of
+each cohort's transition matrix from the simulator's:
+
+| Band | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
+|---|---:|---:|---:|---:|
+{dwell_row("TBR2")}
+{dwell_row("TBR1")}
+{dwell_row("TIR")}
+{dwell_row("TAR1")}
+{dwell_row("TAR2")}
+
+Transition-matrix distance from Sim: Ohio {td[O]:.3f} · Shanghai {td[S]:.3f} ·
+AZT1D {td[A]:.3f} (Frobenius; lower = more similar dynamics).
+
+### 12.4 Cross-seed bootstrap 95% CIs
+
+Each pooled statistic with a 95% CI from resampling whole records/seeds with
+replacement — the CI reflects between-record (between-seed) uncertainty. The
+simulator's many seeds give a tight interval; the handful of real patients an
+honestly wide one.
+
+| Statistic | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
+|---|---|---|---|---|
+{boot_row("Pooled mean (mg/dL)", "mean", ".1f")}
+{boot_row("Pooled std (mg/dL)", "std", ".1f")}
+{boot_row("TIR % (70–180)", "TIR_pct", ".1f")}
+{boot_row("LBGI", "LBGI", ".2f")}
+
+### 12.5 Standardised strength / weakness gap score
+
+For each metric, z = (sim − mean of the three real cohorts) / SD across those
+three cohorts. |z| < 1 means the simulator sits inside the band the real
+cohorts span among themselves; |z| ≥ 2 means it sits outside all three.
+"within envelope" is the assumption-free check (is sim within [min, max] of the
+real cohorts). Sorted by |z| (largest divergence first). Of {len(gitems)}
+metrics: {n_within} within (|z|<1), {n_edge} at the edge (1–2), {n_out} outside (|z|≥2).
+
+![Standardised gap score](figures/gap_score.png)
+
+| Metric | Sim | Ohio | Shanghai | AZT1D | z | within envelope |
+|---|---:|---:|---:|---:|---:|:--:|
+{gap_rows}
+
+The SD across only three real cohorts is coarse, so z is an order-of-magnitude
+locator, not a test statistic; the "within envelope" column and the §3.3 / §12.2
+distances against the real-vs-real baselines are the robust reads.
+"""
+
+
 # ============================================================================
 # Main
 # ============================================================================
 def main():
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--n-seeds", type=int, default=100,
+                    help="number of simulator seeds to pool (default 100)")
+    ap.add_argument("--days", type=int, default=70,
+                    help="simulated days per seed (default 70)")
+    ap.add_argument("--warmup-h", type=int, default=24,
+                    help="warm-up hours discarded per seed (default 24)")
+    cfg = ap.parse_args()
+
     print("Loading OhioT1DM…")
     ohio_p = load_ohio_patients()
     ohio = assemble_cohort("Ohio", sorted(ohio_p.items()), regularize_bg, step_min=5)
@@ -2538,7 +3027,8 @@ def main():
                             regularize_bg, step_min=5)
     print(f"  {len(azt1d['per'])} subjects")
 
-    sim_items, sim_raw = assemble_sim(n_seeds=30, days=70, warmup_h=24)
+    sim_items, sim_raw = assemble_sim(n_seeds=cfg.n_seeds, days=cfg.days,
+                                      warmup_h=cfg.warmup_h)
     sim = assemble_cohort("Sim", sim_items, trivial_regularize_5min, step_min=5)
     print(f"  {len(sim['per'])} simulator runs")
 
@@ -2577,7 +3067,7 @@ def main():
 
     # Distribution distances — all sim/real pairs + every real/real baseline.
     distances = {}
-    bins = np.arange(40, 401, 5)
+    bins = np.arange(0, 601, 5)  # full support so Shanghai's tail is not dropped
     pair_list = [("Sim", "Ohio"), ("Sim", "Shanghai"), ("Sim", "AZT1D"),
                  ("Ohio", "Shanghai"), ("Ohio", "AZT1D"),
                  ("Shanghai", "AZT1D")]
@@ -2600,6 +3090,11 @@ def main():
 
     # Per-record cohort summaries
     cohort_summaries = {n: cohort_summary(cohorts[n]["per"]) for n in ORDER}
+
+    # Extended statistics (§12): cadence-fair, extra distances, temporal
+    # structure, bootstrap CIs, gap score.
+    print("Computing extended statistics…")
+    ext = compute_extended(cohorts, pooled_moments, pooled_risk)
 
     # Figures
     print("Generating figures…")
@@ -2629,6 +3124,8 @@ def main():
         os.path.join(FIGS, "unexplained_summary.png"))
     fig_unexplained_gallery([u_ohio, u_az],
                             os.path.join(FIGS, "unexplained_gallery.png"))
+    fig_gap_score(ext, os.path.join(FIGS, "gap_score.png"))
+    fig_band_transitions(ext, os.path.join(FIGS, "band_transitions.png"))
 
     # Recovery-time summary per cohort
     recov_summaries = {n: recovery_summary(cohorts[n]["recov_times"]) for n in ORDER}
@@ -2656,9 +3153,16 @@ def main():
             "recovery": recov_summaries[n],
         } for n in ORDER},
         "distances": distances,
-        "azt1d_events": az_event_stats,
-        "sim_events": sim_event_stats,
+        # Strip the raw per-sample value arrays (used only for the histogram
+        # figures, already rendered above) before serialization — they are
+        # ~0.6M floats/seed and bloated stats.json to 64 MB, scaling linearly
+        # with the seed count.
+        "azt1d_events": {k: v for k, v in az_event_stats.items()
+                         if k not in ("basal_values", "carb_values")},
+        "sim_events": {k: v for k, v in sim_event_stats.items()
+                       if k not in ("basal_values", "carb_values")},
         "unexplained_excursions": unexpl_stats,
+        "extended": ext,
     }
     out = os.path.join(DIFF, "stats.json")
     with open(out, "w") as f:
@@ -2669,7 +3173,7 @@ def main():
     report_path = os.path.join(DIFF, "README.md")
     write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
                     pooled_risk, cohort_summaries, recov_summaries,
-                    az_event_stats, sim_event_stats, unexpl_stats,
+                    az_event_stats, sim_event_stats, unexpl_stats, ext,
                     report_path)
     print(f"Wrote {report_path}")
     print(f"Figures in {FIGS}")
