@@ -147,7 +147,7 @@ BODY_WEIGHT_MEAN_KG = 75.0
 BODY_WEIGHT_SIGMA_KG = 36.0  # [HIVAR 2x] 18.0→36.0 — body-weight spread
 BODY_WEIGHT_MIN_KG = 42.0  # [HIVAR 2x] 45.0→42.0 — light-weight floor
 BODY_WEIGHT_MAX_KG = 150.0  # [HIVAR 2x] 130.0→150.0 — heavy-weight ceiling
-IR_LOGNORMAL_SIGMA = 0.16  # [HIVAR 2x] 0.08→0.16 — insulin-resistance spread
+IR_LOGNORMAL_SIGMA = 0.26  # [HIVAR 2x][HET] 0.08→0.16→0.26 — insulin-resistance spread. Widened (with a stronger IR→anchor coupling below) to carry the between-patient MEAN-BG spread: the OU anchor sigma alone saturates (~14 mg/dL sd) because the GE_EQ_FLOOR compresses low-anchor patients upward, whereas a wider IR axis spreads patients on the HIGH side (resistant → higher anchor via the coupling, higher ICR/CF), which the floor does not compress and which does not crash into hypo.
 IR_FACTOR_MIN = 0.4  # [HIVAR 2x] 0.5→0.4 — sensitive end
 IR_FACTOR_MAX = 2.0  # [HIVAR 2x] 1.5→2.0 — resistant end
 IR_TO_IS_NOISE_SIGMA = 0.2  # [HIVAR 2x] 0.1→0.2 — is_base decoupling
@@ -598,8 +598,16 @@ SEVERE_HYPO_GLUCAGON_RATE = 2.0  # Extra mg/dL per step at severity=1.0
 # ge_day_weight for the diurnal lift and the OU update in generate().
 GE_RATE = 0.060            # [GE-OU] strong Sg so BG tracks the fast-wandering equilibrium (short correlation time -> acf(8h)~0)
 GE_EQ_ANCHOR_MEAN = 138.0  # [GE-OU] population-mean equilibrium anchor (co-tuned with GE_EQ_SIGMA / GE_EQ_FLOOR to land the pooled mean ~162 on Ohio; with a large sigma the floor-clipping largely sets the mean, so the anchor is a fine trim)
-GE_EQ_ANCHOR_SIGMA = 12.0  # [GE-OU] between-patient spread of the anchor (per-patient mean heterogeneity)
-GE_EQ_SIGMA = 95.0                # [GE-OU][OHIO-CARB][DAWN] stationary std of the equilibrium's APERIODIC wandering. Was 105; lowered to 95 when the structured dawn rhythm (GE_EQ_DAWN_AMPLITUDE) took over part of the equilibrium's variance — the point of the dawn work is to trade opaque aperiodic wander for day-to-day-consistent, learnable variance while holding the pooled BG spread (std ~61) on Ohio.
+GE_EQ_ANCHOR_SIGMA = 15.0  # [GE-OU][HET] between-patient spread of the anchor (per-patient mean heterogeneity). Raised 12->15 to widen the too-narrow between-patient mean-BG spread (sim was the narrowest of the four cohorts, ~13.6 vs Ohio/AZT1D ~16). The anchor sigma alone SATURATES near ~14 mg/dL sd because GE_EQ_FLOOR compresses low-anchor patients upward; the remaining spread comes from the IR coupling below (high-side, floor-immune).
+GE_ANCHOR_IR_COUPLING = 30.0  # [GE-OU][HET] how much a patient's insulin resistance lifts its equilibrium anchor (mg/dL per unit ir-1). Raised 12->30 (with IR_LOGNORMAL_SIGMA 0.16->0.26) so the between-patient mean spread is carried physiologically by the resistance axis — resistant patients run higher — rather than by low-anchor patients the floor would both compress and crash into hypo.
+GE_EQ_SIGMA = 95.0                # [GE-OU][OHIO-CARB][DAWN] stationary std of the equilibrium's APERIODIC wandering. Was 105; lowered to 95 when the structured dawn rhythm (GE_EQ_DAWN_AMPLITUDE) took over part of the equilibrium's variance — the point of the dawn work is to trade opaque aperiodic wander for day-to-day-consistent, learnable variance while holding the pooled BG spread (std ~61) on Ohio. Now scaled PER PATIENT by ge_sigma_mult (below) so patients differ in within-patient variability.
+# [HET] Per-patient multiplier on GE_EQ_SIGMA (lognormal), so different virtual
+# patients wander with different amplitudes. Without it every patient shared the
+# one global GE_EQ_SIGMA, making the between-patient spread of WITHIN-patient
+# variability (std/CV/MAGE) the narrowest of the four cohorts. E[mult^2]>1 lifts
+# the mean within-variance, so GE_EQ_SIGMA base is co-trimmed to hold pooled std.
+GE_SIGMA_REL_SIGMA = 0.16  # lognormal sigma of the per-patient GE_EQ_SIGMA multiplier. Tamed 0.25->0.22->0.16: the wider IR axis (for the mean spread) already stretches insulin sensitivity, so a large wander multiplier on top re-deepens rare over-bolus crashes; at 0.16 the between-patient within-variability spread still lands in the real range (wstd sd ~7.8, Ohio 7.2) while the 300x70d severe-hypo tail is no worse than baseline (>2h=0 vs baseline 1).
+GE_SIGMA_MULT_CLIP = (0.68, 1.38)  # clip the multiplier's tails
 GE_EQ_TAU_HOURS = 3.0      # [GE-OU][TEXTURE] OU timescale. 2.0 -> 3.0: a slightly longer correlation time smooths the equilibrium's step-to-step wander, cutting the excess signal complexity / hyper-episode fragmentation (SampEn ~1.07 -> ~0.9, hyper/day 3.0 -> 2.8 toward the real cohorts) AND raising the mid-lag autocorrelation (2h/4h) toward Ohio, which the too-short 2h timescale left below the real values. Still << 8h, so the 8h ACF stays ~0 (no long-lag memory).
 GE_EQ_DAY_BOOST = 10.0     # [GE-OU] legacy flat daytime lift — SUPERSEDED by the dawn-phenomenon profile below (kept as a constant for backward-compat); the OU step now uses ge_diurnal_profile instead.
 # [DAWN] Structured dawn-phenomenon rhythm on the OU equilibrium. Replaces the flat
@@ -788,6 +796,7 @@ class PatientProfile:
     correction_factor: float = 40.0
     glucose_effectiveness: float = GE_RATE  # per-patient Bergman Sg (per-step reversion)
     ge_anchor: float = GE_EQ_ANCHOR_MEAN    # per-patient equilibrium anchor (OU reverts to this + diurnal lift)
+    ge_sigma_mult: float = 1.0              # per-patient multiplier on GE_EQ_SIGMA (within-patient variability heterogeneity)
     basal_dose: float = 20.0
 
     # Insulin analogue assignment (one rapid bolus + one long-acting basal per
@@ -1111,8 +1120,14 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     # heterogeneity; loosely tied to insulin resistance so resistant patients
     # sit a little higher.
     profile.ge_anchor = float(np.clip(
-        rng.normal(GE_EQ_ANCHOR_MEAN + 12.0 * (ir - 1.0), GE_EQ_ANCHOR_SIGMA),
+        rng.normal(GE_EQ_ANCHOR_MEAN + GE_ANCHOR_IR_COUPLING * (ir - 1.0), GE_EQ_ANCHOR_SIGMA),
         110.0, 210.0))
+    # Per-patient within-patient-variability amplitude: some patients wander
+    # more than others (the global GE_EQ_SIGMA alone made every patient equally
+    # variable). Lognormal around 1.0, clipped.
+    profile.ge_sigma_mult = float(np.clip(
+        np.exp(rng.normal(0.0, GE_SIGMA_REL_SIGMA)),
+        GE_SIGMA_MULT_CLIP[0], GE_SIGMA_MULT_CLIP[1]))
     profile.dawn_hgo_amplitude = max(0.0, rng.normal(DAWN_HGO_AMPLITUDE_MEAN, DAWN_HGO_AMPLITUDE_SIGMA))
     profile.night_hgo_dip_amplitude = max(0.0, rng.normal(NIGHT_HGO_DIP_AMPLITUDE_MEAN, NIGHT_HGO_DIP_AMPLITUDE_SIGMA))
     # Equilibrium dawn rhythm scales with the SAME per-patient dawn trait as the HGO
@@ -2383,7 +2398,7 @@ class T1DMSimulator:
         ge_rho = float(np.exp(-DT_MINUTES / (GE_EQ_TAU_HOURS * 60.0)))
         self._ge_equilibrium = (
             ge_mu + ge_rho * (self._ge_equilibrium - ge_mu)
-            + np.sqrt(1.0 - ge_rho * ge_rho) * GE_EQ_SIGMA * self.rng.normal())
+            + np.sqrt(1.0 - ge_rho * ge_rho) * GE_EQ_SIGMA * p.ge_sigma_mult * self.rng.normal())
         self._ge_equilibrium = max(self._ge_equilibrium, GE_EQ_FLOOR)
         bg_delta += p.glucose_effectiveness * (self._ge_equilibrium - s.bg)
 
