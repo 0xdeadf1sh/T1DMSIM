@@ -20,3 +20,7 @@ datasets/
 
 # Ignore the paper for now
 paper/
+
+# Private working notes (never shipped)
+scratch/
+*.private.md
