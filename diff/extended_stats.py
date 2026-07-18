@@ -323,10 +323,19 @@ def acf_efold_min(acf_dict, target=1.0 / np.e):
 
 
 def _band_of(v):
-    for i, edge in enumerate(BAND_EDGES):
-        if v < edge:
-            return i
-    return len(BAND_EDGES)
+    # Match the canonical time_in_ranges() convention in build_report.py:
+    # TBR2 <54, TBR1 [54,70), TIR [70,180], TAR1 (180,250], TAR2 >250. The upper
+    # edges (180, 250) belong to the LOWER band, so a value of exactly 180 is TIR
+    # and exactly 250 is TAR1 (a plain `v < edge` on every edge misfiled both).
+    if v < BAND_EDGES[0]:       # <54
+        return 0
+    if v < BAND_EDGES[1]:       # 54-70
+        return 1
+    if v <= BAND_EDGES[2]:      # 70-180 (180 inclusive)
+        return 2
+    if v <= BAND_EDGES[3]:      # 180-250 (250 inclusive)
+        return 3
+    return 4
 
 
 def band_transition(bg, step_min, coarse_min=15):

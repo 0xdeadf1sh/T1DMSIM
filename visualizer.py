@@ -4,7 +4,6 @@ T1DM Simulator — Interactive Visualizer (Pygame)
 Controls:
   SPACE       — Generate next 24 hours
   R           — Reseed with random seed
-  0           — Reseed with seed 0 (canonical patient)
   LEFT/RIGHT  — Scroll timeline
   HOME        — Jump to start
   END         — Jump to end
@@ -997,7 +996,20 @@ if __name__ == '__main__':
             viz.sim.state.bg = args.bg
             viz.sim.state.bg_observed = args.bg
         viz._generate(24)
-    if args.hours != 24:
+    if args.hours > 24:
         viz._generate(args.hours - 24)
+    elif args.hours < 24:
+        # The constructor always generates a 24h window; for a shorter request,
+        # rebuild from scratch and generate exactly args.hours (a bare
+        # _generate(args.hours - 24) would pass a negative step count).
+        viz.sim = T1DMSimulator(seed=viz.seed)
+        viz.data = None
+        viz.total_steps = 0
+        viz.scroll_x = 0
+        viz._warmup(WARMUP_HOURS)
+        if args.bg is not None:
+            viz.sim.state.bg = args.bg
+            viz.sim.state.bg_observed = args.bg
+        viz._generate(args.hours)
 
     viz.run()
