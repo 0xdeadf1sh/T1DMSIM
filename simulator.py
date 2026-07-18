@@ -201,13 +201,14 @@ BASAL_DOSE_COMPETENCE_NOISE = 0.1  # [HIVAR 2x] 0.05→0.1 — day-to-day basal-
                                     # not 20-30%. Larger values produced visible "uneven hill" basal
                                     # traces from dose-to-dose magnitude swings.
 BASAL_DURATION_HOURS = 28.0  # Population reference duration of action (kept for
-                              # tests and as the basal_curve default). Real per-patient
-                              # duration is sampled in generate_patient from the
-                              # [BASAL_DURATION_HOURS_MIN, BASAL_DURATION_HOURS_MAX] range
-                              # below, and the patient's injection cadence matches it
-                              # (e.g. an 18h-duration patient injects every 18h).
-BASAL_DURATION_HOURS_MIN = 15.0  # [HIVAR 2x] 18.0→15.0 — basal-duration span
-BASAL_DURATION_HOURS_MAX = 34.0  # [HIVAR 2x] 30.0→34.0 — basal-duration span
+                              # tests and as the basal_curve default). Per-patient
+                              # duration of action is set from the assigned long-acting
+                              # analogue in BASAL_VARIANTS (glargine 26h / degludec 42h),
+                              # not sampled from a continuous range; the injection cadence
+                              # is a fixed once-daily BASAL_DOSE_INTERVAL_HOURS (24h),
+                              # decoupled from the duration.
+BASAL_DURATION_HOURS_MIN = 15.0  # Legacy basal-duration span bound — no longer read
+BASAL_DURATION_HOURS_MAX = 34.0  # Legacy basal-duration span bound — no longer read
 BASAL_MISS_PROB_BASE = 0.02  # Base probability of fully skipping a basal dose. Lowered from
                               # 0.10: at the legacy rate even high-skill patients missed ~1%, and
                               # low-skill patients missed ~35%, producing long full-cadence zero
@@ -223,7 +224,7 @@ BASAL_KA_PER_HOUR = 0.30  # Absorption rate (1/h). Governs onset/time-to-peak.
                           # tmax = ln(ka/ke)/(ka-ke) ≈ 6.3h for ka=0.30, ke=0.07 —
                           # broader-peak long-acting profile sitting between glargine
                           # (peak ~4h) and degludec (peak ~9h). The flatter shape is
-                          # required so consecutive doses at cadence = basal_duration_hours
+                          # required so consecutive once-daily doses (24h cadence)
                           # produce a near-flat cumulative basal trace rather than a
                           # peak-and-trough hill pattern.
 BASAL_KE_PER_HOUR = 0.07  # Elimination rate (1/h). Half-life ≈ 9.9h; produces a
@@ -232,14 +233,12 @@ BASAL_KE_PER_HOUR = 0.07  # Elimination rate (1/h). Half-life ≈ 9.9h; produces
 BASAL_TAIL_CLIP_HOURS = 5.0  # Smootherstep window at the end of the curve that
                              # tapers the late residual to zero, so consecutive
                              # daily doses join without a tail-step discontinuity.
-# Each scheduled basal dose generates a curve of duration
-#   patient.basal_duration_hours * (1 + BASAL_PK_OVERLAP_FRACTION)
-# so consecutive doses overlap. With the overlap at 1.0 the PK lasts twice
-# the cadence — two-to-three doses always contribute simultaneously, so the
-# trace stays smooth across normal handoffs AND a single missed dose is
-# bridged by the previous dose's still-active tail. The 24h-integral of
-# delivered insulin is unchanged (per-dose amount scales with the cadence,
-# see `_generate_day_events`); overlap only redistributes per-step amplitude.
+# Legacy PK-overlap fraction — no longer read. Each scheduled basal dose now
+# generates a curve of duration = patient.basal_duration_hours (the analogue's
+# action_hours), dosed at a fixed once-daily BASAL_DOSE_INTERVAL_HOURS (24h).
+# Because action_hours (26h/42h) exceeds the 24h cadence, the previous dose's
+# tail still overlaps the next, which supplies overnight coverage; degludec's
+# long tail also bridges a skipped dose, glargine's shorter one largely does not.
 BASAL_PK_OVERLAP_FRACTION = 1.00
 
 # Per-basal-dose damping of the lipohypertrophy site-quality multiplier.
@@ -282,8 +281,8 @@ ICR_MEAN = 8.0   # Insulin-to-carb ratio (1 unit per X grams). Lowered from 11.0
                  # with a ~50/50 split that matches AZT1D's pump-log totals. ICR also enters
                  # `ideal_basal = HGO*24*is/ICR`, so lowering it raises both bolus and basal
                  # symmetrically while preserving the HGO-balances-basal invariant. The Hill
-                 # calibration anchor `compute_hgo_rate(0.075) == 9.0` is unaffected because
-                 # HGO_INSULIN_HALF_MAX and HGO_BASE are untouched.
+                 # calibration anchor `compute_hgo_rate(0.086) ≈ 8.25` is unaffected because
+                 # it depends only on HGO_INSULIN_HALF_MAX and HGO_BASE, not ICR.
 ICR_SIGMA = 2.0
 BOLUS_TIMING_COMPETENT_MEAN = -15.0 # Minutes before meal (negative = before). Deepened from -5
                                      # to -15 so the bolus is already active when breakfast
@@ -529,7 +528,7 @@ SITE_QUALITY_SIGMA_BASE = 0.2  # [HIVAR 2x] 0.1→0.2 — per-dose absorption sc
 SITE_QUALITY_MIN = 0.35  # [HIVAR 2x] 0.5→0.35 — malabsorption floor
 SITE_QUALITY_MAX = 1.65  # [HIVAR 2x] 1.4→1.65 — absorption-surge ceiling
 
-# Delayed-meal HGO rebound — large meals trigger a positive HGO bump 4-6h
+# Delayed-meal HGO rebound — large meals trigger a positive HGO bump 3.5-5.5h
 # later (delayed gluconeogenesis from amino acids + cortisol response). This
 # is the mechanism behind nocturnal hyperglycemia after a big dinner.
 DELAYED_HGO_MEAL_THRESHOLD_GRAMS = 60.0  # Meals above this trigger a rebound
@@ -577,9 +576,9 @@ SEVERE_HYPO_GLUCAGON_RATE = 2.0  # Extra mg/dL per step at severity=1.0
 # pull of the BG delta toward a STOCHASTIC equilibrium E(t):
 #     bg_delta += glucose_effectiveness * (E(t) - bg)
 # E(t) is an Ornstein-Uhlenbeck process: each step it mean-reverts (timescale
-# GE_EQ_TAU_HOURS) toward the patient's anchor plus a daytime lift
-# (ge_anchor + GE_EQ_DAY_BOOST * ge_day_weight(hour)), perturbed by Gaussian
-# noise of stationary std GE_EQ_SIGMA, then floored at GE_EQ_FLOOR so the
+# GE_EQ_TAU_HOURS) toward the patient's anchor plus a dawn-phenomenon lift
+# (ge_anchor + ge_dawn_amplitude * ge_diurnal_profile(hour)), perturbed by Gaussian
+# noise of stationary std GE_EQ_SIGMA * ge_sigma_mult, then floored at GE_EQ_FLOOR so the
 # restoring target is never *severely* hypoglycemic (the floor sits above the
 # 55 mg/dL severe threshold). Sg is the mean-reverting force the
 # renal/counter-regulatory guardrails do NOT supply inside the normal 70-180
@@ -883,7 +882,7 @@ class SimulatorState:
     meal_hgo_effects: list = field(default_factory=list)     # (start_idx, end_idx, magnitude_g_per_hr)
     # Slow physiological state
     glycogen_grams: float = 70.0  # Current hepatic glycogen reserve (g)
-    glucotox_bg_ema: float = 120.0  # 6h EMA of true BG, drives glucotoxic IR
+    glucotox_bg_ema: float = 120.0  # 3h EMA of true BG, drives glucotoxic IR
     # Hypo correction tracking (see HYPO_CORRECTION_REFRACTORY_MIN).
     last_hypo_correction_idx: int = -9999
     # Active post-hypo basal-suspend envelopes — each entry is
@@ -894,7 +893,8 @@ class SimulatorState:
     post_hypo_basal_suspend_windows: list = field(default_factory=list)
     # Time index of the next scheduled basal injection. -1 = uninitialised
     # (anchored to the first day's wake_idx on the first _generate_day_events
-    # call). Advanced by patient.basal_duration_hours after each schedule.
+    # call). Advanced by the fixed once-daily BASAL_DOSE_INTERVAL_HOURS (24h)
+    # after each schedule, decoupled from the analogue's action duration.
     next_basal_due_idx: int = -1
 
 
@@ -1728,7 +1728,7 @@ class T1DMSimulator:
             }))
 
             # Delayed-meal HGO rebound: large meals trigger a positive HGO bump
-            # 4-6h later from delayed gluconeogenesis (amino acids) and cortisol
+            # 3.5-5.5h later from delayed gluconeogenesis (amino acids) and cortisol
             # response. This is the mechanism behind nocturnal hyperglycemia
             # after a big dinner.
             if carb_amount > DELAYED_HGO_MEAL_THRESHOLD_GRAMS:
@@ -1927,7 +1927,7 @@ class T1DMSimulator:
             is_val *= stress_factor
 
         # Glucotoxicity: sustained hyperglycemia transiently raises IR via the
-        # 6h BG EMA. Above GLUCOTOX_BG_THRESHOLD, IR climbs linearly toward
+        # 3h BG EMA. Above GLUCOTOX_BG_THRESHOLD, IR climbs linearly toward
         # GLUCOTOX_MAX_IS_INCREASE at GLUCOTOX_BG_FOR_MAX. Closes a positive
         # feedback loop: high BG → harder to bring down.
         if s.glucotox_bg_ema > GLUCOTOX_BG_THRESHOLD:
@@ -2058,10 +2058,10 @@ class T1DMSimulator:
             if severe_hypo:
                 deficit = max(0.0, SEVERE_HYPO_THRESHOLD - s.bg_observed)
                 correction_grams = max(correction_grams, 14.0 + 0.35 * deficit)
-            elif s.bg_observed < RAGE_EAT_BG_THRESHOLD:
-                rage_prob = RAGE_EAT_PROBABILITY_BASE * (1.2 - p.dosing_competence)
-                if self.rng.random() < rage_prob:
-                    correction_grams = self.rng.uniform(RAGE_EAT_CARB_MIN, RAGE_EAT_CARB_MAX)
+            # (The former probabilistic rage-eat branch below RAGE_EAT_BG_THRESHOLD=50
+            # was unreachable — any BG < 50 already trips severe_hypo (< 55) above,
+            # which rescues deterministically. Reflexive severe-hypo eating supersedes
+            # the stochastic version.)
 
             # Hypo correction uses fast-acting carbs (glucose tablets / juice)
             k = HYPO_CARB_K
@@ -2129,31 +2129,39 @@ class T1DMSimulator:
                 iob_equiv_bg_drop = iob * p.correction_factor
                 iob_consideration = iob_equiv_bg_drop * (0.7 + 0.3 * p.dosing_competence)
                 adjusted_excess = max(0.0, (s.bg_observed - BG_TARGET) - iob_consideration)
-                correction_dose = adjusted_excess / p.correction_factor
-                correction_dose *= (1 + self.rng.normal(0, p.carb_count_error_sigma * 0.5))
-                correction_dose = max(0.5, correction_dose)
+                # Only correct when there is genuine excess above the IOB-aware
+                # target. Skilled patients have eff_high_thresh dip below BG_TARGET
+                # (175 - 25*skill_avg < 158 for skill_avg > 0.68), so this branch can
+                # fire with adjusted_excess == 0; without this guard the max(0.5, ..)
+                # floor would inject a spurious 0.5U bolus into an already-in-range BG.
+                if adjusted_excess > 0.0:
+                    correction_dose = adjusted_excess / p.correction_factor
+                    correction_dose *= (1 + self.rng.normal(0, p.carb_count_error_sigma * 0.5))
+                    correction_dose = max(0.5, correction_dose)
 
-                if s.bg_observed > RAGE_BOLUS_BG_THRESHOLD:
-                    rage_prob = RAGE_BOLUS_PROBABILITY_BASE * (1.2 - p.dosing_competence)
-                    if self.rng.random() < rage_prob:
-                        rage_mult = self.rng.uniform(RAGE_BOLUS_MULTIPLIER_MIN, RAGE_BOLUS_MULTIPLIER_MAX)
-                        correction_dose *= rage_mult
+                    if s.bg_observed > RAGE_BOLUS_BG_THRESHOLD:
+                        rage_prob = RAGE_BOLUS_PROBABILITY_BASE * (1.2 - p.dosing_competence)
+                        if self.rng.random() < rage_prob:
+                            rage_mult = self.rng.uniform(RAGE_BOLUS_MULTIPLIER_MIN, RAGE_BOLUS_MULTIPLIER_MAX)
+                            correction_dose *= rage_mult
 
-                base_k, base_theta, corr_duration = bolus_pk_for_dose(
-                    correction_dose, p.bolus_gamma_k, p.bolus_gamma_theta,
-                    p.bolus_dia_base_hours)
-                delivered_dose = correction_dose * self._site_quality(p.lifestyle_consistency)
-                bolus_curve = gamma_curve(delivered_dose, base_k, base_theta, corr_duration)
-                self.inject_curve(bolus_curve, time_idx, 'bolus',
-                                  f'Correction {delivered_dose:.1f}U')
-                s.last_correction_idx = time_idx
+                    base_k, base_theta, corr_duration = bolus_pk_for_dose(
+                        correction_dose, p.bolus_gamma_k, p.bolus_gamma_theta,
+                        p.bolus_dia_base_hours)
+                    delivered_dose = correction_dose * self._site_quality(p.lifestyle_consistency)
+                    bolus_curve = gamma_curve(delivered_dose, base_k, base_theta, corr_duration)
+                    self.inject_curve(bolus_curve, time_idx, 'bolus',
+                                      f'Correction {delivered_dose:.1f}U')
+                    s.last_correction_idx = time_idx
 
         # --- Trend-based anticipatory corrections ---
-        elif len(s.bg_history) >= TREND_CORRECTION_WINDOW_STEPS:
+        elif len(s.bg_obs_history) >= TREND_CORRECTION_WINDOW_STEPS:
             steps_since_correction = time_idx - s.last_correction_idx
             patience_steps = int(p.patience_time_min / DT_MINUTES)
             if steps_since_correction >= patience_steps:
-                window = s.bg_history[-TREND_CORRECTION_WINDOW_STEPS:]
+                # Slope from the CGM-observed history (bg_obs_history), not true BG:
+                # the patient can only act on what the sensor shows.
+                window = s.bg_obs_history[-TREND_CORRECTION_WINDOW_STEPS:]
                 trend = (window[-1] - window[0]) / (TREND_CORRECTION_WINDOW_STEPS - 1)
 
                 if (trend > TREND_HIGH_RATE_THRESHOLD and
@@ -2435,7 +2443,7 @@ class T1DMSimulator:
         # Hard clamp as absolute backstop (should rarely fire)
         s.bg = float(np.clip(s.bg + bg_delta, BG_CLAMP_MIN, BG_CLAMP_MAX))
 
-        # Update glucotoxicity BG EMA (slow, ~6h half-life). Drives transient
+        # Update glucotoxicity BG EMA (slow, ~3h half-life). Drives transient
         # IR when chronically elevated.
         glucotox_alpha = 1.0 - 0.5 ** (DT_MINUTES / (GLUCOTOX_BG_EMA_HALF_LIFE_HOURS * 60.0))
         s.glucotox_bg_ema = glucotox_alpha * s.bg + (1.0 - glucotox_alpha) * s.glucotox_bg_ema
