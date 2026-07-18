@@ -39,23 +39,23 @@ discarded from every metric.
 
 | Metric | T1DMSIM | UVA/Padova | Δ (UVA − ours) |
 |---|---|---|---|
-| Mean BG (mg/dL) | 160.0 | 162.5 | 2.4 |
-| Median BG (mg/dL) | 153.9 | 146.8 | -7.1 |
-| SD (mg/dL) | 58.5 | 78.5 | 20.0 |
-| CV (%) | 36.8 | 55.2 | 18.4 |
-| GMI (%) | 7.14 | 7.20 | 0.06 |
-| p10 (mg/dL) | 89.1 | 78.5 | -10.6 |
-| p90 (mg/dL) | 237.5 | 267.1 | 29.5 |
-| Time <54 % (TBR2) | 1.21 | 14.99 | 13.79 |
-| Time 54–70 % (TBR1) | 2.89 | 6.94 | 4.05 |
-| Time 70–180 % (TIR) | 60.8 | 44.4 | -16.4 |
-| Time 180–250 % (TAR1) | 26.9 | 15.2 | -11.7 |
-| Time >250 % (TAR2) | 8.24 | 18.51 | 10.27 |
-| LBGI | 0.99 | 26.62 | 25.63 |
-| HBGI | 7.29 | 11.96 | 4.67 |
-| Hypo episodes/day | 1.06 | 0.92 | -0.14 |
-| Hyper episodes/day | 2.41 | 0.96 | -1.45 |
-| 5-min ΔBG SD (mg/dL) | 4.26 | 2.85 | -1.41 |
+| Mean BG (mg/dL) | 158.4 | 173.6 | 15.3 |
+| Median BG (mg/dL) | 152.2 | 160.6 | 8.4 |
+| SD (mg/dL) | 58.1 | 79.7 | 21.7 |
+| CV (%) | 36.9 | 51.7 | 14.8 |
+| GMI (%) | 7.10 | 7.46 | 0.36 |
+| p10 (mg/dL) | 87.8 | 85.7 | -2.1 |
+| p90 (mg/dL) | 235.8 | 273.7 | 37.9 |
+| Time <54 % (TBR2) | 1.19 | 13.60 | 12.41 |
+| Time 54–70 % (TBR1) | 3.00 | 7.14 | 4.14 |
+| Time 70–180 % (TIR) | 62.1 | 42.4 | -19.7 |
+| Time 180–250 % (TAR1) | 26.1 | 16.0 | -10.2 |
+| Time >250 % (TAR2) | 7.61 | 20.88 | 13.27 |
+| LBGI | 1.03 | 19.50 | 18.47 |
+| HBGI | 7.03 | 13.88 | 6.86 |
+| Hypo episodes/day | 1.10 | 0.93 | -0.17 |
+| Hyper episodes/day | 2.54 | 0.94 | -1.60 |
+| 5-min ΔBG SD (mg/dL) | 4.28 | 2.83 | -1.45 |
 
 ![Pooled BG distribution](figures/pdf_overlay.png)
 ![Pooled BG CDF](figures/cdf_overlay.png)
@@ -70,13 +70,13 @@ point-for-point (median across seeds, IQR in brackets):
 
 | Quantity | Median | IQR |
 |---|---|---|
-| RMSE (mg/dL) | 110.2 | 91.1–129.4 |
-| Mean abs. diff (mg/dL) | 86.6 | 68.7–111.9 |
-| Pearson r | 0.16 | 0.09–0.24 |
-| Pearson r (best lag) | 0.18 | 0.10–0.27 |
-| Mean-BG drift (mg/dL) | -2.9 | -69.1–+62.1 |
-| KS distance | 0.411 | 0.274–0.572 |
-| Wasserstein-1 (mg/dL) | 66.9 | 40.1–95.9 |
+| RMSE (mg/dL) | 117.1 | 89.3–161.8 |
+| Mean abs. diff (mg/dL) | 95.8 | 73.7–117.8 |
+| Pearson r | 0.17 | 0.08–0.27 |
+| Pearson r (best lag) | 0.20 | 0.11–0.29 |
+| Mean-BG drift (mg/dL) | -1.2 | -59.6–+73.5 |
+| KS distance | 0.456 | 0.317–0.636 |
+| Wasserstein-1 (mg/dL) | 76.2 | 46.8–98.6 |
 
 Agreement varies widely from seed to seed (note the IQRs), and point-wise
 correlation is weak throughout: the two engines answer the same meals and
@@ -85,7 +85,7 @@ the not-replayed behavioural perturbations above. The larger story is the
 divergence in level. The same doses leave the two engines off-centre in
 opposite directions — T1DMSIM mildly high (its dosing is calibrated to its own
 hepatic-output and insulin-sensitivity assumptions), the UVA/Padova patient
-lower in roughly two seeds out of three: the bolus stream, sized by T1DMSIM's
+lower in about half the seeds: the bolus stream, sized by T1DMSIM's
 insulin-to-carb ratio, over-covers that patient's gentler carb ratio, and the
 base model carries neither T1DMSIM's counter-regulatory floor below 70 mg/dL nor
 its behaviourally-timed rescue carbs, so its lows run deeper. The gap therefore
@@ -105,14 +105,14 @@ integrates a 13-state stiff ODE every minute.
 
 | Simulated days | T1DMSIM (s) | UVA/Padova (s) | T1DMSIM ms/day | UVA/Padova ms/day | Speedup |
 |---|---|---|---|---|---|
-| 1 | 0.004 | 3.81 | 4.28 | 3814 | ×892 |
-| 3 | 0.014 | 11.61 | 4.80 | 3872 | ×806 |
-| 7 | 0.037 | 27.02 | 5.28 | 3860 | ×731 |
-| 14 | 0.068 | 53.20 | 4.88 | 3800 | ×778 |
+| 1 | 0.004 | 3.63 | 4.04 | 3634 | ×900 |
+| 3 | 0.014 | 11.08 | 4.59 | 3692 | ×805 |
+| 7 | 0.033 | 25.94 | 4.78 | 3705 | ×775 |
+| 14 | 0.068 | 51.78 | 4.84 | 3699 | ×764 |
 
-* T1DMSIM: **58995** steps/s
-* UVA/Padova: **379** ODE-minutes/s
-* End-to-end speedup at the longest horizon: **×778**
+* T1DMSIM: **59509** steps/s
+* UVA/Padova: **389** ODE-minutes/s
+* End-to-end speedup at the longest horizon: **×764**
 
 ![Speed benchmark](figures/speed_bench.png)
 

@@ -21,31 +21,31 @@ operating range, isolated post-meal excursions (≥25 g, no
 other ≥20 g meal within ±120 min so the rise and peak
 are clean, a 180-min window) are extracted
 relative to each engine's **own** pre-meal baseline, so what is compared is the
-*response*, not the level. 751 excursions met the criteria.
+*response*, not the level. 783 excursions met the criteria.
 
 ## Excursion amplitude and timing (median, IQR)
 
 | Quantity | T1DMSIM | UVA/Padova |
 |---|---|---|
-| Peak rise (mg/dL) | 48 (18–82) | 32 (20–46) |
-| Time-to-peak (min) | 70 (40–140) | 75 (55–90) |
-| 3-h excursion area (mg/dL·min) | 3834 (764–8364) | 3156 (1505–5095) |
-| Recovery to baseline (min) | 145 (65–180) | 140 (90–180) |
+| Peak rise (mg/dL) | 49 (21–81) | 32 (20–47) |
+| Time-to-peak (min) | 70 (40–135) | 75 (60–90) |
+| 3-h excursion area (mg/dL·min) | 3928 (980–8300) | 3143 (1679–4967) |
+| Recovery to baseline (min) | 145 (70–180) | 140 (95–180) |
 
 Per-meal paired differences (T1DMSIM − UVA/Padova): peak rise
 **+17** mg/dL
-(IQR -14–+48),
+(IQR -14–+47),
 time-to-peak **+0** min
-(IQR -35–+60).
+(IQR -40–+65).
 
 ### By carbohydrate load
 
 | Meal size | n | T1DMSIM peak (mg/dL) | UVA/Padova peak (mg/dL) | T1DMSIM t-peak (min) | UVA/Padova t-peak (min) |
 |---|---|---|---|---|---|
-| 25-40 g | 348 | 35 (7–68) | 22 (14–33) | 70 (30–151) | 70 (50–90) |
-| 40-55 g | 194 | 44 (20–71) | 34 (25–48) | 65 (40–134) | 75 (60–90) |
-| 55-70 g | 105 | 67 (38–91) | 40 (32–58) | 70 (45–115) | 75 (60–85) |
-| 70-200 g | 104 | 91 (49–143) | 55 (41–84) | 70 (45–100) | 80 (70–90) |
+| 25-40 g | 368 | 39 (12–68) | 23 (16–34) | 80 (35–150) | 70 (50–95) |
+| 40-55 g | 208 | 46 (20–82) | 32 (24–49) | 72 (40–151) | 75 (60–90) |
+| 55-70 g | 87 | 63 (36–87) | 39 (32–58) | 60 (40–90) | 75 (65–90) |
+| 70-200 g | 120 | 77 (47–120) | 60 (45–82) | 60 (45–105) | 80 (65–90) |
 
 ![Mean excursion by carbohydrate load](figures/excursion_shape_by_size.png)
 ![Paired peak rise](figures/excursion_peak_scatter.png)

@@ -26,7 +26,7 @@ envelope is, distributionally, as real as one real cohort is to another.
 | · Ohio | 162 | 7.19 | 61% | 5.89 |
 | · Shanghai (15-min) | 164 | 7.22 | 55% | — |
 | · AZT1D | 147 | 6.83 | 78% | 6.02 |
-| **T1DMSIM** | 162 | 7.18 | 61% | 5.50 |
+| **T1DMSIM** | 160 | 7.14 | 62% | 5.45 |
 | **UVA/Padova** | 120 | 6.19 | 93% | 4.01 |
 
 ## Distance to real (lower is closer)
@@ -36,10 +36,10 @@ real-vs-real floor for reference:
 
 | | T1DMSIM | UVA/Padova | real-vs-real floor |
 |---|---|---|---|
-| BG distribution | 12.8 | 30.0 | 18.4 |
+| BG distribution | 11.8 | 30.0 | 18.4 |
 | ΔBG distribution | 0.7 | 1.2 | 0.3 |
 
-On the marginal BG distribution, **T1DMSIM** is closer to real — by ≈2.3×
+On the marginal BG distribution, **T1DMSIM** is closer to real — by ≈2.5×
 on Wasserstein.
 
 ![BG distribution](figures/realism_pdf.png)
@@ -59,30 +59,30 @@ AZT1D), since Shanghai is 15-min.
 
 | Metric | Real | T1DMSIM | UVA/Padova | ours (SD) | UVA (SD) | closer |
 |---|---|---|---|---|---|---|
-| Mean BG | 154.6 | 161.6 | 120.5 | 0.29 | 1.44 | T1DMSIM |
-| CV | 33.6 | 36.5 | 22.9 | 0.44 | 1.59 | T1DMSIM |
-| TIR 70-180 | 67.8 | 60.9 | 93.5 | 0.42 | 1.58 | T1DMSIM |
-| TBR 54-70 | 2.6 | 3.2 | 2.4 | 0.20 | 0.07 | UVA/Padova |
-| TAR 180-250 | 21.0 | 26.9 | 3.0 | 0.58 | 1.80 | T1DMSIM |
-| 10th pct | 92.2 | 90.8 | 85.9 | 0.09 | 0.39 | T1DMSIM |
-| 90th pct | 224.6 | 241.3 | 157.8 | 0.45 | 1.79 | T1DMSIM |
-| LBGI | 1.0 | 0.8 | 1.1 | 0.14 | 0.09 | UVA/Padova |
-| HBGI | 6.4 | 7.5 | 1.3 | 0.30 | 1.39 | T1DMSIM |
+| Mean BG | 154.6 | 160.3 | 120.5 | 0.24 | 1.44 | T1DMSIM |
+| CV | 33.6 | 36.6 | 22.9 | 0.45 | 1.59 | T1DMSIM |
+| TIR 70-180 | 67.8 | 61.6 | 93.5 | 0.38 | 1.58 | T1DMSIM |
+| TBR 54-70 | 2.6 | 3.3 | 2.4 | 0.24 | 0.07 | UVA/Padova |
+| TAR 180-250 | 21.0 | 26.5 | 3.0 | 0.55 | 1.80 | T1DMSIM |
+| 10th pct | 92.2 | 90.2 | 85.9 | 0.12 | 0.39 | T1DMSIM |
+| 90th pct | 224.6 | 239.2 | 157.8 | 0.39 | 1.79 | T1DMSIM |
+| LBGI | 1.0 | 0.9 | 1.1 | 0.11 | 0.09 | UVA/Padova |
+| HBGI | 6.4 | 7.3 | 1.3 | 0.24 | 1.39 | T1DMSIM |
 
-Mean normalised error — T1DMSIM **0.32**,
+Mean normalised error — T1DMSIM **0.30**,
 UVA/Padova **1.13**.
 
 ### Rate-of-change metrics (cadence-dependent; 5-min cohorts only — the fairer test)
 
 | Metric | Real | T1DMSIM | UVA/Padova | ours (SD) | UVA (SD) | closer |
 |---|---|---|---|---|---|---|
-| 5-min ΔBG SD | 6.0 | 5.5 | 4.0 | 0.55 | 2.18 | T1DMSIM |
-| MAGE | 82.9 | 99.2 | 47.7 | 0.87 | 1.89 | T1DMSIM |
-| CONGA-1h | 37.9 | 39.0 | 24.5 | 0.20 | 2.41 | T1DMSIM |
-| MODD | 45.8 | 63.7 | 22.1 | 1.57 | 2.08 | T1DMSIM |
+| 5-min ΔBG SD | 6.0 | 5.4 | 4.0 | 0.60 | 2.18 | T1DMSIM |
+| MAGE | 82.9 | 97.4 | 47.7 | 0.78 | 1.89 | T1DMSIM |
+| CONGA-1h | 37.9 | 38.5 | 24.5 | 0.12 | 2.41 | T1DMSIM |
+| MODD | 45.8 | 63.1 | 22.1 | 1.51 | 2.08 | T1DMSIM |
 | Sample entropy | 0.7 | 0.6 | 1.1 | 0.56 | 2.75 | T1DMSIM |
 
-Mean normalised error — T1DMSIM **0.75**,
+Mean normalised error — T1DMSIM **0.71**,
 UVA/Padova **2.26**.
 
 ![Per-metric distance](figures/realism_metric_error.png)
@@ -94,19 +94,20 @@ UVA/Padova **2.26**.
 A model trained on the source whose distribution is closer to real incurs less
 covariate/label shift at deployment, so distance to real bounds — but does not
 prove — transfer quality. T1DMSIM is closer on every aggregate here: decisively
-on level (mean normalised error 0.32 vs
+on level (mean normalised error 0.30 vs
 1.13 real-patient SDs) and more narrowly on
-dynamics (0.75 vs 2.26).
+dynamics (0.71 vs 2.26).
 That ordering is expected — T1DMSIM was fit to these cohorts, UVA/Padova never
 saw them — so the result confirms the calibration rather than crowning a winner.
 
-Two findings survive the caveat. First, both simulators sit **outside** the
-real-vs-real envelope on the pooled distribution (13 and
-30 mg/dL vs a 18 floor), so neither is a
-drop-in replacement for real CGM. Second, on excursion-amplitude (MAGE, MODD)
-UVA/Padova — despite no fitting — lands closer to real than T1DMSIM, which
-*overshoots* them: a model trained on T1DMSIM should transfer better overall,
-but would inherit its exaggerated swings.
+Two observations temper the caveat. First, T1DMSIM's pooled BG-distance to real
+(12 mg/dL) falls **below** the real-vs-real floor
+(18 mg/dL) — within the spread among the real cohorts themselves —
+whereas UVA/Padova (30 mg/dL) sits outside it. Second, the
+ordering holds on the excursion-amplitude metrics (MAGE, MODD) as well as on
+level: T1DMSIM lands nearer real on both. Neither result is a transfer
+guarantee — T1DMSIM was fit to these cohorts and UVA/Padova never saw them —
+so read this as confirming the calibration rather than crowning a winner.
 
 ## Reproducing
 
