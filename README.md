@@ -54,6 +54,8 @@ python cache_simulator.py --pool-size 50000 --hypo-oversample 0.25
 
 Each trajectory is 55.5 h of post-warmup CGM at 5-minute cadence (666 steps; the first 48 h of warmup are discarded before caching). Windows whose CGM touches the clamp rails (a reading ≥ 399 or ≤ 41 mg/dL) are discarded, and `--hypo-oversample` biases a configurable fraction of rows toward hypoglycemia via seed rejection sampling. The tool needs `blosc2` in addition to the core dependencies (`pip install blosc2`).
 
+`DATASET.md` also carries a **distribution-vs-baseline** comparison: the cache's pooled `bg_observed` is measured against the unbiased-simulator baseline recorded in [`diff/README.md`](diff/README.md) (`datasets.Sim` in `diff/stats.json`), tabulating the shift in moments, percentiles, glycemic-band time fractions, and LBGI/HBGI. Under `--hypo-oversample` this quantifies how far the biased corpus departs from the simulator's natural distribution.
+
 
 ## Design Principles
 
@@ -285,11 +287,12 @@ python uva_padova/compare_realism.py        # distance-to-real-CGM
 python -m pytest tests/ -v
 ```
 
-The test suite (58 tests) covers:
+The test suite (71 tests) covers:
 - `tests/test_curves.py` — curve generation correctness and unit consistency
 - `tests/test_patient.py` — skill ranges, basal/HGO/ICR relationship, behavioral parameters
 - `tests/test_simulator.py` — reproducibility, BG bounds, meal/insulin effects, weekday/weekend/holiday, severe-hypo rescue grams, skill-scaled correction, `inject_curve` totals contract, follow-up snack effect
 - `tests/test_balance.py` — basal-HGO balance, meal-bolus balance, ICR-basal proportionality
+- `tests/test_hypo_oversample.py` — the DATASET.md distribution-vs-baseline comparison (pooled moments/percentiles/LBGI-HBGI vs `diff/stats.json`) and that `--hypo-oversample` shifts the pool toward hypoglycemia in the expected direction, reproducibly
 
 ## References
 

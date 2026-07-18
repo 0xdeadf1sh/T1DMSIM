@@ -21,6 +21,8 @@ datasets/
 # Generated simulator caches (built by cache_simulator.py; regenerate on demand)
 *_cache/
 *_cache.partial/
+/cache/
+/cache.partial/
 *.b2nd
 
 # Ignore the paper for now

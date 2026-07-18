@@ -35,7 +35,8 @@ Key design decisions:
 
 - `simulator.py` -- core simulation engine, all parameters, patient generator, BG computation
 - `visualizer.py` -- Pygame interactive visualizer (forces X11 on Wayland)
-- `tests/` -- pytest suite (58 tests): test_curves, test_patient, test_simulator, test_balance
+- `cache_simulator.py` -- pre-generate a compressed (blosc2 `.b2nd`) pool of trajectories to disk and emit `DATASET.md`. Direct-memmap multiprocessing fan-out, per-row seed rejection sampling. Discards any window touching the CGM clamp rails (bg_observed ≥ 399 or ≤ 41); `--hypo-oversample`/`--hypo-min-frac`/`--hypo-threshold` bias a fraction of rows toward hypoglycemia. During the transcode pass it also pools bg_observed (1 mg/dL histogram + power sums + Kovatchev LBGI/HBGI numerators, no extra I/O) and emits a `DATASET.md` "Distribution vs the baseline simulator" table comparing the cache against the unbiased-sim baseline in `diff/stats.json` (`datasets.Sim`; `--baseline-stats`/`--no-baseline`). Needs `blosc2`.
+- `tests/` -- pytest suite (71 tests): test_curves, test_patient, test_simulator, test_balance, test_hypo_oversample
 - `scripts/batch_test.py` -- run multiple seeds and print TIR/mean BG summary
 - `scripts/compare_all_datasets.py` -- dataset loaders + grid regularisation for the three real cohorts (OhioT1DM, ShanghaiT1DM, AZT1D); reused by the report engine
 - `diff/build_report.py` -- comprehensive sim-vs-real statistical comparison; regenerates `diff/README.md`, `diff/stats.json`, `diff/figures/*.png`. Runs the sim for N seeds and compares against the three real cohorts (moments, percentiles, KS/Wasserstein/JS, risk indices, MAGE/CONGA/MODD, SampEn, ACF, episodes, excursions, plus the §12 extended stats). CLI: `--n-seeds N --days D --warmup-h H`
@@ -61,6 +62,11 @@ python scripts/batch_test.py
 # Regenerate the full sim-vs-real statistical comparison (report + stats + figures)
 python diff/build_report.py                      # default 100 seeds x 70 d
 python diff/build_report.py --n-seeds 300 --days 70   # larger synthetic corpus
+
+# Cache a compressed trajectory pool + regenerate DATASET.md (with the
+# distribution-vs-baseline comparison against diff/stats.json)
+python cache_simulator.py --out-dir simulator_cache --pool-size 50000
+python cache_simulator.py --pool-size 50000 --hypo-oversample 0.25   # tail oversampling
 ```
 
 The three real datasets must live under `datasets/` (gitignored). `diff/stats.json`

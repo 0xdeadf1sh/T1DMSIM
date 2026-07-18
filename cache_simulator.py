@@ -180,6 +180,28 @@ BG_LOW = 70.0
 BG_HIGH = 180.0
 BG_VERY_HIGH = 250.0
 
+# 1 mg/dL histogram over the CGM clamp span, accumulated during the transcode
+# pass to recover pooled percentiles/median without holding every reading in RAM.
+BG_HIST_EDGES = np.arange(40.0, 401.0, 1.0)  # 361 edges -> 360 bins covering [40, 400]
+
+# Path (relative to this file) to the diff report's machine-readable baseline.
+DEFAULT_BASELINE_STATS = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'diff', 'stats.json'
+)
+
+
+def _kovatchev_numerators(bg: np.ndarray) -> tuple[float, float]:
+    """Sum of the Kovatchev (1997) LBGI/HBGI per-reading risk terms over ``bg``.
+
+    Matches ``diff/build_report.kovatchev_risk``: f = 1.509*(ln(bg)^1.084 - 5.381),
+    left/hypo risk 10*min(f,0)^2, right/hyper risk 10*max(f,0)^2. Returns the
+    *sums* so the caller divides by the pooled reading count to get LBGI/HBGI.
+    """
+    f = 1.509 * (np.log(np.clip(bg, 1.0, None)) ** 1.084 - 5.381)
+    rl = 10.0 * np.minimum(f, 0.0) ** 2
+    rh = 10.0 * np.maximum(f, 0.0) ** 2
+    return float(rl.sum(dtype=np.float64)), float(rh.sum(dtype=np.float64))
+
 
 @dataclasses.dataclass(frozen=True)
 class RowConfig:
@@ -522,13 +544,20 @@ def _fsync_dir(path: str) -> None:
 def _transcode_to_blosc2(
     partial_dir: str, pool_size: int, n_timesteps: int,
     rows_per_chunk: int, clevel: int, nthreads: int,
-) -> dict[str, dict[str, int]]:
+) -> tuple[dict[str, dict[str, int]], dict[str, Any]]:
     """
     Convert each staging ``.npy`` to a compressed ``.b2nd`` and delete the source.
 
-    Returns a per-channel inventory of ``{raw_bytes, compressed_bytes}``. Round-
-    trips the first and last row of each channel to catch chunk-edge corruption.
+    Returns ``(inventory, bg_dist)``: a per-channel ``{raw_bytes, compressed_bytes}``
+    inventory, and the pooled ``bg_observed`` distribution aggregates (histogram,
+    power sums, Kovatchev numerators) accumulated block-by-block as the channel is
+    read for compression -- so pooled percentiles / std / skew / LBGI / HBGI cost
+    no extra I/O and never materialise the whole channel in RAM. Round-trips the
+    first and last row of each channel to catch chunk-edge corruption.
     """
+    bg_hist = np.zeros(len(BG_HIST_EDGES) - 1, dtype=np.float64)
+    bg_dist = {'sum': 0.0, 'sum_sq': 0.0, 'sum_cube': 0.0,
+               'sum_rl': 0.0, 'sum_rh': 0.0, 'n': 0}
     cparams = blosc2.CParams(
         codec=blosc2.Codec.ZSTD,
         clevel=clevel,
@@ -572,7 +601,18 @@ def _transcode_to_blosc2(
             # of nthreads) -- see the rows_per_chunk help for the read tradeoff.
             for r0 in range(0, pool_size, rows_per_block):
                 r1 = min(r0 + rows_per_block, pool_size)
-                dst[r0:r1] = np.asarray(src[r0:r1])
+                block = np.asarray(src[r0:r1])
+                dst[r0:r1] = block
+                if name == 'bg_observed':
+                    v = block.reshape(-1).astype(np.float64)
+                    bg_hist += np.histogram(v, bins=BG_HIST_EDGES)[0]
+                    bg_dist['sum'] += float(v.sum())
+                    bg_dist['sum_sq'] += float((v * v).sum())
+                    bg_dist['sum_cube'] += float((v * v * v).sum())
+                    rl, rh = _kovatchev_numerators(v)
+                    bg_dist['sum_rl'] += rl
+                    bg_dist['sum_rh'] += rh
+                    bg_dist['n'] += int(v.size)
 
             reopened = blosc2.open(dst_path, mode='r')
             for check_idx in (0, pool_size - 1):
@@ -598,18 +638,88 @@ def _transcode_to_blosc2(
             f'{cbytes / 1e6:8.2f} MB ({ratio:.2f}x)',
             flush=True,
         )
-    return inventory
+    bg_dist['hist'] = bg_hist.tolist()
+    return inventory, bg_dist
 
 
 # ============================================================================
 # REPORT ASSEMBLY + RENDERING
 # ============================================================================
 
+def _hist_percentile(hist: np.ndarray, edges: np.ndarray, q: float) -> float:
+    """Linear-interpolated q-th percentile (0-100) from a histogram."""
+    total = float(hist.sum())
+    if total <= 0:
+        return float('nan')
+    target = (q / 100.0) * total
+    cum = np.cumsum(hist)
+    idx = int(np.searchsorted(cum, target, side='left'))
+    idx = min(idx, len(hist) - 1)
+    below = float(cum[idx - 1]) if idx > 0 else 0.0
+    within = (target - below) / hist[idx] if hist[idx] > 0 else 0.0
+    lo, hi = float(edges[idx]), float(edges[idx + 1])
+    return lo + within * (hi - lo)
+
+
+def _pool_distribution(bg_dist: dict[str, Any]) -> dict[str, float]:
+    """Pooled bg_observed moments / percentiles / LBGI-HBGI from the transcode aggregates."""
+    n = bg_dist['n']
+    if not n:
+        return {}
+    hist = np.asarray(bg_dist['hist'], dtype=np.float64)
+    mean = bg_dist['sum'] / n
+    var = max(bg_dist['sum_sq'] / n - mean * mean, 0.0)
+    std = var ** 0.5
+    m3 = bg_dist['sum_cube'] / n - 3 * mean * (bg_dist['sum_sq'] / n) + 2 * mean ** 3
+    skew = m3 / (std ** 3) if std > 0 else 0.0
+    p = {q: _hist_percentile(hist, BG_HIST_EDGES, q) for q in (5, 25, 50, 75, 95)}
+    return {
+        'mean': mean, 'std': std, 'cv_pct': 100.0 * std / mean if mean else 0.0,
+        'skew': skew, 'median': p[50],
+        'p5': p[5], 'p25': p[25], 'p75': p[75], 'p95': p[95],
+        'lbgi': bg_dist['sum_rl'] / n, 'hbgi': bg_dist['sum_rh'] / n,
+    }
+
+
+def _load_baseline_stats(path: str) -> dict[str, Any] | None:
+    """
+    Load the unbiased-simulator baseline distribution from the diff report's
+    ``stats.json`` (``datasets.Sim``). Returns None if the file is missing or its
+    schema does not match, so the comparison section is simply omitted.
+    """
+    try:
+        with open(path) as f:
+            sim = json.load(f)['datasets']['Sim']
+        pm, pp, pr, sm = (sim['pooled_moments'], sim['pooled_percentiles'],
+                          sim['pooled_risk'], sim['summary'])
+
+        def band(key: str) -> float:
+            return sm[key]['mean'] / 100.0
+
+        return {
+            'source': path,
+            'n_records': sim.get('n_records'),
+            'mean': pm['mean'], 'std': pm['std'], 'median': pm['median'],
+            'cv_pct': pm['cv_pct'], 'skew': pm['skew'],
+            'p5': pp['p5'], 'p25': pp['p25'], 'p75': pp['p75'], 'p95': pp['p95'],
+            'lbgi': pr['LBGI_pooled'], 'hbgi': pr['HBGI_pooled'],
+            'frac_below54': band('TBR2_pct'),
+            'frac_below70': band('TBR1_pct') + band('TBR2_pct'),
+            'frac_in_range': band('TIR_pct'),
+            'frac_above180': band('TAR1_pct') + band('TAR2_pct'),
+            'frac_above250': band('TAR2_pct'),
+        }
+    except (OSError, KeyError, ValueError, TypeError):
+        return None
+
+
 def _finalize_report(
     acc: StatAccumulator,
     params: dict[str, Any],
     inventory: dict[str, dict[str, int]],
     icr_bytes: int,
+    bg_dist: dict[str, Any],
+    baseline: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Reduce the accumulator + inventory into the numbers DATASET.md renders."""
     n = acc.n_rows
@@ -636,6 +746,21 @@ def _finalize_report(
     return {
         'schema': 'dataset-report-v1',
         'params': params,
+        # Flat top-level keys the T1DMAI T1DMDataset loader (data.py
+        # _load_cache) hard-requires. They mirror values already nested under
+        # 'params'; kept flat here because that loader reads them off the root
+        # of meta.json. patient_uniform_sample_prob is hardcoded 0.0 because
+        # this generator never mixes uniform-skill patients.
+        'pool_size': params['pool_size'],
+        'n_timesteps': params['n_timesteps'],
+        'sim_hours': params['sim_hours'],
+        'simulator_warmup_hours': params['warmup_hours'],
+        'patient_uniform_sample_prob': 0.0,
+        'dt_minutes': params['dt_minutes'],
+        'channels': params['channels'],
+        'cache_format': params['cache_format'],
+        'rows_per_chunk': params['rows_per_chunk'],
+        'zstd_clevel': params['zstd_clevel'],
         'corpus': {
             'n_patients': n,
             'n_timesteps': T,
@@ -681,6 +806,8 @@ def _finalize_report(
             'class_in_range': frac(sums['in_range']),
             'class_hyper': frac(sums['above180']),
         },
+        'distribution': _pool_distribution(bg_dist),
+        'baseline': baseline,
         'icr': {
             'mean': acc.icr_sum / n if n else 0.0,
             'min': acc.icr_min if n else 0.0,
@@ -736,6 +863,61 @@ def _fmt_years(years: float) -> str:
     if years >= 1:
         return f'{years:.1f} years'
     return f'{years:.2f} years'
+
+
+def _render_comparison(report: dict[str, Any]) -> list[str]:
+    """
+    Render the 'Distribution vs the baseline simulator' section.
+
+    Compares the pooled distribution of this cache against the unbiased simulator
+    baseline loaded from the diff report (``datasets.Sim`` in stats.json). Empty
+    if no baseline was available.
+    """
+    dist = report.get('distribution') or {}
+    base = report.get('baseline')
+    gly = report['glycemia']
+    if not base or not dist:
+        return []
+
+    # (label, pool value, baseline value, format, delta-as-points?)
+    rows = [
+        ('Mean BG (mg/dL)', dist['mean'], base['mean'], '.1f', False),
+        ('Median', dist['median'], base['median'], '.1f', False),
+        ('Std', dist['std'], base['std'], '.1f', False),
+        ('CV (%)', dist['cv_pct'], base['cv_pct'], '.1f', False),
+        ('Skew', dist['skew'], base['skew'], '.2f', False),
+        ('p5', dist['p5'], base['p5'], '.1f', False),
+        ('p25', dist['p25'], base['p25'], '.1f', False),
+        ('p75', dist['p75'], base['p75'], '.1f', False),
+        ('p95', dist['p95'], base['p95'], '.1f', False),
+        ('Time <54 (%)', 100 * gly['frac_below54'], 100 * base['frac_below54'], '.2f', True),
+        ('Time <70 (%)', 100 * gly['frac_below70'], 100 * base['frac_below70'], '.2f', True),
+        ('TIR 70–180 (%)', 100 * gly['frac_in_range'], 100 * base['frac_in_range'], '.2f', True),
+        ('Time >180 (%)', 100 * gly['frac_above180'], 100 * base['frac_above180'], '.2f', True),
+        ('Time >250 (%)', 100 * gly['frac_above250'], 100 * base['frac_above250'], '.2f', True),
+        ('LBGI (hypo risk)', dist['lbgi'], base['lbgi'], '.2f', False),
+        ('HBGI (hyper risk)', dist['hbgi'], base['hbgi'], '.2f', False),
+    ]
+
+    L: list[str] = []
+    L.append('## Distribution vs the baseline simulator')
+    L.append('')
+    nrec = base.get('n_records')
+    nrec_txt = f', N={nrec} records' if nrec else ''
+    L.append(
+        'Pooled `bg_observed` of this cache against the unbiased simulator baseline '
+        f'characterised in [`diff/README.md`](diff/README.md) (`datasets.Sim` in '
+        f'`diff/stats.json`{nrec_txt}). Δ is this pool minus the baseline; band shares '
+        'are in percentage points. LBGI/HBGI follow Kovatchev (1997).'
+    )
+    L.append('')
+    L.append('| Metric | This pool | Baseline sim | Δ |')
+    L.append('|---|---|---|---|')
+    for label, pv, bv, fmt, _ in rows:
+        delta = pv - bv
+        L.append(f'| {label} | {pv:{fmt}} | {bv:{fmt}} | {delta:+{fmt}} |')
+    L.append('')
+    return L
 
 
 def _render_dataset_md(report: dict[str, Any]) -> str:
@@ -805,6 +987,8 @@ def _render_dataset_md(report: dict[str, Any]) -> str:
     lines.append(f'| In-range | 70–180 | {pct(gly["class_in_range"])} |')
     lines.append(f'| Hyper | > 180 | {pct(gly["class_hyper"])} |')
     lines.append('')
+
+    lines.extend(_render_comparison(report))
 
     lines.append('## Per-channel inventory')
     lines.append('')
@@ -906,6 +1090,7 @@ def build_cache(
     rail_low: float = DEFAULT_RAIL_LOW,
     seed_salt: int = 0,
     dataset_md: str = 'DATASET.md',
+    baseline_stats: str | None = DEFAULT_BASELINE_STATS,
     force: bool = False,
 ) -> dict[str, Any]:
     """Build the cache at ``out_dir`` atomically and emit ``dataset_md``."""
@@ -1021,10 +1206,14 @@ def build_cache(
         print(f'Transcoding {len(CHANNEL_NAMES)} channels to blosc2 (rows/chunk={effective_rpc})...', flush=True)
 
         t_trans = time.time()
-        inventory = _transcode_to_blosc2(
+        inventory, bg_dist = _transcode_to_blosc2(
             partial_dir, pool_size, keep_steps, effective_rpc, zstd_clevel, n_jobs
         )
         print(f'Transcode finished in {time.time() - t_trans:.1f}s.')
+
+        baseline = _load_baseline_stats(baseline_stats) if baseline_stats else None
+        if baseline_stats and baseline is None:
+            print(f'  (baseline comparison skipped: {baseline_stats} unavailable)', flush=True)
 
         icr_path = os.path.join(partial_dir, 'icr.npy')
         np.save(icr_path, icr_arr)
@@ -1049,8 +1238,9 @@ def build_cache(
             'zstd_clevel': int(zstd_clevel),
             'channels': list(CHANNEL_NAMES),
             'cache_format': CACHE_FORMAT_VERSION,
+            'baseline_stats': baseline['source'] if baseline else None,
         }
-        report = _finalize_report(acc, params, inventory, icr_bytes)
+        report = _finalize_report(acc, params, inventory, icr_bytes, bg_dist, baseline)
         # meta.json is the last file written -- its presence marks a complete
         # cache. fsync every file and the staging dir before the atomic rename so
         # a power loss cannot surface a sentinel-present, data-truncated cache.
@@ -1126,6 +1316,11 @@ def main() -> int:
                         help='Salt folded into every seed; change to draw an independent corpus.')
     parser.add_argument('--dataset-md', type=str, default='DATASET.md',
                         help='Path for the rendered statistics report (empty to skip).')
+    parser.add_argument('--baseline-stats', type=str, default=DEFAULT_BASELINE_STATS,
+                        help='diff/stats.json to source the unbiased-simulator baseline for '
+                             'the DATASET.md distribution comparison.')
+    parser.add_argument('--no-baseline', action='store_true',
+                        help='Skip the baseline distribution comparison in DATASET.md.')
     parser.add_argument('--force', action='store_true',
                         help='Delete an existing --out-dir before building.')
     args = parser.parse_args()
@@ -1146,6 +1341,7 @@ def main() -> int:
         rail_low=args.rail_low,
         seed_salt=args.seed_salt,
         dataset_md=args.dataset_md,
+        baseline_stats=None if args.no_baseline else args.baseline_stats,
         force=args.force,
     )
     _print_class_ratios(report)
