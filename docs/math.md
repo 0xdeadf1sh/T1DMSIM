@@ -59,7 +59,7 @@ modelling subcutaneous depot absorption (rate `ka`) followed by first-order elim
 
 Each insulin dose (basal, meal bolus, hyper correction, trend correction) is multiplied by a per-dose site_quality factor:
 
-    site_quality ~ N(1.0, SITE_QUALITY_SIGMA_BASE * (1.5 - s4))
+    site_quality ~ N(1.0, SITE_QUALITY_SIGMA_BASE * (1.5 - s4) ** 1.8)
     site_quality = clip(site_quality, SITE_QUALITY_MIN, SITE_QUALITY_MAX)
     delivered_dose = intended_dose * site_quality
 
@@ -83,7 +83,7 @@ Combined, with all modifiers:
             * (1 + fast_noise)
 
 Where:
-- `daily_drift ~ N(0, IS_DAILY_DRIFT_SIGMA)`, sampled once per day, blended across midnight
+- `daily_drift ~ N(0, IS_DAILY_DRIFT_SIGMA * (1.5 - s4))`, sampled once per day, blended across midnight — the drift std scales with `(1.5 - lifestyle_consistency)`, so consistent-lifestyle patients swing less day-to-day
 - `phase_shift ~ N(0, IS_DAWN_PHASE_DAILY_SIGMA)`, sampled once per day, blended across midnight
 - `fast_noise ~ N(0, IS_FAST_NOISE_SIGMA)`, sampled every step
 - `illness_factor` ramps toward `illness_is_target` at rate `ILLNESS_IS_RAMP_RATE` per day; always applied (rests at 1.0 when healthy)
@@ -91,7 +91,7 @@ Where:
 
 ### Glucotoxicity
 
-A slow EMA of true BG (6h half-life) drives transient insulin resistance when chronically elevated:
+A slow EMA of true BG (3h half-life) drives transient insulin resistance when chronically elevated:
 
     glucotox_bg_ema += α * (BG - glucotox_bg_ema)   where α = 1 - 0.5^(dt / half_life)
     if glucotox_bg_ema > GLUCOTOX_BG_THRESHOLD:
@@ -137,7 +137,7 @@ Final:
 
     BG(t+1) = clamp(BG(t) + delta_BG, BG_CLAMP_MIN, BG_CLAMP_MAX)
 
-`BG_CLAMP_MIN` is intentionally low (20 mg/dL) so the dynamics, not the clamp, drive the lower tail. The combined counter-regulatory + glucagon-dump terms together with the soft-bound headroom cap are usually strong enough to lift BG before the clamp engages.
+`BG_CLAMP_MIN` is set to 40 mg/dL, matching the real CGM device floor (the Ohio/AZT1D minimum). The combined counter-regulatory + glucagon-dump terms together with the soft-bound headroom cap are usually strong enough to lift BG before the clamp engages.
 
 ### Glucose effectiveness (Bergman Sg) equilibrium
 
@@ -162,12 +162,16 @@ with `IR_LOGNORMAL_SIGMA = 0.26`, `IR_FACTOR_MIN / IR_FACTOR_MAX = 0.4 / 2.0`, `
 
 ## CGM Observation Model
 
-    BG_observed = BG_true + N(0, sigma_cgm)
-    sigma_cgm = CGM_NOISE_FRACTION * BG_true
+The sensor reports a delayed-and-smoothed interstitial value with time-correlated multiplicative noise — never the instantaneous true BG. First a first-order interstitial lag (Rebrin/Steil), then AR(1) sensor noise applied multiplicatively:
 
-This gives proportional noise: higher BG = more absolute noise, matching real CGM MARD characteristics.
+    alpha_lag   = 1 - exp(-DT_MINUTES / CGM_LAG_MINUTES)
+    IG         += alpha_lag * (BG_true - IG)
+    ar_cgm      = NOISE_AR1_RHO_SENSOR * ar_cgm + NOISE_AR1_INNOV_SENSOR * N(0, CGM_NOISE_FRACTION)
+    BG_observed = IG * (1 + ar_cgm)
 
-Interstitial lag is currently NOT modeled. The constant `CGM_LAG_MINUTES = 10` is reserved for a future implementation that would sample true BG from `CGM_LAG_MINUTES` ago instead of the current step. Real CGMs lag by 5-15 min; ML models trained on this simulator's CGM channel will not learn that lag.
+Because the noise multiplies the reading, its std scales with BG: higher BG = more absolute noise, matching real CGM MARD characteristics. The AR(1) coefficient `NOISE_AR1_RHO_SENSOR = 0.92` (~42 min half-life, with `NOISE_AR1_INNOV_SENSOR = sqrt(1 - 0.92^2)`) produces smoothly-drifting offsets over 30-60 min windows rather than white-noise spikes.
+
+Interstitial lag is modeled as first-order diffusion with timescale `CGM_LAG_MINUTES = 15` (applied before the sensor noise), so every consumer of `BG_observed` — corrections, hypo detection, the exported CGM channel — sees the delayed-and-smoothed value, not the current step.
 
 
 ## Hepatic Glucose Output
@@ -177,17 +181,18 @@ Insulin-suppressed via a Hill function on EMA-smoothed insulin (proxies plasma i
     smoothed_ins  = α * insulin_per_step + (1-α) * smoothed_ins_prev
     suppression   = 1 / (1 + smoothed_ins / HGO_INSULIN_HALF_MAX)
     HGO_rate      = HGO_SUPPRESSED_FLOOR + (HGO_UNSUPPRESSED - HGO_SUPPRESSED_FLOOR) * suppression
-    HGO_baseline  = HGO_rate * (1 + N(0, HGO_NOISE_SIGMA)) * (DT_MINUTES / 60) * glycogen_gate * alcohol_factor
+    HGO_baseline  = max(0, HGO_rate * (1 + N(0, HGO_NOISE_SIGMA)) * (body_weight_kg / BODY_WEIGHT_MEAN_KG) * (DT_MINUTES / 60)
+                            + (dawn_g_per_hr - night_dip_g_per_hr) * (DT_MINUTES / 60)) * glycogen_gate * alcohol_factor
     meal_rebound  = sum over active meal_hgo_effects of (magnitude * envelope_intensity) * (DT_MINUTES / 60)
     HGO(t)        = HGO_baseline + meal_rebound
 
-`HGO_INSULIN_HALF_MAX` is tuned so a typical basal level (~0.086 U/step) yields 8.25 g/hr (`HGO_BASE_GRAMS_PER_HOUR`, the balanced reference rate, preserved so basal sizing — `ideal_basal = HGO_BASE_GRAMS_PER_HOUR * 24 * (body_weight_kg / BODY_WEIGHT_MEAN_KG) * is_base / ICR` — still produces near-zero net delta. The weight factor mirrors the per-step HGO scaling and the `is_base` factor keeps the invariant across baseline insulin needs). At zero insulin, HGO climbs toward `HGO_UNSUPPRESSED_GRAMS_PER_HOUR` (DKA-like). Alcohol additionally suppresses HGO via `alcohol_factor` (trapezoidal envelope around 1.0). The `glycogen_gate` ramps HGO down when the reservoir is depleted (see Glycogen reservoir). The `meal_rebound` term is additive (not multiplicative) — see Delayed-meal HGO rebound below.
+`HGO_INSULIN_HALF_MAX` is tuned so a typical basal level (~0.086 U/step) yields 8.25 g/hr (`HGO_BASE_GRAMS_PER_HOUR`, the balanced reference rate, preserved so basal sizing — `ideal_basal = HGO_BASE_GRAMS_PER_HOUR * 24 * (body_weight_kg / BODY_WEIGHT_MEAN_KG) * is_base / ICR` — still produces near-zero net delta. The weight factor mirrors the per-step HGO scaling and the `is_base` factor keeps the invariant across baseline insulin needs). At zero insulin, HGO climbs toward `HGO_UNSUPPRESSED_GRAMS_PER_HOUR` (DKA-like). The additive `(dawn_g_per_hr - night_dip_g_per_hr)` term is a cortisol-driven dawn surge (Gaussian peaking at `DAWN_HGO_PEAK_HOUR`) minus a deep-sleep trough (Gaussian at `NIGHT_HGO_DIP_HOUR`), added in g/hr rather than as a multiplier so the Hill insulin suppression does not cancel it — this is what produces the dawn phenomenon. Alcohol additionally suppresses HGO via `alcohol_factor` (trapezoidal envelope around 1.0). The `glycogen_gate` ramps HGO down when the reservoir is depleted (see Glycogen reservoir). The `meal_rebound` term is additive (not multiplicative) — see Delayed-meal HGO rebound below.
 
 Helper: `compute_hgo_rate(insulin_per_step) -> g/hr`.
 
 ### Delayed-meal HGO rebound
 
-Each meal whose carb amount exceeds `DELAYED_HGO_MEAL_THRESHOLD_GRAMS` schedules a positive HGO bump 3.5-5.5h later, lasting 4-8h:
+Each meal whose carb amount exceeds `DELAYED_HGO_MEAL_THRESHOLD_GRAMS` schedules a positive HGO bump 3.5-5.5h later, lasting 2.7-7.0h:
 
     excess     = carb_amount - DELAYED_HGO_MEAL_THRESHOLD_GRAMS
     magnitude  = min(DELAYED_HGO_MAX_BUMP, DELAYED_HGO_PER_GRAM * excess)   (g/hr)
@@ -217,13 +222,16 @@ The refill is a "background" channel — it is not subtracted from BG-bound carb
 
 ## Correction Behavior
 
-Hypo correction (BG_observed < BG_LOW_THRESHOLD):
+Hypo correction (BG_observed < eff_low_thresh):
 
     skill_avg         = (attentiveness + dosing_competence) / 2
+    eff_low_thresh    = BG_LOW_THRESHOLD + 18 * skill_avg
     skill_multiplier  = 1 + 1.5 * skill_avg
     correction_grams  = HYPO_CORRECTION_BASE_GRAMS * skill_multiplier
                         + panic_factor * severity / 20
-    severity          = max(0, BG_LOW_THRESHOLD - BG_observed)
+    severity          = max(0, eff_low_thresh - BG_observed)
+
+The trigger and severity are measured against the skill-scaled `eff_low_thresh`, not the raw `BG_LOW_THRESHOLD`: attentive/competent patients act on the drop before crossing 70 (for `skill_avg = 0.7` the trigger lands near 73).
 
 The skill multiplier is critical — without it, high-skill patients linger at TBR ~30% because the bare base grams (~6 g) cannot overcome a strong basal pipeline. With it, skilled patients reliably exit hypo while unskilled patients still under-correct.
 
@@ -236,28 +244,36 @@ This is the non-probabilistic rage-eat that keeps severe episodes under 1h. Seve
 
 If BG_observed < RAGE_EAT_BG_THRESHOLD, rage eating may occur with probability proportional to (1.2 - dosing_competence).
 
-Hyper correction (BG_observed > BG_HIGH_THRESHOLD):
+Hyper correction (BG_observed > eff_high_thresh):
 
-    correction_dose = (BG_observed - BG_TARGET) / correction_factor * (1 + noise)
-    patience = patience_time / urgency
-    urgency = max(1, (BG_observed - 250) / 50) if BG > 250, else 1
+    eff_high_thresh   = BG_HIGH_THRESHOLD - 25 * skill_avg
+    iob_consideration = IOB * correction_factor * (0.7 + 0.3 * dosing_competence)
+    adjusted_excess   = max(0, (BG_observed - BG_TARGET) - iob_consideration)
+    correction_dose   = max(0.5, adjusted_excess / correction_factor * (1 + noise))
+    urgency           = min(3, 1 + max(0, (BG_observed - BG_HIGH_THRESHOLD) / 50))
+    patience          = patience_time / urgency
+
+The dose is IOB-aware: an insulin-on-board term (a baseline 70% of the expected IOB drop plus a skill-scaled bonus up to 30%) is subtracted before sizing, so patients don't stack corrections. Urgency ramps from the correction threshold `BG_HIGH_THRESHOLD` upward and saturates at 3 (reached at BG = 275), shortening the patience window for sustained highs.
 
 If BG_observed > RAGE_BOLUS_BG_THRESHOLD, rage bolusing may occur.
 
 
 ## Basal Adjustment
 
-Daily adjustment based on previous day's mean BG:
+Daily adjustment based on a 3-day rolling mean BG (`recent_mean`):
 
-    if mean_BG > 130:
-        overshoot  = min((mean_BG - 130) / 80, 1)
-        adjustment = 1 + overshoot * BASAL_CORRECTION_MAX_ADJUSTMENT * competence
+    if recent_mean > 150:
+        overshoot     = min((recent_mean - 150) / 80, 1)
+        skill_factor  = 0.4 + 0.6 * competence
+        trigger_mean  = max(recent_mean, one_day_mean)
+        extreme_boost = 1 + 0.5 * min(1, (trigger_mean - 200) / 50)   if trigger_mean > 200, else 1
+        adjustment    = 1 + overshoot * (BASAL_CORRECTION_MAX_ADJUSTMENT * skill_factor) * extreme_boost
 
-    if mean_BG < 110:
-        undershoot = min((110 - mean_BG) / 50, 1)
+    elif recent_mean < 115:
+        undershoot = min((115 - recent_mean) / 50, 1)
         adjustment = 1 - undershoot * BASAL_CORRECTION_MAX_ADJUSTMENT * competence
 
-The asymmetric thresholds (130 / 110) intentionally bias toward correcting persistent hyperglycemia faster than persistent mild hypoglycemia.
+The asymmetric thresholds (150 / 115) intentionally bias toward correcting persistent hyperglycemia faster than persistent mild hypoglycemia. On the high path skill scales only partially (a 40% baseline plus up to 60% more), and `extreme_boost` accelerates recovery when the 3-day or single-day mean runs above 200; the low path keeps full skill scaling.
 
 
 ## Behavioral & Stochastic Features
@@ -289,10 +305,10 @@ Models moment-to-moment variation in absorption that the smooth gamma curves can
 
 ### Exercise post-effect IS envelope
 
-After an exercise event ends, IS is reduced (more sensitive) for `EXERCISE_IS_DURATION_HOURS` (10h), shaped by the trapezoidal `envelope_intensity()` with `EXERCISE_IS_RAMP_HOURS` ramps:
+After an exercise event ends, IS is reduced (more sensitive) for `EXERCISE_IS_DURATION_HOURS` (6h), shaped by the trapezoidal `envelope_intensity()` with `EXERCISE_IS_RAMP_HOURS` ramps:
 
     reduction  = min(0.30, EXERCISE_IS_REDUCTION * (exercise_duration / EXERCISE_DURATION_MEAN_MIN))
-    factor(t)  = 1 - reduction * envelope_intensity(t; start, start+10h, ramp=1h)
+    factor(t)  = 1 - reduction * envelope_intensity(t; start, start+6h, ramp=1h)
     exercise_envelope(t) = factor(t)
 
 Larger / longer sessions produce a stronger reduction, capped at 30%.
@@ -338,10 +354,10 @@ Models unusual gastric emptying, food composition outliers, or other absorption 
 
 ### Rare event days
 
-With per-day probability `RARE_EVENT_PROBABILITY`, all skills are degraded for that day:
+With per-day probability `RARE_EVENT_PROBABILITY`, three of the four skills — dietary discipline (s1), dosing competence (s3), and lifestyle consistency (s4) — are degraded for that day (attentiveness s2 is left unchanged):
 
     skill_penalty ~ RARE_EVENT_SKILL_REDUCTION + U(0, 0.3)
-    s_i(today)    = max(s_i - skill_penalty, SKILL_MIN)
+    s_i(today)    = max(s_i - skill_penalty, 0.05)   for i in {1, 3, 4}
 
 Even attentive, well-controlled patients have chaotic days (illness onset, travel, emotional events). This is the simulator's way of injecting irreducible behavioral noise.
 

@@ -744,7 +744,7 @@ the not-replayed behavioural perturbations above. The larger story is the
 divergence in level. The same doses leave the two engines off-centre in
 opposite directions — T1DMSIM mildly high (its dosing is calibrated to its own
 hepatic-output and insulin-sensitivity assumptions), the UVA/Padova patient
-lower in roughly two seeds out of three: the bolus stream, sized by T1DMSIM's
+lower in about half the seeds: the bolus stream, sized by T1DMSIM's
 insulin-to-carb ratio, over-covers that patient's gentler carb ratio, and the
 base model carries neither T1DMSIM's counter-regulatory floor below 70 mg/dL nor
 its behaviourally-timed rescue carbs, so its lows run deeper. The gap therefore

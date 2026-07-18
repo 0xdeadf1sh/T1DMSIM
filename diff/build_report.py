@@ -1908,11 +1908,11 @@ per-record means across each cohort.
 | TAR1 | 180-250 | {_class_pct(O,'TAR1_pct'):>5.1f} | {_class_pct(S,'TAR1_pct'):>5.1f} | {_class_pct(A,'TAR1_pct'):>5.1f} | **{_class_pct(M,'TAR1_pct'):>5.1f}** |
 | TAR2 | >250    | {_class_pct(O,'TAR2_pct'):>5.1f} | {_class_pct(S,'TAR2_pct'):>5.1f} | {_class_pct(A,'TAR2_pct'):>5.1f} | **{_class_pct(M,'TAR2_pct'):>5.1f}** |
 
-T1DMSIM is intentionally tuned for *elevated mild-hypo (TBR1) and severe-hyper
-(TAR2) density* relative to OhioT1DM — the shape of those events (durations,
-depths, recovery profiles) still matches real cohorts (see §7), but the rate is
-higher to give a classifier more positive examples of each rare-event class
-per epoch.
+T1DMSIM runs an *elevated mild-hypo (TBR1) density* relative to OhioT1DM (its
+severe-hyper TAR2 density sits close to Ohio's), while the shape of those events
+(durations, depths, recovery profiles) still matches real cohorts (see §7). The
+higher mild-hypo rate gives a classifier more positive examples of that
+rare-event class per epoch.
 
 ### 0.4 Episode-level event counts
 
@@ -2088,8 +2088,8 @@ def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
     unexpl_section = f"""A fraction of CGM excursions (≥ {EXC_AMP:.0f} mg/dL monotone swings, MAGE-style
 turning-point detection) carry no proximate logged cause: a rise with no meal
 (≥ {EXC_CARB_MIN:.0f} g) logged within [−{EXC_RISE_PRE:.0f}, +{EXC_RISE_POST:.0f}] min of onset, or a fall
-with no bolus (≥ {EXC_INS_MIN:.1f} U) or exercise logged within
-[−{EXC_FALL_PRE:.0f}, +{EXC_FALL_POST:.0f}] min. This counts both unlogged events and genuinely
+with no bolus (≥ {EXC_INS_MIN:.1f} U) within [−{EXC_FALL_PRE:.0f}, +{EXC_FALL_POST:.0f}] min and no
+exercise within [−{EXC_EX_PRE:.0f}, +{EXC_EX_POST:.0f}] min. This counts both unlogged events and genuinely
 endogenous movements (dawn phenomenon, post-hypo rebound, stress, illness,
 sensor artefact). ShanghaiT1DM is omitted — its dietary column is almost
 entirely "data not available". The simulator is held to the identical test,
@@ -2191,7 +2191,8 @@ persisted to `diff/stats.json`; figures live in `diff/figures/`.
 - [9. AZT1D insulin / carb panel](#9-azt1d-insulin--carb-behaviour-panel)
 - [10. Side-by-side summary](#10-side-by-side-summary)
 - [11. Limitations of this comparison](#11-limitations-of-this-comparison)
-- [12. Reproduction](#12-reproduction)
+- [12. Extended statistics](#12-extended-statistics)
+- [13. Reproduction](#13-reproduction)
 
 ---
 

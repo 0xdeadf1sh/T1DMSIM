@@ -541,13 +541,14 @@ dynamics ({v['dyn_norm_err']['T1DMSIM']:.2f} vs {v['dyn_norm_err']['UVA/Padova']
 That ordering is expected — T1DMSIM was fit to these cohorts, UVA/Padova never
 saw them — so the result confirms the calibration rather than crowning a winner.
 
-Two findings survive the caveat. First, both simulators sit **outside** the
-real-vs-real envelope on the pooled distribution ({wb['T1DMSIM']:.0f} and
-{wb['UVA/Padova']:.0f} mg/dL vs a {wb['floor']:.0f} floor), so neither is a
-drop-in replacement for real CGM. Second, on excursion-amplitude (MAGE, MODD)
-UVA/Padova — despite no fitting — lands closer to real than T1DMSIM, which
-*overshoots* them: a model trained on T1DMSIM should transfer better overall,
-but would inherit its exaggerated swings.
+Two observations temper the caveat. First, T1DMSIM's pooled BG-distance to real
+({wb['T1DMSIM']:.0f} mg/dL) falls **below** the real-vs-real floor
+({wb['floor']:.0f} mg/dL) — within the spread among the real cohorts themselves —
+whereas UVA/Padova ({wb['UVA/Padova']:.0f} mg/dL) sits outside it. Second, the
+ordering holds on the excursion-amplitude metrics (MAGE, MODD) as well as on
+level: T1DMSIM lands nearer real on both. Neither result is a transfer
+guarantee — T1DMSIM was fit to these cohorts and UVA/Padova never saw them —
+so read this as confirming the calibration rather than crowning a winner.
 
 ## Reproducing
 
