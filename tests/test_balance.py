@@ -80,15 +80,31 @@ def isolated_biology(monkeypatch):
                         simulator.HGO_BASE_GRAMS_PER_HOUR)
     monkeypatch.setattr(simulator, 'HGO_SUPPRESSED_FLOOR_GRAMS_PER_HOUR',
                         simulator.HGO_BASE_GRAMS_PER_HOUR)
+    # Guardrails + corrections would mask a mis-sized dose: renal clearance pulls
+    # BG down above 180, counter-regulation/glucagon push it up below 70/55, and
+    # the live _check_and_correct rescue loop injects its own boluses. Disabling
+    # all four leaves the measured bg_delta as the pure basal-vs-HGO / bolus-vs-
+    # meal flux, so a broken dose actually shows up (a zero basal used to pass).
+    monkeypatch.setattr(simulator, 'RENAL_CLEARANCE_RATE', 0.0)
+    monkeypatch.setattr(simulator, 'COUNTER_REGULATORY_RATE', 0.0)
+    monkeypatch.setattr(simulator, 'SEVERE_HYPO_GLUCAGON_RATE', 0.0)
+    monkeypatch.setattr(T1DMSimulator, '_check_and_correct', lambda self, idx: None)
+    # Flatten the diurnal-IS profile and daily drift so is_val == is_base across
+    # the window; with is_base pinned to 1.0 in _quiet_sim, runtime IS == 1 and
+    # the HGO/ICR-sized dose exactly balances instead of drifting on residual IS.
+    monkeypatch.setattr(simulator, 'IS_MORNING_AMPLITUDE', 0.0)
+    monkeypatch.setattr(simulator, 'IS_NIGHT_DIP_AMPLITUDE', 0.0)
+    monkeypatch.setattr(simulator, 'IS_DAILY_DRIFT_SIGMA', 0.0)
 
 
 def _quiet_sim(seed: int, initial_bg: float = 100.0) -> T1DMSimulator:
     """Clear pending behaviors so injected curves are the only inputs.
 
-    Pins body_weight_kg=75 and insulin_resistance_factor=1.0 on the generated
-    patient so the HGO scaling matches the test's HGO_BASE assumption.
-    Otherwise a heavy or IR patient would have hgo_value scaled and the
-    plateau-basal-vs-HGO balance assertion would no longer hold.
+    Pins body_weight_kg=75, insulin_resistance_factor=1.0, and is_base=1.0 on
+    the generated patient so the HGO scaling matches the test's HGO_BASE
+    assumption and (with the diurnal-IS flattening in isolated_biology) runtime
+    IS == 1, so the HGO/ICR-sized dose exactly balances. Otherwise a heavy, IR,
+    or IS-atypical patient would drift and the balance assertion would not hold.
     """
     sim = T1DMSimulator(seed=seed, initial_bg=initial_bg)
     sim._pending_events = []
@@ -96,105 +112,104 @@ def _quiet_sim(seed: int, initial_bg: float = 100.0) -> T1DMSimulator:
     sim.state.is_sick = False
     sim.patient.body_weight_kg = 75.0
     sim.patient.insulin_resistance_factor = 1.0
+    sim.patient.is_base = 1.0
     return sim
 
 
 class TestPerfectBalance:
     def test_hgo_basal_balance(self, isolated_biology):
-        """A Bateman basal sized for its broad-peak window yields ~zero BG delta.
+        """A Bateman basal sized to cancel HGO yields ~zero BG delta over its
+        broad-peak window — and the test is sensitive to a broken basal.
 
-        basal_curve is a Bateman one-compartment PK (smooth rise to a broad
-        peak at ~6.3h, exponential decline). Per-step insulin delivery varies
-        across the curve, so "perfect balance" can only be enforced on average
-        over a finite window. We size the dose so the mean insulin delivery
-        across the measurement window equals the HGO-cancelling rate, warm up
-        past the rising phase, then measure across the broad-peak window.
+        isolated_biology disables corrections and the renal/counter-regulatory
+        guardrails, so the measured per-step bg_delta is the pure basal-vs-HGO
+        flux. A zero basal is therefore no longer masked (it used to pass with a
+        final BG near the 400 clamp) and produces a clearly positive drift.
         """
-        sim = _quiet_sim(seed=0)
-        p = sim.patient
-
         duration_min = BASAL_DURATION_HOURS * 60
         warmup_steps = int(_BAL_WARMUP_HOURS * 60) // DT_MINUTES
         measure_steps = int(_BAL_MEASURE_HOURS * 60) // DT_MINUTES
 
+        def mean_delta(total: float) -> float:
+            sim = _quiet_sim(seed=0)
+            if total > 0:
+                sim.inject_curve(basal_curve(total, duration_min), 0, 'insulin', 'basal')
+            for _ in range(warmup_steps):
+                sim.generate()
+            return float(np.mean([sim.generate()['bg_delta'] for _ in range(measure_steps)]))
+
+        icr = _quiet_sim(seed=0).patient.icr
         unit_curve = basal_curve(1.0, duration_min)
-        hgo_per_step_units = HGO_BASE_GRAMS_PER_HOUR * (DT_MINUTES / 60.0) / p.icr
+        hgo_per_step_units = HGO_BASE_GRAMS_PER_HOUR * (DT_MINUTES / 60.0) / icr
         ideal_total = _balanced_basal_total(
             unit_curve, hgo_per_step_units, warmup_steps, measure_steps)
 
-        perfect_basal = basal_curve(ideal_total, duration_min)
-        sim.inject_curve(perfect_basal, 0, 'insulin', 'Perfect basal')
+        balanced = mean_delta(ideal_total)
+        no_basal = mean_delta(0.0)
 
-        for _ in range(warmup_steps):
-            sim.generate()
-
-        deltas = []
-        for _ in range(measure_steps):
-            deltas.append(sim.generate()['bg_delta'])
-
-        mean_delta = float(np.mean(deltas))
-        # Plasma-insulin EMA introduces phase lag against the rising/falling
-        # Bateman curve so per-step deltas don't cancel exactly; ±2.5 mg/dL/step
-        # over 8h still catches a broken balance (the previous trapezoidal
-        # version delivered ~0.06 U total — orders of magnitude below the
-        # HGO-cancelling rate — and silently passed via the BG ceiling clamp).
-        assert abs(mean_delta) < 2.5, (
-            f"Mean BG delta {mean_delta:.3f} mg/dL/step exceeds 2.5; "
-            "Bateman basal sized for the broad-peak window should approximately balance HGO")
+        assert abs(balanced) < 0.4, (
+            f"Balanced basal mean delta {balanced:.3f} mg/dL/step should be ~0")
+        # Sensitivity guard: with the balance removed the flux must drift clearly
+        # positive (HGO uncancelled). This is the case that silently passed before.
+        assert no_basal - balanced > 1.0, (
+            f"A zero basal (mean delta {no_basal:.3f}) must drift far above the "
+            f"balanced case ({balanced:.3f}); the test is otherwise insensitive to "
+            "the basal dose")
 
     def test_meal_bolus_balance(self, isolated_biology):
-        """Balanced meal + dose-matched bolus + balanced basal → near-zero net BG.
+        """A dose-matched bolus cancels a meal (near-zero net BG), and the test
+        is sensitive to a mis-dosed bolus.
 
-        We size the Bateman basal so its broad-peak window cancels HGO, warm up
-        past the rising phase, then inject a meal and a bolus computed via
-        bolus_pk_for_dose (the dose-dependent PK helper, not the legacy fixed-
-        duration constants). We measure for long enough that both meal
-        absorption and bolus action complete inside the window.
+        With corrections and guardrails disabled by isolated_biology, an over- or
+        under-bolus is no longer masked by a rescue carb/bolus or by renal
+        clearance: a 2x bolus drives BG sharply down, a 0.5x bolus sharply up.
+        The bolus PK window is fixed to the matched dose so all three scales are
+        measured over the same horizon.
         """
-        sim = _quiet_sim(seed=1)
-        p = sim.patient
-
-        # --- Balanced basal sized as in test_hgo_basal_balance ---
         basal_dur_min = BASAL_DURATION_HOURS * 60
         warmup_steps = int(_BAL_WARMUP_HOURS * 60) // DT_MINUTES
         measure_steps = int(_BAL_MEASURE_HOURS * 60) // DT_MINUTES
-        unit_curve = basal_curve(1.0, basal_dur_min)
-        hgo_per_step_units = HGO_BASE_GRAMS_PER_HOUR * (DT_MINUTES / 60.0) / p.icr
-        ideal_total = _balanced_basal_total(
-            unit_curve, hgo_per_step_units, warmup_steps, measure_steps)
-        perfect_basal = basal_curve(ideal_total, basal_dur_min)
-        sim.inject_curve(perfect_basal, 0, 'insulin', 'Perfect basal')
 
-        for _ in range(warmup_steps):
-            sim.generate()
+        def total_change(bolus_scale: float) -> float:
+            sim = _quiet_sim(seed=1)
+            p = sim.patient
+            unit_curve = basal_curve(1.0, basal_dur_min)
+            hgo_per_step_units = HGO_BASE_GRAMS_PER_HOUR * (DT_MINUTES / 60.0) / p.icr
+            ideal_total = _balanced_basal_total(
+                unit_curve, hgo_per_step_units, warmup_steps, measure_steps)
+            sim.inject_curve(basal_curve(ideal_total, basal_dur_min), 0, 'insulin', 'Perfect basal')
+            for _ in range(warmup_steps):
+                sim.generate()
 
-        # --- Meal and dose-matched bolus, injected at the same step ---
-        meal_grams = 60.0
-        bolus_units = meal_grams / p.icr
-        meal_duration_min = 300.0
-        meal = gamma_curve(meal_grams, k=3.0, theta=20.0,
-                           duration_minutes=meal_duration_min)
-        bk, btheta, bdur_min = bolus_pk_for_dose(bolus_units)
-        bolus = gamma_curve(bolus_units, bk, btheta, bdur_min)
+            meal_grams = 60.0
+            matched_units = meal_grams / p.icr
+            meal_duration_min = 300.0
+            meal = gamma_curve(meal_grams, k=3.0, theta=20.0,
+                               duration_minutes=meal_duration_min)
+            bk, btheta, bdur_min = bolus_pk_for_dose(matched_units)
+            bolus = gamma_curve(matched_units * bolus_scale, bk, btheta, bdur_min)
 
-        cur_idx = sim.state.current_idx
-        sim.inject_curve(meal, cur_idx, 'carb', 'Test meal')
-        sim.inject_curve(bolus, cur_idx, 'insulin', 'Test bolus')
+            cur_idx = sim.state.current_idx
+            sim.inject_curve(meal, cur_idx, 'carb', 'Test meal')
+            sim.inject_curve(bolus, cur_idx, 'insulin', 'Test bolus')
 
-        # Measure long enough for both curves to fully resolve.
-        window_min = max(meal_duration_min, bdur_min) + 60.0  # +1h tail
-        deltas = []
-        for _ in range(int(window_min) // DT_MINUTES):
-            deltas.append(sim.generate()['bg_delta'])
+            window_min = max(meal_duration_min, bdur_min) + 60.0  # +1h tail
+            return sum(sim.generate()['bg_delta'] for _ in range(int(window_min) // DT_MINUTES))
 
-        total_bg_change = sum(deltas)
-        # Stochastic biology disabled by isolated_biology fixture; residual
-        # drift is diurnal IS variation + curve-timing alignment. ±60 mg/dL
-        # total still catches gross dose/carb imbalance and is tighter than
-        # the legacy ±80 against a more rigorous setup.
-        assert abs(total_bg_change) < 60.0, (
-            f"Total BG change from balanced meal+bolus+basal: {total_bg_change:.1f} mg/dL; "
-            "expected near zero (±60 mg/dL)")
+        matched = total_change(1.0)
+        over = total_change(2.0)
+        under = total_change(0.5)
+
+        assert abs(matched) < 30.0, (
+            f"Dose-matched meal+bolus net change {matched:.1f} mg/dL should be ~0")
+        # Sensitivity guards: a mis-dosed bolus must move BG well off the matched
+        # baseline (previously a 2x over-bolus passed via the ±80 tolerance).
+        assert matched - over > 50.0, (
+            f"A 2x over-bolus ({over:.1f}) must drive BG well below the matched "
+            f"case ({matched:.1f})")
+        assert under - matched > 50.0, (
+            f"A 0.5x under-bolus ({under:.1f}) must drive BG well above the matched "
+            f"case ({matched:.1f})")
 
     def test_basal_dose_proportional_to_icr(self):
         """Patients with higher ICR should have lower basal doses (they need less insulin).

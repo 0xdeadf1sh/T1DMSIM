@@ -3,7 +3,7 @@ Tests for gamma_curve and basal_curve generation utilities.
 
 Verifies that:
 - gamma_curve produces arrays whose sum equals total_amount
-- basal_curve produces a trapezoidal curve whose sum equals total_amount
+- basal_curve produces a Bateman PK curve whose sum equals total_amount
 - Both curves have correct shapes and non-negative values
 """
 
@@ -77,30 +77,43 @@ class TestBasalCurve:
         curve = basal_curve(total_amount=20.0, duration_minutes=duration)
         assert len(curve) == int(duration / DT_MINUTES)
 
-    def test_trapezoidal_shape(self):
-        """Basal curve ramps up and ramps down (trapezoidal shape)."""
-        curve = basal_curve(total_amount=20.0, duration_minutes=1560.0,
-                            ramp_up_hours=3.0, ramp_down_hours=4.0)
-        # First value should be less than the middle plateau
-        mid = len(curve) // 2
-        assert curve[0] < curve[mid], "Curve should ramp up from zero"
-        # Last value should be less than middle plateau
-        assert curve[-1] < curve[mid], "Curve should ramp down to zero"
-
-    def test_units_compatible_with_gamma_curve(self):
-        """Both curves produce values in amount-per-step units (not rate units).
-
-        Catches the bug class where someone passes a rate (e.g. units/hour)
-        as total_amount — that would inflate the per-step mean by ~10× for
-        gamma and ~60× for basal. Bounds are tight to actually catch this.
+    def test_bateman_shape(self):
+        """Basal curve is a Bateman PK: a smooth rise from ~0 to a single broad
+        interior peak near tmax (~6.3h), then a decline with the tail clipped
+        back toward zero. ramp_up_hours/ramp_down_hours are legacy no-op
+        parameters and are intentionally not exercised here.
         """
-        gamma = gamma_curve(40.0, k=2.0, theta=15.0, duration_minutes=120.0)
-        basal = basal_curve(total_amount=20.0, duration_minutes=1560.0)
-        # gamma: 40g over 120min = 24 steps → exactly 40/24 = 1.667 g/step mean
-        expected_gamma_mean = 40.0 / (120.0 / DT_MINUTES)
-        assert abs(gamma.mean() - expected_gamma_mean) < 1e-6, (
-            f"gamma mean {gamma.mean():.4f} != expected {expected_gamma_mean:.4f}")
-        # basal: 20U over 1560min = 312 steps → exactly 20/312 = 0.0641 U/step mean
-        expected_basal_mean = 20.0 / (1560.0 / DT_MINUTES)
-        assert abs(basal.mean() - expected_basal_mean) < 1e-6, (
-            f"basal mean {basal.mean():.4f} != expected {expected_basal_mean:.4f}")
+        curve = basal_curve(total_amount=20.0, duration_minutes=1560.0)
+        peak = int(np.argmax(curve))
+        steps_per_hour = 60 // DT_MINUTES
+        # Single broad interior peak near the analytic tmax, not a plateau or a
+        # boundary spike.
+        assert 4 * steps_per_hour < peak < 10 * steps_per_hour, (
+            f"peak at step {peak} should sit near tmax≈6.3h")
+        # Rises from ~0 and the smootherstep tail clips back toward 0.
+        assert curve[0] < 0.2 * curve[peak], "curve should rise from ~0"
+        assert curve[-1] < 0.2 * curve[peak], "tail-clip should taper toward 0"
+        # Unimodal: monotone up to the peak, monotone down after it.
+        assert np.all(np.diff(curve[:peak + 1]) >= -1e-9), "should rise to the peak"
+        assert np.all(np.diff(curve[peak:]) <= 1e-9), "should fall after the peak"
+
+    def test_amount_semantics_not_rate(self):
+        """total_amount is an area (an amount), not a rate.
+
+        The curve's sum is invariant to duration, so the per-step mean scales
+        DOWN as duration grows — the opposite of a rate, which would hold the
+        per-step value fixed and inflate the area with duration. This is what
+        actually catches passing a units/hour rate where an amount is expected
+        (that bug would make the longer curve's sum scale with duration).
+        """
+        short = gamma_curve(40.0, k=2.0, theta=15.0, duration_minutes=120.0)
+        long = gamma_curve(40.0, k=2.0, theta=15.0, duration_minutes=600.0)
+        assert abs(short.sum() - 40.0) < 1e-6
+        assert abs(long.sum() - 40.0) < 1e-6           # same area despite 5x duration
+        assert long.mean() < 0.5 * short.mean()         # per-step shrinks with duration
+
+        basal_short = basal_curve(total_amount=20.0, duration_minutes=780.0)
+        basal_long = basal_curve(total_amount=20.0, duration_minutes=1560.0)
+        assert abs(basal_short.sum() - 20.0) < 1e-6
+        assert abs(basal_long.sum() - 20.0) < 1e-6
+        assert basal_long.mean() < basal_short.mean()
