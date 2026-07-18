@@ -42,35 +42,18 @@ The ultimate goal is to provide a near-unlimited stream of synthetic factor curv
 
 ## Pregenerated Dataset
 
-There is a pregenerated dataset released to the public domain that is available for download [here](https://drive.google.com/drive/folders/1UhxoJNiUSOwUGybmdxbyspKQYYN9UqOm?usp=sharing).
-It contains **100 million** independent simulated T1D patient trajectories, each 55.5 h of post-warmup CGM at 5-min cadence (666 steps; the first 48 h of warmup are discarded before caching). Stored as raw `.npy` memmaps — 8 per-step channels + `icr`, uncompressed.
+The corpus is produced on demand by the caching tool `cache_simulator.py`, which drives the simulator across many seeds, writes each channel as a compressed [blosc2](https://www.blosc.org/) array, and emits a full statistical summary to **[`DATASET.md`](DATASET.md)** — patient and reading counts, CGM-hours, carbohydrate / insulin / meal totals, glycemic-band time fractions, the per-channel disk inventory, and the exact generation parameters. See that file for the inventory of the generated dataset.
 
-| Quantity | Value | Basis |
-|---|---|---|
-| **Patients (trajectories)** | **100,000,000** | exact (`meta.json`) |
-| Timesteps / patient | 666 @ 5 min | exact |
-| Duration / patient | 55.5 h ≈ 2.31 days | exact |
-| **Total CGM readings** | **66.6 billion** (100M × 666) | exact |
-| **Total CGM hours** | **5.55 billion h** | exact |
-| **Total CGM years** | **≈ 633,000 years** | exact (= patient-years; 231 M patient-days) |
-| **Disk footprint** | **2.13 TB** (1.94 TiB) | exact (`du`); 8 × 266.4 GB + 0.4 GB `icr` |
-| **Carbs eaten** | **≈ 39,000 tonnes** (3.90×10¹⁰ g) | est. — 390 g/patient, 168.7 g/day |
-| **Meals eaten** | **≈ 732 million** | est. — 7.3/patient, 3.16/day |
-| **Insulin delivered** | **≈ 9.87 billion U** (~98,700 L of U-100) | est. — 98.7 U/patient, 42.7 U/day |
-| └ basal : bolus split | ≈ 62% : 38% | est. (basal-majority, as designed) |
-| Boluses | ~one per meal (~3/day) by construction | detector undercounts (overlapping PK tails) |
-| Exercise | active 5.2% of time; ~0.96 sessions/patient | est. |
-| BG mean | 157 mg/dL | est. |
-| Time-in-range 70–180 | 61.5% | est. |
-| Time <70 / <54 (hypo) | 6.7% / 0.68% | est. |
-| Time >180 / >250 (hyper) | 31.8% / 10.3% | est. |
-| ICR (carb ratio) | 8.1 g/U mean (≈3.9–17.6) | est. |
+```bash
+# 50k patients across all cores; writes ./simulator_cache and regenerates DATASET.md
+python cache_simulator.py --out-dir simulator_cache --pool-size 50000
 
-### Per-channel inventory (each 100M × 666)
+# oversample hypoglycemia-rich trajectories (25% of rows) for class-balanced training
+python cache_simulator.py --pool-size 50000 --hypo-oversample 0.25
+```
 
-`bg_observed`, `total_carb`, `total_insulin`, `insulin_resistance`, `hgo`, `total_exercise`, `hour_of_day` (float32, 266.4 GB each); `day` (int32, 266.4 GB); `icr` (float32, 100M, 0.4 GB).
+Each trajectory is 55.5 h of post-warmup CGM at 5-minute cadence (666 steps; the first 48 h of warmup are discarded before caching). Windows whose CGM touches the clamp rails (a reading ≥ 399 or ≤ 41 mg/dL) are discarded, and `--hypo-oversample` biases a configurable fraction of rows toward hypoglycemia via seed rejection sampling. The tool needs `blosc2` in addition to the core dependencies (`pip install blosc2`).
 
-> **Method.** Patient count, durations, CGM-hours and disk are exact (metadata + `du`). Consumption figures are a 0.5% stratified sample (2,000 blocks × 250 contiguous rows = 500,000 patients), extrapolated ×200. Carbs and insulin are integrals of the per-step appearance/delivery rates, so sums read as grams ingested and units dosed. "Meals" are upward threshold-crossings (>1 g/step, 30-min refractory) in the carb-appearance trace, validated against the simulator's ~3.3 meals/day model. The discrete bolus count is unreliable (basal and bolus share one channel with overlapping pharmacokinetics); the units total and basal/bolus split are reliable.
 
 ## Design Principles
 

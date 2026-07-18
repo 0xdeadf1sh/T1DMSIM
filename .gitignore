@@ -18,6 +18,11 @@ env/
 # Real-world datasets (not redistributable)
 datasets/
 
+# Generated simulator caches (built by cache_simulator.py; regenerate on demand)
+*_cache/
+*_cache.partial/
+*.b2nd
+
 # Ignore the paper for now
 paper/
 

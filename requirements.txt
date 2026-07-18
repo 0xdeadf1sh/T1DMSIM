@@ -5,6 +5,9 @@ pygame>=2.6
 # Test suite (tests/)
 pytest>=8.0
 
+# Dataset caching tool (cache_simulator.py) -- compressed .b2nd trajectory pools
+blosc2>=4.0
+
 # Dataset comparison + diff report tooling (scripts/, diff/)
 pandas>=2.0
 scipy>=1.11
