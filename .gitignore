@@ -24,6 +24,7 @@ datasets/
 /cache/
 /cache.partial/
 *.b2nd
+*.npy
 
 # Ignore the paper for now
 paper/
