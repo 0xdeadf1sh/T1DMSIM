@@ -15,7 +15,8 @@ simulator's internals -- it only drives the public ``generate()`` API.
 Layout
 ------
 The output directory holds one compressed ``.b2nd`` (blosc2 NDArray) file per
-channel, a raw ``icr.npy``, and a ``meta.json`` sentinel::
+channel, a raw ``icr.npy``, a ``normalization_stats.json``, and a ``meta.json``
+sentinel::
 
     <out_dir>/
         bg_observed.b2nd        (N, T) float32   shuffle + zstd
@@ -27,7 +28,15 @@ channel, a raw ``icr.npy``, and a ``meta.json`` sentinel::
         hour_of_day.b2nd        (N, T) float32   shuffle + zstd
         day.b2nd                (N, T) int32     shuffle + zstd
         icr.npy                 (N,)   float32   raw (tiny)
+        normalization_stats.json  3-channel {mean, std} the T1DMAI model consumes
         meta.json               generation params + aggregate statistics
+
+``normalization_stats.json`` is the ``{bg_absolute, carb_intake,
+insulin_combined}: {mean, std}`` contract the downstream T1DMAI model reads: the
+bg mean/std are fit in Kovatchev risk space, carb/insulin in log1p space (the
+same forward transforms the model applies before its z-score), pooled over all
+rows x timesteps during the transcode pass. It is written durably before the
+meta.json sentinel so a completed cache always carries valid stats.
 
 ``DATASET.md`` (path from ``--dataset-md``, default ``./DATASET.md``) is a
 human-readable render of the same statistics.
@@ -111,7 +120,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import blosc2
 
-from simulator import DT_MINUTES, T1DMSimulator
+from simulator import BG_CLAMP_MIN, BG_CLAMP_MAX, DT_MINUTES, T1DMSimulator
 
 
 # ============================================================================
@@ -201,6 +210,75 @@ def _kovatchev_numerators(bg: np.ndarray) -> tuple[float, float]:
     rl = 10.0 * np.minimum(f, 0.0) ** 2
     rh = 10.0 * np.maximum(f, 0.0) ** 2
     return float(rl.sum(dtype=np.float64)), float(rh.sum(dtype=np.float64))
+
+
+# ============================================================================
+# NORMALIZATION STATS (consumed by the T1DMAI model; self-contained -- no T1DMAI
+# import). Emits normalization_stats.json alongside meta.json.
+# ============================================================================
+
+# Kovatchev risk constants re-anchored to [40, 400] (BG_CLAMP_MIN/MAX); mirror
+# T1DMAI/utils._KOVATCHEV_* -- model risk space, distinct from the clinical
+# LBGI/HBGI constants used by _kovatchev_numerators.
+NORM_BG_RISK_SCALE = 2.2211457449985317
+NORM_BG_RISK_POWER = 1.084
+NORM_BG_RISK_OFFSET = 5.540076976170212
+
+# File name of the emitted 3-channel {mean, std} stats the T1DMAI model reads.
+NORM_STATS_FILE = 'normalization_stats.json'
+
+# Cache channel -> T1DMAI normalization channel name. bg_absolute is fit in
+# Kovatchev risk space, carb_intake / insulin_combined in log1p space (see
+# _norm_forward); the T1DMAI model applies the same forward transform before its
+# z-score, so the fitted mean/std live in those spaces.
+NORM_CHANNEL_SOURCES: dict[str, str] = {
+    'bg_observed': 'bg_absolute',
+    'total_carb': 'carb_intake',
+    'total_insulin': 'insulin_combined',
+}
+
+
+def _norm_bg_risk(bg: np.ndarray) -> np.ndarray:
+    """Kovatchev risk transform (model risk space) of raw mg/dL ``bg``.
+
+    Clips to ``[BG_CLAMP_MIN, BG_CLAMP_MAX]`` then applies
+    ``f(g) = SCALE * (ln(g)^POWER - OFFSET)`` with the [40, 400]-anchored
+    constants above -- mirroring ``T1DMAI/utils.kovatchev_f_np``, the transform
+    the model applies to the bg input BEFORE the z-score. Returns float64.
+    """
+    g = np.clip(np.asarray(bg, dtype=np.float64), BG_CLAMP_MIN, BG_CLAMP_MAX)
+    return NORM_BG_RISK_SCALE * (np.log(g) ** NORM_BG_RISK_POWER - NORM_BG_RISK_OFFSET)
+
+
+def _norm_forward(cache_name: str, block: np.ndarray) -> np.ndarray:
+    """Forward transform for the normalization-stats fit of ``cache_name``.
+
+    ``bg_observed`` -> Kovatchev risk space; ``total_carb`` / ``total_insulin``
+    -> ``log1p(max(x, 0))``. Returns the flattened float64 transformed values.
+    """
+    v = np.asarray(block, dtype=np.float64).reshape(-1)
+    if cache_name == 'bg_observed':
+        return _norm_bg_risk(v)
+    return np.log1p(np.maximum(v, 0.0))
+
+
+def _finalize_norm_stats(
+    norm_acc: dict[str, dict[str, float]],
+) -> dict[str, dict[str, float]]:
+    """Reduce the power-sum accumulators to the T1DMAI ``{name: {mean, std}}`` contract.
+
+    ``std`` is the SAMPLE std ``sqrt(M2 / (n - 1))`` (``M2 = sum_sq - sum^2/n``),
+    matching ``T1DMAI/normalization._finalize_stats``. Returns exactly the three
+    channels bg_absolute / carb_intake / insulin_combined.
+    """
+    stats: dict[str, dict[str, float]] = {}
+    for name, a in norm_acc.items():
+        n = a['n']
+        mean = a['sum'] / n if n else 0.0
+        m2 = (a['sum_sq'] - (a['sum'] * a['sum']) / n) if n else 0.0
+        std = float(np.sqrt(max(m2, 0.0) / max(n - 1, 1)))
+        stats[name] = {'mean': float(mean), 'std': std}
+    return stats
 
 
 @dataclasses.dataclass(frozen=True)
@@ -544,20 +622,28 @@ def _fsync_dir(path: str) -> None:
 def _transcode_to_blosc2(
     partial_dir: str, pool_size: int, n_timesteps: int,
     rows_per_chunk: int, clevel: int, nthreads: int,
-) -> tuple[dict[str, dict[str, int]], dict[str, Any]]:
+) -> tuple[dict[str, dict[str, int]], dict[str, Any], dict[str, dict[str, float]]]:
     """
     Convert each staging ``.npy`` to a compressed ``.b2nd`` and delete the source.
 
-    Returns ``(inventory, bg_dist)``: a per-channel ``{raw_bytes, compressed_bytes}``
-    inventory, and the pooled ``bg_observed`` distribution aggregates (histogram,
-    power sums, Kovatchev numerators) accumulated block-by-block as the channel is
-    read for compression -- so pooled percentiles / std / skew / LBGI / HBGI cost
-    no extra I/O and never materialise the whole channel in RAM. Round-trips the
-    first and last row of each channel to catch chunk-edge corruption.
+    Returns ``(inventory, bg_dist, norm_acc)``: a per-channel
+    ``{raw_bytes, compressed_bytes}`` inventory; the pooled ``bg_observed``
+    distribution aggregates (histogram, power sums, Kovatchev numerators); and the
+    per-channel ``{sum, sum_sq, n}`` power sums of the T1DMAI forward-transformed
+    bg/carb/insulin channels (risk space for bg, log1p for carb/insulin) for the
+    ``normalization_stats.json`` fit. All are accumulated block-by-block as each
+    channel is read for compression -- so pooled percentiles / std / skew / LBGI /
+    HBGI and the normalization stats cost no extra I/O and never materialise a
+    whole channel in RAM. Round-trips the first and last row of each channel to
+    catch chunk-edge corruption.
     """
     bg_hist = np.zeros(len(BG_HIST_EDGES) - 1, dtype=np.float64)
     bg_dist = {'sum': 0.0, 'sum_sq': 0.0, 'sum_cube': 0.0,
                'sum_rl': 0.0, 'sum_rh': 0.0, 'n': 0}
+    norm_acc: dict[str, dict[str, float]] = {
+        norm: {'sum': 0.0, 'sum_sq': 0.0, 'n': 0}
+        for norm in NORM_CHANNEL_SOURCES.values()
+    }
     cparams = blosc2.CParams(
         codec=blosc2.Codec.ZSTD,
         clevel=clevel,
@@ -613,6 +699,12 @@ def _transcode_to_blosc2(
                     bg_dist['sum_rl'] += rl
                     bg_dist['sum_rh'] += rh
                     bg_dist['n'] += int(v.size)
+                if name in NORM_CHANNEL_SOURCES:
+                    tv = _norm_forward(name, block)
+                    na = norm_acc[NORM_CHANNEL_SOURCES[name]]
+                    na['sum'] += float(tv.sum())
+                    na['sum_sq'] += float((tv * tv).sum())
+                    na['n'] += int(tv.size)
 
             reopened = blosc2.open(dst_path, mode='r')
             for check_idx in (0, pool_size - 1):
@@ -639,7 +731,7 @@ def _transcode_to_blosc2(
             flush=True,
         )
     bg_dist['hist'] = bg_hist.tolist()
-    return inventory, bg_dist
+    return inventory, bg_dist, norm_acc
 
 
 # ============================================================================
@@ -1206,7 +1298,7 @@ def build_cache(
         print(f'Transcoding {len(CHANNEL_NAMES)} channels to blosc2 (rows/chunk={effective_rpc})...', flush=True)
 
         t_trans = time.time()
-        inventory, bg_dist = _transcode_to_blosc2(
+        inventory, bg_dist, norm_acc = _transcode_to_blosc2(
             partial_dir, pool_size, keep_steps, effective_rpc, zstd_clevel, n_jobs
         )
         print(f'Transcode finished in {time.time() - t_trans:.1f}s.')
@@ -1241,6 +1333,15 @@ def build_cache(
             'baseline_stats': baseline['source'] if baseline else None,
         }
         report = _finalize_report(acc, params, inventory, icr_bytes, bg_dist, baseline)
+        # normalization_stats.json (the 3-channel {mean, std} the T1DMAI model
+        # consumes) is written BEFORE the meta.json sentinel and fsync'd inside
+        # the same atomic flow, so the sentinel never surfaces a cache missing
+        # valid stats.
+        norm_stats = _finalize_norm_stats(norm_acc)
+        norm_stats_path = os.path.join(partial_dir, NORM_STATS_FILE)
+        with open(norm_stats_path, 'w') as f:
+            json.dump(norm_stats, f, indent=2)
+        _fsync_file(norm_stats_path)
         # meta.json is the last file written -- its presence marks a complete
         # cache. fsync every file and the staging dir before the atomic rename so
         # a power loss cannot surface a sentinel-present, data-truncated cache.

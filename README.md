@@ -42,7 +42,7 @@ The ultimate goal is to provide a near-unlimited stream of synthetic factor curv
 
 ## Pregenerated Dataset
 
-The corpus is produced on demand by the caching tool `cache_simulator.py`, which drives the simulator across many seeds, writes each channel as a compressed [blosc2](https://www.blosc.org/) array, and emits a full statistical summary to **[`DATASET.md`](DATASET.md)** — patient and reading counts, CGM-hours, carbohydrate / insulin / meal totals, glycemic-band time fractions, the per-channel disk inventory, and the exact generation parameters. See that file for the inventory of the generated dataset.
+The corpus is produced on demand by the caching tool `cache_simulator.py`, which drives the simulator across many seeds, writes each channel as a compressed [blosc2](https://www.blosc.org/) array, and emits a full statistical summary to **[`DATASET.md`](DATASET.md)** — patient and reading counts, CGM-hours, carbohydrate / insulin / meal totals, glycemic-band time fractions, the per-channel disk inventory, and the exact generation parameters. See that file for the inventory of the generated dataset. It also writes a `normalization_stats.json` next to the cache — the 3-channel `{mean, std}` (blood glucose in Kovatchev risk space, carbohydrate / insulin in log1p space) that the downstream forecasting model consumes to normalize its inputs.
 
 ```bash
 # 50k patients across all cores; writes ./simulator_cache and regenerates DATASET.md
@@ -287,12 +287,13 @@ python uva_padova/compare_realism.py        # distance-to-real-CGM
 python -m pytest tests/ -v
 ```
 
-The test suite (71 tests) covers:
+The test suite (78 tests) covers:
 - `tests/test_curves.py` — curve generation correctness and unit consistency
 - `tests/test_patient.py` — skill ranges, basal/HGO/ICR relationship, behavioral parameters
 - `tests/test_simulator.py` — reproducibility, BG bounds, meal/insulin effects, weekday/weekend/holiday, severe-hypo rescue grams, skill-scaled correction, `inject_curve` totals contract, follow-up snack effect
 - `tests/test_balance.py` — basal-HGO balance, meal-bolus balance, ICR-basal proportionality
 - `tests/test_hypo_oversample.py` — the DATASET.md distribution-vs-baseline comparison (pooled moments/percentiles/LBGI-HBGI vs `diff/stats.json`) and that `--hypo-oversample` shifts the pool toward hypoglycemia in the expected direction, reproducibly
+- `tests/test_norm_stats.py` — the emitted `normalization_stats.json` schema (the 3 model channels, finite positive `{mean, std}`) and that its streaming power-sum stats match a direct recompute from the stored `.b2nd` arrays
 
 ## References
 
