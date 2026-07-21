@@ -25,6 +25,7 @@ datasets/
 /cache.partial/
 *.b2nd
 *.npy
+*.tar.gz
 
 # Ignore the paper for now
 paper/
