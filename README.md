@@ -80,7 +80,11 @@ The simulator is built on several core ideas:
 
 ## Architecture
 
-![Architecture Diagram](screenshots/architecture.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="screenshots/architecture-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/architecture.png">
+  <img alt="Architecture Diagram" src="screenshots/architecture.png">
+</picture>
 
 A seed fixes the virtual patient. A day planner and a reactive controller turn that patient's latent skills into events, each event becomes a factor curve, and the metabolic core combines the curves into a 5-minute blood sugar delta. Solid arrows carry glucose or insulin and are badged by their effect on BG (⊕ raises, ⊖ lowers, ÷ divides the insulin term); the dashed arrow is multiplicative modulation; the dotted arrows are the two feedback loops -- the patient doses against the sensor rather than the true BG, and sustained hyperglycemia raises insulin resistance.
 
