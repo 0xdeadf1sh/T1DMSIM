@@ -32,6 +32,29 @@ H = STRIP_TOP + STRIP_H
 BG_LO, BG_HI = 40.0, 330.0
 HYPO, HYPER = 70.0, 180.0
 
+# Glycemic zone shading, mirroring the visualizer's chart backdrop
+# (visualizer.py, _draw_zones): same boundaries, same ordering.
+ZONES = [(30.0, 54.0, "vlo"), (54.0, 70.0, "lo"), (70.0, 180.0, "ir"),
+         (180.0, 250.0, "hi"), (250.0, 400.0, "vhi")]
+
+
+def zone_rects(width: int, height: int, top_pad: int,
+               names: set[str] | None = None) -> list[str]:
+    """Zone backdrop rects. `names` restricts which zones are drawn — the wall
+    cells are only ~60 px tall, where five stripes read as noise."""
+    out = []
+    for lo, hi, name in ZONES:
+        if names is not None and name not in names:
+            continue
+        lo, hi = max(lo, BG_LO), min(hi, BG_HI)
+        if hi <= lo:
+            continue
+        top = float(y_of(hi, height, top_pad))
+        bot = float(y_of(lo, height, top_pad))
+        out.append(f'<rect class="zone {name}" x="0" y="{top:.0f}" '
+                   f'width="{width}" height="{bot - top:.0f}"/>')
+    return out
+
 
 def run(seed: int, hours: float, warmup: float = WARMUP_HOURS) -> dict:
     sim = T1DMSimulator(seed=seed, initial_bg=120)
@@ -80,7 +103,7 @@ def hero() -> tuple[str, np.ndarray]:
         '<stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>'
         '<mask id="fade"><rect width="100%" height="100%" fill="url(#fadeR)"/></mask></defs>',
         '<g mask="url(#fade)">',
-        f'<rect class="band" x="0" y="{band_top:.0f}" width="{W}" height="{band_bot - band_top:.0f}"/>',
+        *zone_rects(W, TRACE_H, 8),
         f'<line class="rule" x1="0" y1="{band_top:.0f}" x2="{W}" y2="{band_top:.0f}"/>',
         f'<line class="rule" x1="0" y1="{band_bot:.0f}" x2="{W}" y2="{band_bot:.0f}"/>',
     ]
@@ -123,7 +146,7 @@ def wall(cw: int = 280, ch: int = 64, step: int = 2) -> str:
         sub = bg[::step]
         xs = np.linspace(0, cw, len(sub))
         ys = y_of(sub, height=ch - 3, top_pad=6)
-        bt, bb = float(y_of(HYPER, ch - 3, 6)), float(y_of(HYPO, ch - 3, 6))
+        zones = "".join(zone_rects(cw, ch - 3, 6, names={"ir"}))
         tir = float(((bg >= HYPO) & (bg <= HYPER)).mean() * 100)
         segs = "".join(
             f'<path class="seg {cls}" d="{path_of(xs[a:b], ys[a:b])}"/>'
@@ -137,8 +160,7 @@ def wall(cw: int = 280, ch: int = 64, step: int = 2) -> str:
             f'<svg class="mini" viewBox="0 0 {cw} {ch}" preserveAspectRatio="none" role="img" '
             f'aria-label="seed {seed}: mean {bg.mean():.0f} milligrams per decilitre, '
             f'{tir:.0f} percent in range">'
-            f'<rect class="band" x="0" y="{bt:.0f}" width="{cw}" height="{bb - bt:.0f}"/>'
-            f'<path class="trace" d="{path_of(xs, ys)}"/>{segs}</svg></div>'
+            f'{zones}<path class="trace" d="{path_of(xs, ys)}"/>{segs}</svg></div>'
         )
     return '<div class="wall">\n' + "\n".join(cells) + "\n</div>"
 
