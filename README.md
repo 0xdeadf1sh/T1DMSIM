@@ -80,6 +80,10 @@ The simulator is built on several core ideas:
 
 ## Architecture
 
+![Architecture Diagram](screenshots/architecture.png)
+
+A seed fixes the virtual patient. A day planner and a reactive controller turn that patient's latent skills into events, each event becomes a factor curve, and the metabolic core combines the curves into a 5-minute blood sugar delta. Solid arrows carry glucose or insulin and are badged by their effect on BG (⊕ raises, ⊖ lowers, ÷ divides the insulin term); the dashed arrow is multiplicative modulation; the dotted arrows are the two feedback loops -- the patient doses against the sensor rather than the true BG, and sustained hyperglycemia raises insulin resistance.
+
 The simulator consists of two files:
 
 `simulator.py` contains the core engine. All tunable parameters are defined as uppercase constants at the top of the file (approximately 270 parameters). The `T1DMSimulator` class exposes a `generate()` method that advances the simulation by one 5-minute time step and returns all factor values and the resulting BG. This is analogous to `rand()` in C: seed it once, then call repeatedly to produce a stream of data.
