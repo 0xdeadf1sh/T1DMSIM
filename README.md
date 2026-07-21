@@ -15,7 +15,7 @@ Screenshot:
 ## Table of contents
 
 - [Motivation](#motivation)
-- [Pregenerated Dataset](#pregenerated-dataset)
+- [Pregenerated Datasets](#pregenerated-datasets)
 - [Design Principles](#design-principles)
 - [Architecture](#architecture)
 - [Blood Sugar Computation](#blood-sugar-computation)
@@ -40,9 +40,11 @@ This simulator takes a different approach. It models the *person*, not the pancr
 
 The ultimate goal is to provide a near-unlimited stream of synthetic factor curves that can be used to pretrain ML models for personalized blood sugar prediction, with real patient data reserved for fine-tuning.
 
-## Pregenerated Dataset
+## Pregenerated Datasets
 
-The corpus is produced on demand by the caching tool `cache_simulator.py`, which drives the simulator across many seeds, writes each channel as a compressed [blosc2](https://www.blosc.org/) array, and emits a full statistical summary to **[`DATASET.md`](DATASET.md)** — patient and reading counts, CGM-hours, carbohydrate / insulin / meal totals, glycemic-band time fractions, the per-channel disk inventory, and the exact generation parameters. See that file for the inventory of the generated dataset. It also writes a `normalization_stats.json` next to the cache — the 3-channel `{mean, std}` (blood glucose in Kovatchev risk space, carbohydrate / insulin in log1p space) that the downstream forecasting model consumes to normalize its inputs.
+The corpus is produced on demand by the caching tool `cache_simulator.py`, which drives the simulator across many seeds, writes each channel as a compressed [blosc2](https://www.blosc.org/) array, and emits a full statistical summary to **DATASET.md** — patient and reading counts, CGM-hours, carbohydrate / insulin / meal totals, glycemic-band time fractions, the per-channel disk inventory, and the exact generation parameters. See that file for the inventory of the generated dataset. It also writes a `normalization_stats.json` next to the cache — the 3-channel `{mean, std}` (blood glucose in Kovatchev risk space, carbohydrate / insulin in log1p space) that the downstream forecasting model consumes to normalize its inputs.
+
+Usage:
 
 ```bash
 # 50k patients across all cores; writes ./simulator_cache and regenerates DATASET.md
@@ -54,8 +56,12 @@ python cache_simulator.py --pool-size 50000 --hypo-oversample 0.25
 
 Each trajectory is 55.5 h of post-warmup CGM at 5-minute cadence (666 steps; the first 48 h of warmup are discarded before caching). Windows whose CGM touches the clamp rails (a reading ≥ 399 or ≤ 41 mg/dL) are discarded, and `--hypo-oversample` biases a configurable fraction of rows toward hypoglycemia via seed rejection sampling. The tool needs `blosc2` in addition to the core dependencies (`pip install blosc2`).
 
-`DATASET.md` also carries a **distribution-vs-baseline** comparison: the cache's pooled `bg_observed` is measured against the unbiased-simulator baseline recorded in [`diff/README.md`](diff/README.md) (`datasets.Sim` in `diff/stats.json`), tabulating the shift in moments, percentiles, glycemic-band time fractions, and LBGI/HBGI. Under `--hypo-oversample` this quantifies how far the biased corpus departs from the simulator's natural distribution.
+Each `DATASET.md` also carries a **distribution-vs-baseline** comparison: the cache's pooled `bg_observed` is measured against the unbiased-simulator baseline recorded in [`diff/README.md`](diff/README.md) (`datasets.Sim` in `diff/stats.json`), tabulating the shift in moments, percentiles, glycemic-band time fractions, and LBGI/HBGI. Under `--hypo-oversample` this quantifies how far the biased corpus departs from the simulator's natural distribution.
 
+See [`cache_balanced`](cache_balanced) and [`cache_hypo`](cache_hypo) for metadata. The actual datasets can be downloaded from the following links:
+
+- [cache_balanced.tar.gz](https://drive.google.com/file/d/1pZuf6Htui-CC3Abp2NAHVvogk99X1ZR3/view?usp=sharing)
+- [cache_hypo.tar.gz](https://drive.google.com/file/d/1D1tg0GDtzLY_IzrtMkOj1foQhRj3cU9R/view?usp=sharing)
 
 ## Design Principles
 
