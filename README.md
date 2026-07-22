@@ -39,24 +39,10 @@ This one models the *person*, not the pancreas. Most real-world blood sugar vari
 
 ## Pregenerated Datasets
 
-`cache_simulator.py` drives the simulator across many seeds and writes each channel as a compressed [blosc2](https://www.blosc.org/) array. Alongside each cache it emits a `DATASET.md` report (path set by `--dataset-md`) covering patient and reading counts, CGM-hours, carbohydrate / insulin / meal totals, glycemic-band time fractions, the per-channel disk inventory, and the generation parameters; plus a `normalization_stats.json` — the 3-channel `{mean, std}` (blood glucose in Kovatchev risk space, carbohydrate / insulin in log1p space) the downstream forecasting model consumes to normalize its inputs.
+Two caches written by `cache_simulator.py` are published — a balanced pool and a hypoglycemia-oversampled one — each documented by the report it ships with.
 
-```bash
-# 50k patients across all cores
-python cache_simulator.py --out-dir simulator_cache --pool-size 50000
-
-# oversample hypoglycemia-rich trajectories (25% of rows) for class-balanced training
-python cache_simulator.py --pool-size 50000 --hypo-oversample 0.25
-```
-
-Each trajectory is 55.5 h of post-warmup CGM at 5-minute cadence (666 steps; the first 48 h of warmup are discarded before caching). Windows whose CGM touches the clamp rails (a reading ≥ 399 or ≤ 41 mg/dL) are discarded, and `--hypo-oversample` biases a configurable fraction of rows toward hypoglycemia via seed rejection sampling. The tool needs `blosc2` beyond the core dependencies (`pip install blosc2`).
-
-Each report also carries a **distribution-vs-baseline** table: the cache's pooled `bg_observed` measured against the unbiased-simulator baseline in [`diff/README.md`](diff/README.md) (`datasets.Sim` in `diff/stats.json`) — the shift in moments, percentiles, glycemic-band time fractions, and LBGI/HBGI, which under `--hypo-oversample` quantifies how far the biased corpus departs from the simulator's natural distribution.
-
-The two published caches carry their reports in-tree — [`cache_balanced/DATASET.md`](cache_balanced/DATASET.md) and [`cache_hypo/DATASET.md`](cache_hypo/DATASET.md). The arrays themselves are downloadable:
-
-- [cache_balanced.tar.gz](https://drive.google.com/file/d/1pZuf6Htui-CC3Abp2NAHVvogk99X1ZR3/view?usp=sharing)
-- [cache_hypo.tar.gz](https://drive.google.com/file/d/1D1tg0GDtzLY_IzrtMkOj1foQhRj3cU9R/view?usp=sharing)
+- [cache_balanced.tar.gz](https://drive.google.com/file/d/1pZuf6Htui-CC3Abp2NAHVvogk99X1ZR3/view?usp=sharing) — [`cache_balanced/DATASET.md`](cache_balanced/DATASET.md)
+- [cache_hypo.tar.gz](https://drive.google.com/file/d/1D1tg0GDtzLY_IzrtMkOj1foQhRj3cU9R/view?usp=sharing) — [`cache_hypo/DATASET.md`](cache_hypo/DATASET.md)
 
 
 ## Design Principles
