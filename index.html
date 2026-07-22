@@ -11,7 +11,7 @@
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://0xdeadf1sh.github.io/T1DMSIM/">
 <meta property="og:title" content="T1DMSIM — synthetic Type 1 Diabetes glucose data">
-<meta property="og:description" content="Model the patient, not the pancreas. Seed-deterministic, ×764 faster than UVA/Padova, indistinguishable from real CGM on 20 of 20 metrics.">
+<meta property="og:description" content="Model the patient, not the pancreas. Seed-deterministic, ×819 faster than UVA/Padova, indistinguishable from real CGM on 20 of 20 metrics.">
 <meta property="og:image" content="https://0xdeadf1sh.github.io/T1DMSIM/screenshots/architecture.png">
 <meta name="twitter:card" content="summary_large_image">
 <style>
@@ -421,7 +421,7 @@ footer a { color: var(--muted); }
 <div class="strip">
   <div><span class="n">666 M</span><span class="k">CGM readings per published corpus</span></div>
   <div><span class="n">6,336 <small>yr</small></span><span class="k">Patient-years per corpus</span></div>
-  <div><span class="n">×764</span><span class="k">Faster than the UVA/Padova ODE core</span></div>
+  <div><span class="n">×819</span><span class="k">Faster than the UVA/Padova ODE core</span></div>
   <div><span class="n">20 / 20</span><span class="k">Metrics inside the real cohorts' own spread</span></div>
 </div>
 
@@ -503,16 +503,16 @@ glucose_out = insulin × ICR / sensitivity
     distributions, in mg/dL:</p>
 
     <div class="bars">
-      <div class="bar sim"><span class="lbl">Sim ↔ Ohio</span><span class="track"><span class="fill" style="width:5.2%"></span></span><span class="v">1.4</span></div>
-      <div class="bar sim"><span class="lbl">Sim ↔ Shanghai</span><span class="track"><span class="fill" style="width:37.2%"></span></span><span class="v">10.0</span></div>
-      <div class="bar sim"><span class="lbl">Sim ↔ AZT1D</span><span class="track"><span class="fill" style="width:66.2%"></span></span><span class="v">17.8</span></div>
+      <div class="bar sim"><span class="lbl">Sim ↔ Ohio</span><span class="track"><span class="fill" style="width:7.4%"></span></span><span class="v">2.0</span></div>
+      <div class="bar sim"><span class="lbl">Sim ↔ Shanghai</span><span class="track"><span class="fill" style="width:38.5%"></span></span><span class="v">10.3</span></div>
+      <div class="bar sim"><span class="lbl">Sim ↔ AZT1D</span><span class="track"><span class="fill" style="width:64.3%"></span></span><span class="v">17.3</span></div>
       <div class="sep"></div>
       <div class="bar"><span class="lbl">Ohio ↔ Shanghai</span><span class="track"><span class="fill" style="width:37.5%"></span></span><span class="v">10.1</span></div>
       <div class="bar"><span class="lbl">Ohio ↔ AZT1D</span><span class="track"><span class="fill" style="width:67.3%"></span></span><span class="v">18.1</span></div>
       <div class="bar"><span class="lbl">Shanghai ↔ AZT1D</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="v">26.9</span></div>
     </div>
-    <p class="tiny" style="margin-top:.9rem">Pooled mean 161.3 mg/dL vs Ohio 162.1 · SD 61.5 vs 60.9 · CV 38.1 %
-    vs 37.6 % · GMI 7.17 vs 7.19 · LBGI 0.89 vs 0.86 · HBGI 7.47 vs 7.60.</p>
+    <p class="tiny" style="margin-top:.9rem">Published corpus, pooled: mean 160.3 mg/dL vs Ohio 162.1 · SD 59.2 vs 60.9 · CV 36.9 %
+    vs 37.6 % · GMI 7.14 vs 7.19 · LBGI 0.82 vs 0.86 · HBGI 7.19 vs 7.60.</p>
 
     <figure class="fig feature">
       <img src="diff/figures/gap_score.png" alt="Bar chart of standardised gap scores for twenty metrics, every one within one standard deviation of the mean across the three real cohorts." loading="lazy">
@@ -549,9 +549,9 @@ glucose_out = insulin × ICR / sensitivity
     </div>
 
     <div class="trio">
-      <div><span class="n">11.8 <small>vs 30.0</small></span><span class="k">W₁ to real CGM — T1DMSIM vs UVA/Padova, against an 18.4 floor</span></div>
-      <div><span class="n">4.8 <small>ms</small></span><span class="k">Per simulated day, against 3,699 ms</span></div>
-      <div><span class="n">59,509 <small>steps/s</small></span><span class="k">Single-threaded, steady state</span></div>
+      <div><span class="n">13.7 <small>vs 30.0</small></span><span class="k">W₁ to real CGM — T1DMSIM vs UVA/Padova, against an 18.4 floor</span></div>
+      <div><span class="n">5.0 <small>ms</small></span><span class="k">Per simulated day, against 4,080 ms</span></div>
+      <div><span class="n">57,828 <small>steps/s</small></span><span class="k">Single-threaded, steady state</span></div>
     </div>
     <p class="tiny" style="margin-top:.9rem">T1DMSIM was calibrated against Ohio and Shanghai; UVA/Padova — a
     physiology and controller benchmark — never saw that target. Read every gap accordingly.
