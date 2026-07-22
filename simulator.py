@@ -1876,7 +1876,7 @@ class T1DMSimulator:
             drift = self._daily_is_drift
             phase_shift = self._daily_is_phase_shift
 
-        # Multi-peak diurnal pattern. The returned value is an *insulin
+        # Diurnal pattern. The returned value is an *insulin
         # resistance* factor (higher = less glucose cleared per unit insulin —
         # see BG-delta formula in generate()). Morning and evening cortisol
         # peaks raise resistance; deep-sleep around 2am lowers it.

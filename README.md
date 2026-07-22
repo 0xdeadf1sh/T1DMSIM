@@ -70,8 +70,6 @@ A seed fixes the virtual patient. A day planner turns that patient's latent skil
 
 `simulator.py` holds the engine and its ~270 uppercase parameter constants. `T1DMSimulator.generate()` advances one 5-minute step and returns every factor value plus the resulting BG — `rand()` in C: seed once, then call repeatedly. `visualizer.py` renders those curves interactively, with the skill profile, derived parameters, and live statistics in a sidebar and exact values on mouse hover.
 
-**Performance:** curve contributions are pre-accumulated into numpy arrays (`_carb_totals`, `_basal_totals`, `_bolus_totals`, `_exercise_totals`) so each step reads values in O(1), and insulin-on-board is a single `np.sum` over the future insulin array — enough to make `generate_hours()` viable for bulk generation.
-
 
 ## Blood Sugar Computation
 
@@ -84,6 +82,8 @@ delta_BG    = alpha * (glucose_in - glucose_out)
 ```
 
 `alpha` is `BG_SCALE_FACTOR`, the master constant converting abstract units to mg/dL. Insulin sensitivity divides the clearance term: resistant patients (IS > 1) clear less glucose per unit insulin, sensitive patients (IS < 1) clear more. HGO suppression by insulin is handled separately by the Hill function, so IS modulates only peripheral insulin action.
+
+Added on top is the glucose-effectiveness term `S_g * (E(t) - BG)` from the diagram above — the Bergman-minimal-model insulin-independent pull toward a stochastic equilibrium `E(t)`, without which within-band BG would drift as an undamped integrator of net flux.
 
 Three physiological guardrails are then applied to the delta:
 
@@ -112,7 +112,7 @@ Orthogonal to skill, each patient carries independently sampled physiological tr
 
 ## Insulin Sensitivity Model
 
-Insulin sensitivity follows a multi-peak diurnal pattern modeled as a sum of Gaussian bumps: a morning resistance peak around 7 AM (the dawn phenomenon, source of the classic morning BG rise), a latent evening rebound near 8 PM currently disabled (`IS_EVENING_AMPLITUDE = 0.0`), and a nighttime sensitivity dip around 2 AM that can cause nocturnal lows. The morning peak's timing shifts day-to-day (configurable sigma); a daily drift and per-step noise add further variability. During illness the IS factor ramps gradually toward a target and back down during recovery.
+Insulin sensitivity follows a diurnal pattern modeled as a sum of Gaussian bumps: a morning resistance peak around 7 AM (the dawn phenomenon, source of the classic morning BG rise), a latent evening rebound near 8 PM currently disabled (`IS_EVENING_AMPLITUDE = 0.0`), and a nighttime sensitivity dip around 2 AM that can cause nocturnal lows. The morning peak's timing shifts day-to-day (configurable sigma); a daily drift and per-step noise add further variability. During illness the IS factor ramps gradually toward a target and back down during recovery.
 
 Modifiers applied on top of the diurnal pattern:
 
@@ -124,21 +124,21 @@ Modifiers applied on top of the diurnal pattern:
 
 ## Behavioral Events
 
-- **Meals**: number, timing, and carb amount are all skill-dependent. Each meal decomposes into 2-5 overlapping gamma absorption components (a "mixed meal" model): the count is `MIXED_MEAL_MIN_COMPONENTS + Poisson(λ)` capped at the max, carb fractions come from a Dirichlet distribution, and each component is classified fast / medium / slow with weights driven by the patient's `slow_carb_preference`, its `(k, θ)` sampled uniformly from category-specific ranges. A protein/fat tail is always added at `PROTEIN_FAT_FRACTION_OF_CARBS × meal_carbs`, floored at `PROTEIN_FAT_MIN_GRAMS` (6 g) — ~6 g for snacks, ~10–15 g for typical meals, ~18 g for large dinners. Hypo-correction carbs use a separate, faster pair (glucose tablets / juice).
+- **Meals**: number, timing, and carb amount are all skill-dependent, and each meal decomposes into 2-5 overlapping gamma absorption components classified fast / medium / slow by the patient's `slow_carb_preference`, plus a protein/fat tail.
 
-- **Basal insulin**: one long-acting injection per day (`BASAL_DOSE_INTERVAL_HOURS`, 24h) delivering a 24h-equivalent dose anchored to `HGO_base × 24h × (body_weight_kg / BODY_WEIGHT_MEAN_KG) × is_base / ICR` — the weight factor mirrors the per-step HGO scaling and the `is_base` factor keeps the HGO-balances-basal invariant across body sizes and baseline insulin needs. Unskilled patients deviate from the ideal more, and a daily adjustment nudges the dose from the previous day's mean BG. Each patient is assigned one of two analogues (`BASAL_VARIANTS`): glargine (26h duration of action) or degludec (42h). Absorption is a Bateman one-compartment PK curve `f(t) = exp(-ke·t) − exp(-ka·t)` (broad peak at ~6.3h, half-life ~9.9h) with a smootherstep tail clip. Each dose's curve is generated with duration `basal_duration_hours × (1 + BASAL_PK_OVERLAP_FRACTION)` — overlap is 1.00 so the PK lasts 2× the cadence, meaning 2–3 doses always contribute simultaneously and a single missed dose is bridged by the previous dose's still-active tail.
+- **Basal insulin**: one long-acting injection per day, anchored to `HGO_base × 24h × (body_weight_kg / BODY_WEIGHT_MEAN_KG) × is_base / ICR` and absorbed through a Bateman one-compartment PK curve `f(t) = exp(-ke·t) − exp(-ka·t)` whose duration is the patient's assigned analogue, glargine (26h) or degludec (42h).
 
-- **Bolus insulin**: dosed per meal from an estimated carb count (with skill-dependent counting error). Competent patients pre-bolus, incompetent ones bolus after eating, and snack boluses may be skipped. PK is dose-dependent — duration of action and θ both scale with `√dose` about a 5U reference, so larger doses act longer and peak slightly later; `bolus_pk_for_dose(dose)` returns `(k, θ, duration_minutes)`.
+- **Bolus insulin**: dosed per meal from a carb count carrying skill-dependent error, with competent patients pre-bolusing and duration of action scaling as `√dose` about a 5U reference, so larger doses act longer and peak slightly later.
 
-- **Corrections**: the CGM is checked at skill-dependent intervals, and high-competence patients subtract insulin-on-board (IOB) before correcting to avoid stacking. Attentive patients also act on BG *trends*: rising above `TREND_HIGH_BG_MIN` (145 mg/dL) or falling below `TREND_LOW_BG_MAX` (110 mg/dL) triggers a preemptive correction before the absolute threshold is crossed. Above 300 mg/dL, or below the 55 mg/dL severe-hypo threshold, rage bolusing or reflexive rescue eating may occur.
+- **Corrections**: the CGM is checked at skill-dependent intervals, high-competence patients subtracting insulin-on-board before correcting and attentive ones acting on BG *trends* preemptively, while extremes above 300 mg/dL or below the 55 mg/dL severe-hypo threshold can trigger rage bolusing or reflexive rescue eating.
 
-- **Exercise**: skill-dependent probability, reduced on weekends. A negative carb-equivalent gamma curve plus the post-exercise IS boost above.
+- **Exercise**: skill-dependent probability, reduced on weekends, modelled as a negative carb-equivalent gamma curve plus the post-exercise IS boost above.
 
-- **Alcohol**: more likely on weekends, holidays, and rare event days. Suppresses HGO by 30–70% for 4–8 hours starting 1–2 hours after drinking, on top of insulin's own suppression, causing the delayed nocturnal lows common in real T1DM patients.
+- **Alcohol**: more likely on weekends, holidays, and rare event days, it suppresses HGO by 30–70% for 4–8 hours starting 1–2 hours after drinking — on top of insulin's own suppression — causing the delayed nocturnal lows common in real T1DM patients.
 
-- **Stress events**: occasional transient insulin-resistance multipliers (1.2–1.5×, 2–6h) model cortisol spikes from work, emotion, or poor sleep. Frequency decreases with lifestyle consistency.
+- **Stress events**: occasional transient insulin-resistance multipliers (1.2–1.5×, 2–6h) model cortisol spikes from work, emotion, or poor sleep, at a frequency that falls with lifestyle consistency.
 
-- **Weekday/weekend/holiday patterns**: on weekends and holidays wake time shifts later, meal timing is more variable, carb amounts are slightly larger, and alcohol probability increases. Public holidays (10–20 per year, configurable) are distributed across the year and never fall on weekends.
+- **Weekday/weekend/holiday patterns**: on weekends and holidays wake time shifts later, meal timing is more variable, carb amounts are slightly larger, and alcohol probability increases, with 10–20 configurable public holidays distributed across the year and never falling on a weekend.
 
 - **Rare events**: with low probability per day, the patient has a "chaotic day" where all skills are degraded and the schedule disrupted.
 
