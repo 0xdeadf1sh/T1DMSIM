@@ -80,7 +80,7 @@ The two published caches carry their reports in-tree — [`cache_balanced/DATASE
   <img alt="Architecture Diagram" src="screenshots/architecture.png">
 </picture>
 
-A seed fixes the virtual patient. A day planner and a reactive controller turn that patient's latent skills into events, each event becomes a factor curve, and the metabolic core combines the curves into a 5-minute blood sugar delta. Solid arrows carry glucose or insulin and are badged by their effect on BG (⊕ raises, ⊖ lowers, ÷ divides the insulin term); the dashed arrow is multiplicative modulation; the dotted arrows are the two feedback loops -- the patient doses against the sensor rather than the true BG, and sustained hyperglycemia raises insulin resistance.
+A seed fixes the virtual patient. A day planner turns that patient's latent skills into events, each event becomes a factor curve, and the metabolic core combines the curves into a 5-minute blood sugar delta. Solid arrows carry glucose or insulin and are badged by their effect on BG (⊕ raises, ⊖ lowers, ÷ divides the insulin term); the dashed arrow is multiplicative modulation; the dotted arrows are the two feedback loops -- the patient doses against the sensor rather than the true BG, and sustained hyperglycemia raises insulin resistance.
 
 `simulator.py` holds the engine and its ~270 uppercase parameter constants. `T1DMSimulator.generate()` advances one 5-minute step and returns every factor value plus the resulting BG — `rand()` in C: seed once, then call repeatedly. `visualizer.py` renders those curves interactively, with the skill profile, derived parameters, and live statistics in a sidebar and exact values on mouse hover.
 
