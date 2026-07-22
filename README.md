@@ -104,7 +104,17 @@ Each virtual patient is defined by four skill dimensions sampled from a multivar
 
 Skills are mapped through a sigmoid and clipped to a configurable range (default 0.15-0.98); every behavioral parameter — meal sizes, timing jitter, bolus accuracy, correction behavior, exercise habits — is derived from them.
 
-Orthogonal to skill, each patient carries independently sampled physiological traits: body weight, an insulin-resistance level (setting baseline insulin needs and carb ratio, and shifting average glucose upward for more-resistant patients), and a glucose-variability scale. These give the population between-patient spread in both mean glucose and glycemic variability comparable to the real CGM cohorts.
+| Trait | Sampled | Governs |
+|---|---|---|
+| `body_weight_kg` | Normal, clipped | HGO scale and the basal-dose anchor |
+| `insulin_resistance_factor` | Lognormal, clipped | `is_base`, `icr`, `correction_factor`, and the equilibrium anchor |
+| `glucose_effectiveness` | Lognormal around `GE_RATE` | Strength of the insulin-independent restoring pull |
+| `ge_anchor` | Normal about `GE_EQ_ANCHOR_MEAN`, lifted by resistance | The patient's own mean glucose level |
+| `ge_sigma_mult` | Lognormal, clipped | Within-patient glycemic variability |
+| `meal_appetite` | Lognormal, clipped | Per-meal carb amount |
+| `basal_type` | Uniform over `BASAL_VARIANTS` | Glargine (26h) or degludec (42h) basal PK |
+
+These traits are sampled independently of skill and give the population its between-patient spread in mean glucose and variability.
 
 
 ## Insulin Sensitivity Model
