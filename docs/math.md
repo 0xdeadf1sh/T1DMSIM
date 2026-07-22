@@ -85,9 +85,8 @@ Every dose (basal, meal bolus, hyper correction, trend correction) is multiplied
 Diurnal pattern (`phase_shift` and `daily_drift` smooth-step-blend across midnight from yesterday to today over `IS_DRIFT_TRANSITION_HOURS`):
 
     morning = IS_MORNING_AMPLITUDE * exp(-0.5 * ((hour - IS_MORNING_PEAK_HOUR - phase_shift) / 2.0)^2)
-    evening = IS_EVENING_AMPLITUDE * exp(-0.5 * ((hour - IS_EVENING_PEAK_HOUR) / 2.5)^2)
     night   = -IS_NIGHT_DIP_AMPLITUDE * exp(-0.5 * ((night_hour - IS_NIGHT_DIP_HOUR) / 2.0)^2)
-    diurnal = 1.0 + morning + evening + night
+    diurnal = 1.0 + morning + night
 
     IS(t)   = IS_base * diurnal * (1 + daily_drift) * illness_factor
               * exercise_envelope * stress_envelope
