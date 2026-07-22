@@ -1,52 +1,6 @@
 # T1DMSIM vs OhioT1DM, ShanghaiT1DM, AZT1D — Statistical Comparison Report
 
-`simulator.py` is the seed-driven T1D behaviour simulator described in the
-[project README](../README.md); it emits synthetic blood-glucose traces plus
-the carb / insulin / exercise / sensitivity factor curves that generated them.
-This document compares those traces against three real-world CGM corpora —
-OhioT1DM, ShanghaiT1DM, and AZT1D (see
-[References](../README.md#references) in the project README). The sections
-below cover distributional moments and distances, risk indices, variability
-and complexity, temporal structure, excursions, per-record heterogeneity, and
-— using AZT1D's pump log — an insulin / carb head-to-head.
-
-**Cohort sizing.** The simulator is exercised here at 300 seeds × 70
-days, a sample count comparable to the largest real corpus, but this is not a
-fixed corpus: `T1DMSimulator.generate_hours()` is a deterministic generator
-(same seed → same trace) and arbitrarily many new seeds can be sampled, each
-producing an arbitrarily long trace. Every per-record count below ("samples",
-"CGM-days", "n events") is a property of *this run*, not a ceiling.
-
-Regenerated end-to-end by `diff/build_report.py`; raw stats in
-`diff/stats.json`, figures in `diff/figures/`.
-
-## Table of contents
-
-- [0. Machine-learning summary](#0-machine-learning-summary)
-- [1. Corpora at a glance](#1-corpora-at-a-glance)
-- [2. Methodology](#2-methodology)
-- [3. Headline numbers](#3-headline-numbers)
-- [4. Clinical glycemic indices](#4-clinical-glycemic-indices)
-- [5. Variability and complexity](#5-variability-and-complexity)
-- [6. Temporal dynamics](#6-temporal-dynamics)
-- [7. Excursion-level dynamics](#7-excursion-level-dynamics)
-- [8. Per-record heterogeneity](#8-per-record-per-patient-heterogeneity)
-- [9. AZT1D insulin / carb panel](#9-azt1d-insulin--carb-behaviour-panel)
-- [10. Side-by-side summary](#10-side-by-side-summary)
-- [11. Limitations of this comparison](#11-limitations-of-this-comparison)
-- [12. Extended statistics](#12-extended-statistics)
-- [13. Reproduction](#13-reproduction)
-
----
-
 ## 0. Machine-learning summary
-
-Stats tailored to designing an ML pipeline against this data. The simulator
-emits a continuous, fully-labelled multivariate stream (BG, carb intake,
-basal/bolus insulin, exercise, sensitivity, hepatic output …) suitable for
-sequence modelling with regression or class-imbalanced classification heads.
-Corpus size is a run parameter rather than a fixed property of the source: the
-numbers below describe one generation run.
 
 ### 0.1 Data volume per cohort
 
@@ -57,18 +11,7 @@ numbers below describe one generation run.
 | AZT1D        |  25 | 300,884 |  25,074 |   1,045 | 5 min |
 | **T1DMSIM** *(this run)* | **300** | **6,048,000** | **504,000** | **21,000** | **5 min** |
 
-The T1DMSIM row is the 300-seed × 70-day run behind every other
-number in this report; `--n-seeds N --days D` scales it linearly. That run is
-**70.9× the sample count of OhioT1DM**,
-**385.3× ShanghaiT1DM**, and
-**20.1× AZT1D**.
-
 ### 0.2 Normalization statistics
-
-Pooled-BG statistics for input/output standardization. Z-scoring on the
-simulator output: `bg_z = (bg - 160.6) / 61.3`; robust
-(median / IQR) scaling, resistant to extreme-hyper outliers:
-`bg_robust = (bg - 153.7) / 84.9`.
 
 | Stat (mg/dL) | Ohio | Shanghai | AZT1D | **Sim** |
 |---|---:|---:|---:|---:|
@@ -83,9 +26,6 @@ simulator output: `bg_z = (bg - 160.6) / 61.3`; robust
 
 ### 0.3 Sample-level class balance
 
-For classification heads predicting BG-band membership. Percentages are
-per-record means across each cohort.
-
 ![Class balance per cohort](figures/class_balance.png)
 
 | Band | Threshold | Ohio % | Shang % | AZT1D % | **Sim %** |
@@ -96,14 +36,7 @@ per-record means across each cohort.
 | TAR1 | 180-250 |  27.3 |  25.1 |  16.9 | **26.1** |
 | TAR2 | >250    |   8.8 |  12.6 |   3.8 | **8.5** |
 
-The mild-hypo (TBR1) band is the one where T1DMSIM's density sits furthest
-above OhioT1DM's; the shape of those events (duration, depth, recovery) is
-compared separately in §7.
-
 ### 0.4 Episode-level event counts
-
-For rare-event detection training (e.g. "will hypo in next N minutes" binary
-heads). Each row is a contiguous excursion ≥ 15 min.
 
 | Event class | Ohio | Shanghai | AZT1D | **Sim** |
 |---|---:|---:|---:|---:|
@@ -114,23 +47,12 @@ heads). Each row is a contiguous excursion ≥ 15 min.
 
 ### 0.5 Effective context window
 
-The lag at which the pooled Pearson autocorrelation drops below a chosen
-threshold — an order-of-magnitude estimate of how far back an autoregressive
-model must look.
-
 | ACF threshold | Ohio | Shanghai | AZT1D | **Sim** |
 |---|---:|---:|---:|---:|
 | 0.5 (50% retained) | 1.9 h | 2.6 h | 1.3 h | **2.0 h** |
 | 0.2 (20% retained) | 3.6 h | 4.8 h | 2.4 h | **3.9 h** |
 
-A 4-8h context window covers the meaningful autoregressive signal; longer
-contexts add little beyond the half-day BG ACF tail visible in §6.1.
-
 ### 0.6 Cross-record heterogeneity
-
-For train/val/test split design: between-patient variance of this size
-relative to within-patient variance calls for *patient-stratified* splits, or
-a model trained on one patient set will not generalize to unseen patients.
 
 | Cohort | Between-patient mean-BG std | Within-patient BG std | Ratio |
 |---|---:|---:|---:|
@@ -141,15 +63,9 @@ a model trained on one patient set will not generalize to unseen patients.
 
 ### 0.7 Diurnal shape (clean line overlay)
 
-The §6.3 envelope figure's ±1σ bands overlap across cohorts; this overlay
-isolates the shape comparison.
-
 ![Diurnal BG curves — clean line overlay](figures/diurnal_lines.png)
 
 ### 0.8 Sim-vs-real domain gap
-
-Wasserstein-1 between the sim and real pooled distributions measures the
-domain gap a sim-trained model faces at inference time on real CGM.
 
 | Pair | KS | Wasserstein-1 (mg/dL) | JS divergence |
 |---|---:|---:|---:|
@@ -160,15 +76,6 @@ domain gap a sim-trained model faces at inference time on real CGM.
 | Ohio vs AZT1D    (real-vs-real baseline) | 0.157 | 18.1 | 0.025 |
 | Shanghai vs AZT1D (real-vs-real baseline) | 0.190 | 26.9 | 0.060 |
 
-Like-for-like against the real-vs-real spread, Sim-vs-real Wasserstein-1 is
-2.0 (min) / 9.9 (mean) mg/dL against a baseline of
-10.1 (min) / 18.4 (mean) mg/dL, so the
-simulator's pooled BG sits inside the band the three real cohorts
-span among themselves (min-vs-min and mean-vs-mean).
-Note the smallest gap is Sim-vs-Ohio (2.0 mg/dL), which falls *below* the 10.1 mg/dL real-vs-real floor — the simulator is tuned against OhioT1DM specifically, so a sub-floor distance reflects that tuning, not general realism beyond that cohort.
-
-
----
 
 ## 1. Corpora at a glance
 
@@ -179,55 +86,9 @@ Note the smallest gap is Sim-vs-Ohio (2.0 mg/dL), which falls *below* the 10.1 m
 | AZT1D | 25 subjects | 5 min Dexcom G6 | 1044.7 | US adults, Mayo Clinic AZ, all on Tandem t:slim X2 Control-IQ (AID) | rich pump event log: bolus type, basal rate, carbs, device mode |
 | T1DMSIM *(this run)* | 300 seeds × 70 days | 5 min | 21000.0 | synthetic, seeds 0–299, 24 h warm-up discarded | `initial_bg = 120 mg/dL`, `bg_observed` (sensor-noised); generator is unbounded |
 
-All three real datasets are gitignored. The simulator is exercised as in
-`scripts/compare_all_datasets.py`: 24 h warm-up to clear the `initial_bg = 120`
-transient, then the next 70 days are captured.
+## 2. Headline numbers
 
----
-
-## 2. Methodology
-
-- **Resampling.** Ohio CGM is irregular Dexcom samples, resampled onto a 5 min
-  grid by nearest-sample snapping (each grid cell takes the nearer real sample,
-  not a linear interpolation) with gaps > 30 min NaN-bridged. Shanghai is
-  resampled the same way to a 15 min grid with > 60 min gaps as NaN. AZT1D is
-  natively 5-min and uses Ohio's 30-min gap rule. The simulator is already on a
-  5 min grid. All statistics ignore NaN.
-- **Cadence-aware comparison.** Rate-of-change Δ-BG, ACF, CONGA, MAGE, and MODD
-  are computed at each cohort's **native** cadence (5 min for Ohio/AZT1D/Sim,
-  15 min for Shanghai). CONGA and MODD are anchored to a fixed real-time lag and
-  are cadence-robust; Δ-BG std and MAGE are cadence-sensitive, so Shanghai's
-  values there are not directly comparable to the 5-min cohorts (flagged inline).
-  Sample entropy is put on a common 15-min effective interval for **every**
-  cohort (§5), so it is cadence-fair. A dedicated cadence-fair block (§12.1)
-  recomputes the cadence-sensitive metrics for all cohorts on one 15-min grid.
-- **Distribution distances.** KS statistic, KS p-value, Wasserstein-1 distance,
-  and Jensen–Shannon divergence (5 mg/dL bins over the full 0–600 mg/dL support,
-  so no cohort's out-of-range tail is dropped), all on the pooled per-cohort
-  CGM-value vector.
-- **Risk indices.** LBGI / HBGI per Kovatchev (1997), J-index = 10⁻³·(μ+σ)²,
-  M-value with reference 120 mg/dL.
-- **MAGE.** Mean amplitude of peak-trough swings exceeding 1·σ_BG.
-- **CONGA-h.** Standard deviation of `bg[t+h] − bg[t]`.
-- **MODD.** Mean of `|bg[t+24h] − bg[t]|`.
-- **Sample entropy.** SampEn(m=2, r=0.2·σ) at a fixed 15-min effective interval
-  for every cohort (5-min cohorts strided to 15 min; Shanghai native), so the
-  value is stable in record length and comparable across cadences. Template
-  matches accumulate within contiguous gap-free segments only, so a sensor
-  dropout never joins samples across a bridged gap.
-- **Episodes.** Contiguous runs across a threshold lasting ≥ 15 min, NaN
-  gaps treated as in-range so a sensor dropout does not split an episode.
-- **AZT1D event log.** The pump CSV columns are parsed straight from `Subject
-  N.csv`: Basal (U/hr), TotalBolusInsulinDelivered, CorrectionDelivered,
-  FoodDelivered, CarbSize, BolusType, DeviceMode. Bolus events are flagged
-  by a non-null BolusType. Meal vs correction-only is decided per event by
-  `FoodDelivered > 0`. Device-mode time share counts every 5-min row.
-
----
-
-## 3. Headline numbers
-
-### 3.1 Pooled central moments
+### 2.1 Pooled central moments
 
 | Metric (mg/dL) | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM | Sim − Ohio | Sim − Shang | Sim − AZT1D |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -242,7 +103,7 @@ transient, then the next 70 days are captured.
 | min | 40.0 | 39.6 | 40.0 | 40.0 | — | — | — |
 | max | 400.0 | 475.2 | 400.0 | 400.0 | — | — | — |
 
-### 3.2 Percentiles of the pooled distribution
+### 2.2 Percentiles of the pooled distribution
 
 | Percentile | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM | Sim − Ohio | Sim − Shang | Sim − AZT1D |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -264,7 +125,7 @@ transient, then the next 70 days are captured.
 
 ![Q-Q vs each real cohort](figures/qq.png)
 
-### 3.3 Distribution-distance statistics
+### 2.3 Distribution-distance statistics
 
 | Pair | KS statistic | KS p-value | Wasserstein-1 (mg/dL) | JS divergence (5 mg/dL bins) |
 |---|---:|---:|---:|---:|
@@ -275,15 +136,7 @@ transient, then the next 70 days are captured.
 | Sim vs Shanghai | 0.073 | 1.7 × 10⁻⁷³ | 10.3 | 0.016 |
 | Sim vs AZT1D | 0.148 | < 10⁻³⁰⁰ | 17.3 | 0.025 |
 
-At these sample sizes (Ohio 85k, AZT1D 301k, Sim 6.05M)
-KS p-values fall to numerical zero in the right tail; the KS and Wasserstein-1
-magnitudes, not p, are the meaningful quantities.
-
----
-
-## 4. Clinical glycemic indices
-
-Per-record means ± std across each cohort.
+## 3. Clinical glycemic indices
 
 | Index | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
 |---|---|---|---|---|
@@ -293,8 +146,6 @@ Per-record means ± std across each cohort.
 | J-index | 49.2 ± 9.2 | 52.6 ± 17.1 | 37.1 ± 9.7 | 48.6 ± 9.3 |
 | M-value (ref 120) | 11.1 ± 3.8 | 15.8 ± 6.2 | 5.8 ± 3.4 | 10.8 ± 3.6 |
 
-Pooled (not per-record) risk indices, for reference:
-
 | | Ohio | Shanghai | AZT1D | Sim |
 |---|---:|---:|---:|---:|
 | LBGI (pooled) | 0.86 | 1.87 | 0.51 | 0.90 |
@@ -302,7 +153,7 @@ Pooled (not per-record) risk indices, for reference:
 | J-index (pooled) | 49.7 | 56.2 | 37.6 | 49.2 |
 | M-value (pooled) | 11.0 | 16.5 | 5.7 | 10.8 |
 
-### 4.1 Time-in-range, per-record cohort summary
+### 3.1 Time-in-range, per-record cohort summary
 
 | Range | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
 |---|---|---|---|---|
@@ -312,13 +163,7 @@ Pooled (not per-record) risk indices, for reference:
 | TAR1 (180–250)    | 27.3 ± 6.1 | 25.1 ± 11.7 | 16.9 ± 7.4 | 26.1 ± 5.9 |
 | TAR2 (>250)       | 8.83 ± 6.09 | 12.64 ± 8.91 | 3.77 ± 4.32 | 8.52 ± 4.77 |
 
-The §0.3 stacked bar plots these same numbers.
-
----
-
-## 5. Variability and complexity
-
-Per-record mean ± std.
+## 4. Variability and complexity
 
 | Metric (native cadence) | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
 |---|---|---|---|---|
@@ -329,24 +174,11 @@ Per-record mean ± std.
 | MODD (mg/dL)        | 61.1 ± 8.9     | 53.3 ± 12.8     | 42.1 ± 8.5     | **62.4 ± 8.8**     |
 | Sample entropy      | 0.56 ± 0.09 | 0.44 ± 0.08 | 0.75 ± 0.11 | 0.64 ± 0.05 |
 
-¹ Shanghai's MAGE is computed on its native 15-min samples; coarser sampling
-  drops small intermediate turning points and lengthens the surviving swings,
-  inflating MAGE ~6–10% relative to a 5-min measurement of the same process, so
-  it is not directly comparable to the 5-min cohorts. Sample entropy carries no
-  such caveat — it uses a common 15-min effective interval for every cohort, so
-  Shanghai's lower value is a genuine complexity difference, not a cadence
-  artefact. §12.1 recomputes MAGE (and the other cadence-sensitive metrics) for
-  all cohorts on one 15-min grid.
-
 ![Variability and complexity panel](figures/variability_metrics.png)
 
----
+## 5. Temporal dynamics
 
-## 6. Temporal dynamics
-
-### 6.1 Autocorrelation
-
-Pooled (mean across records) Pearson autocorrelation at the indicated lag.
+### 5.1 Autocorrelation
 
 | Lag         | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
 |---|---|---|---|---|
@@ -362,22 +194,15 @@ Pooled (mean across records) Pearson autocorrelation at the indicated lag.
 
 ![Autocorrelation across lag](figures/acf.png)
 
-### 6.2 Rate-of-change (Δ-BG)
+### 5.2 Rate-of-change (Δ-BG)
 
 ![Δ-BG distribution at native cadence](figures/delta_distribution.png)
 
-Per-record Δ-BG standard deviation (mean across records, native cadence):
-Ohio 5.89 mg/dL · Shanghai 10.65 mg/dL ·
-AZT1D 6.02 mg/dL · Sim 5.43 mg/dL.
-Shanghai's is at 15-min cadence, not directly comparable to the 5-min values.
-
-### 6.3 Diurnal pattern (hour-of-day across records)
+### 5.3 Diurnal pattern (hour-of-day across records)
 
 ![Hour-of-day mean with ±1σ envelope](figures/diurnal_envelope.png)
 
 ![Hour-of-day median with IQR envelope](figures/diurnal_envelope_median.png)
-
-Hour-by-hour mean BG (mg/dL):
 
 |   | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -385,8 +210,6 @@ Hour-by-hour mean BG (mg/dL):
 | Shanghai | 166 | 164 | 163 | 159 | 156 | 158 | 165 | 169 | 192 | 175 | 144 | 137 | 149 | 143 | 147 | 157 | 166 | 179 | 184 | 175 | 170 | 169 | 168 | 167 |
 | AZT1D | 145 | 141 | 137 | 134 | 130 | 128 | 128 | 132 | 144 | 155 | 157 | 148 | 141 | 149 | 161 | 162 | 155 | 147 | 150 | 158 | 161 | 157 | 155 | 152 |
 | Sim | 146 | 148 | 148 | 152 | 159 | 168 | 178 | 184 | 186 | 185 | 180 | 174 | 168 | 163 | 159 | 156 | 154 | 153 | 152 | 151 | 150 | 148 | 147 | 146 |
-
-Hour-by-hour median BG (mg/dL):
 
 |   | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -399,13 +222,9 @@ Hour-by-hour median BG (mg/dL):
 
 ![Weekday × hour median heatmap](figures/weekday_heatmap_median.png)
 
----
+## 6. Excursion-level dynamics
 
-## 7. Excursion-level dynamics
-
-### 7.1 Episode counts and durations
-
-Per-record means ± std.
+### 6.1 Episode counts and durations
 
 | Metric | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
 |---|---|---|---|---|
@@ -420,11 +239,9 @@ Per-record means ± std.
 
 ![Episode duration boxplots](figures/episode_durations.png)
 
-### 7.2 Hypo recovery time
+### 6.2 Hypo recovery time
 
 ![Hypo recovery time from BG<70 to BG≥80](figures/recovery_time.png)
-
-Time from the first sub-70 sample to the next ≥ 80 sample:
 
 | Cohort | n events | median (min) | p75 (min) | p90 (min) | p99 (min) | max (min) |
 |---|---:|---:|---:|---:|---:|---:|
@@ -433,17 +250,7 @@ Time from the first sub-70 sample to the next ≥ 80 sample:
 | AZT1D    |   517 | 40 | 55 | 90 | 193 | 235 |
 | Sim      | 18,345 | 65 | 85 | 140 | 275 | 900 |
 
-### 7.3 Unexplained excursions
-
-A fraction of CGM excursions (≥ 40 mg/dL monotone swings, MAGE-style
-turning-point detection) carry no proximate logged cause: a rise with no meal
-(≥ 10 g) logged within [−60, +15] min of onset, or a fall
-with no bolus (≥ 0.5 U) within [−90, +15] min and no
-exercise within [−60, +15] min. This counts both unlogged events and genuinely
-endogenous movements (dawn phenomenon, post-hypo rebound, stress, illness,
-sensor artefact). ShanghaiT1DM is omitted — its dietary column is almost
-entirely "data not available". The simulator is held to the identical test,
-its events taken as the rising edges of the corresponding factor channels.
+### 6.3 Unexplained excursions
 
 ![Unexplained-excursion summary](figures/unexplained_summary.png)
 
@@ -462,18 +269,7 @@ its events taken as the rising edges of the corresponding factor channels.
 | Δ-BG SD, full trace (mg/dL) | 5.89 | 6.02 | 5.43 |
 | Δ-BG SD, unexplained censored (mg/dL) | 5.85 | 5.64 | 5.35 |
 
-Across the two real cohorts with complete logs, roughly 52% of
-excursions carry no proximate logged cause, and the rise-vs-fall asymmetry is
-starkest in the closed-loop AID cohort (AZT1D
-79% of rises vs 28% of falls),
-where the pump logs insulin automatically while meals stay user-announced.
-Mean unexplained load across those two cohorts is 367 mg/dL/day. In every
-cohort the step-to-step Δ-BG SD is essentially unchanged when
-unexplained-excursion segments are censored (last two rows).
-
----
-
-## 8. Per-record (per-patient) heterogeneity
+## 7. Per-record (per-patient) heterogeneity
 
 ![Per-record TIR vs TBR scatter](figures/per_patient_scatter.png)
 
@@ -486,19 +282,9 @@ unexplained-excursion segments are censored (last two rows).
 
 ![LBGI and HBGI per-record boxplots](figures/risk_indices.png)
 
----
-
-## 9. AZT1D insulin / carb behaviour panel
-
-OhioT1DM and ShanghaiT1DM only expose CGM-level traces; AZT1D additionally
-publishes the full pump event log (columns in §2). The simulator generates
-matching channels by construction (`basal_insulin`, `bolus_insulin`,
-`total_carb`), so this section compares the comparable quantities head-to-head
-and reports the AZT1D-only quantities alongside.
+## 8. AZT1D insulin / carb behaviour panel
 
 ![AZT1D vs Sim insulin / carb panel](figures/azt1d_event_panel.png)
-
-**Comparable quantities** (integrated daily totals + basal-rate distribution):
 
 | Quantity | AZT1D | T1DMSIM | Δ (Sim − AZT1D) |
 |---|---:|---:|---:|
@@ -508,22 +294,6 @@ and reports the AZT1D-only quantities alongside.
 | Carbs / day (g, per-subject mean) | 121.8 | 211.5 | +89.7 |
 | Total insulin / day (U)           | 51.9 | 56.1 | +4.2 |
 
-AZT1D's pooled basal-rate distribution was clipped at
-10 U/hr before pooling
-(3.2% of the basal column discarded as clearly
-non-physiological — values up to 4000+ U/hr in a few subjects, likely
-PDF-to-CSV extraction artefacts). The Tandem AID adjusts basal every 5 min, so
-AZT1D's basal column is a long sequence of distinct rates; the simulator's
-`basal_insulin` channel is the per-step PK-curve sample from user-injected
-long-acting basal and integrates to a daily total fixed **by construction**
-(matched to the patient's HGO via the
-`basal = HGO_base × 24h × (BW/BW₀) × is_base / ICR` invariant), so this panel
-checks that derivation against real T1D patients.
-
-**AZT1D-only quantities** (user-initiated bolus events; AID auto-boluses are
-filtered out — the simulator models MDI without a closed-loop controller and
-has no auto-bolus channel to compare to):
-
 | Quantity | AZT1D (per-subject mean) |
 |---|---:|
 | User-initiated boluses / day        | 7.22 |
@@ -532,31 +302,26 @@ has no auto-bolus channel to compare to):
 | Mean carbs / meal (g)               | 29.1 |
 | Correction-unit share of total bolus | 13.8% |
 
-Per-bolus and per-meal counts are deliberately not computed for the simulator:
-its `bolus_insulin` / `total_carb` channels expose per-step active PK /
-absorption levels rather than discrete injection events, and threshold-based
-clustering merges events whose curves overlap. The **daily-total** comparison
-above is well-posed; a per-event one is not.
+| Bolus type (whole AZT1D pool, incl. AID-driven) | Count |
+|---|---:|
+| Automatic Bolus/Correction | 3,478 |
+| Standard | 3,301 |
+| Standard/Correction | 2,746 |
+| BLE Standard Bolus/Correction | 787 |
+| BLE Standard Bolus | 749 |
+| Quick | 14 |
+| Extended 50.00%/0.00 | 4 |
+| Extended 50.00%/12.00 | 3 |
+| Extended/Correction 65.00%/3.18 | 3 |
+| Extended 50.00%/20.00 | 2 |
 
-- **Bolus type counts** (across the whole AZT1D pool, including AID-driven
-  events):
-  - Automatic Bolus/Correction: 3,478
-  - Standard: 3,301
-  - Standard/Correction: 2,746
-  - BLE Standard Bolus/Correction: 787
-  - BLE Standard Bolus: 749
-  - Quick: 14
-  - Extended 50.00%/0.00: 4
-  - Extended 50.00%/12.00: 3
-  - Extended/Correction 65.00%/3.18: 3
-  - Extended 50.00%/20.00: 2
-- **Device-mode time share:** regular 79.7%, sleep 19.7%, exercise 0.6%
+| Device-mode time share | AZT1D % |
+|---|---:|
+| regular | 79.7 |
+| sleep | 19.7 |
+| exercise | 0.6 |
 
----
-
-## 10. Side-by-side summary
-
-Raw deltas only — no qualitative verdicts. See sections 3–9 for context.
+## 9. Side-by-side summary
 
 | Quantity | T1DMSIM | OhioT1DM | ShanghaiT1DM | AZT1D | Sim − Ohio | Sim − Shang | Sim − AZT1D |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -587,54 +352,14 @@ Raw deltas only — no qualitative verdicts. See sections 3–9 for context.
 | Hyper p90 duration (min) | 421.6 | 421.8 | 622.6 | 226.9 | -0.2 | -201.0 | +194.7 |
 | Hypo recovery median (min) | 65.0 | 55.0 | 90.0 | 40.0 | +10.0 | -25.0 | +25.0 |
 
-Pooled distribution distances are pairwise, not per-cohort, so they do not fit
-the layout above and are tabulated separately against the real-vs-real
-baselines — a Sim-vs-real distance is only "close" relative to how far the
-real cohorts sit from each other:
-
 | Pooled distance | Sim vs Ohio | Sim vs Shanghai | Sim vs AZT1D | Ohio–Shang | Ohio–AZT1D | Shang–AZT1D |
 |---|---:|---:|---:|---:|---:|---:|
 | Wasserstein-1 (mg/dL) | 2.0 | 10.3 | 17.3 | 10.1 | 18.1 | 26.9 |
 | KS statistic | 0.018 | 0.073 | 0.148 | 0.064 | 0.157 | 0.190 |
 
----
+## 10. Extended statistics
 
-## 11. Limitations of this comparison
-
-- **Cohort size.** OhioT1DM (n = 6), ShanghaiT1DM (n = 16), and
-  AZT1D (n = 25) are small enough that cohort means have non-trivial
-  sampling error; each "real" distribution should be taken as a band, not a
-  point. The simulator side is 300 seeds.
-- **Cadence asymmetry.** Shanghai's 15-min cadence deflates Δ-BG std and
-  inflates MAGE (~6–10%) relative to 5-min cohorts; cross-cadence ACF below
-  30 min is not directly comparable. Sample entropy is put on a common 15-min
-  effective interval for every cohort, so it is cadence-fair. §12.1 recomputes
-  the cadence-sensitive metrics for all cohorts on one 15-min grid.
-- **No glucose-controller benchmark.** The simulator output is compared to
-  three real human cohorts but not to UVA/Padova `simglucose` here.
-- **AID asymmetry.** AZT1D subjects are all on closed-loop AID (Tandem
-  Control-IQ); OhioT1DM is a mix of pump + announced meals; ShanghaiT1DM
-  mixes CSII and MDI; the simulator models MDI long-acting basal + per-meal
-  bolus. Differences in basal-rate variability and time-in-range partly
-  reflect these different therapy regimens, not just simulator vs reality.
-- **Sample entropy window.** Strided to a fixed 15-min effective interval and
-  capped to the first 4,000 valid samples per record (deterministic — no random
-  subsampling), so it is a stable estimate over a bounded window rather than the
-  exact value over the full trace.
-
----
-
-## 12. Extended statistics
-
-Four metric families added on top of §§3–11 for extra resolution. All are
-computed by `diff/extended_stats.py`, ignore NaN, and never join samples
-across a gap.
-
-### 12.1 Cadence-fair variability (common 15-min grid)
-
-Every cohort — the 5-min ones and the simulator included — is decimated to one
-common 15-min grid before the cadence-sensitive §5 metrics are recomputed, so
-all four columns are directly comparable.
+### 10.1 Cadence-fair variability (common 15-min grid)
 
 | Metric (15-min grid) | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
 |---|---:|---:|---:|---:|
@@ -647,10 +372,7 @@ all four columns are directly comparable.
 | Hypo eps / day | 0.96 | 1.02 | 0.64 | **1.02** |
 | Hyper eps / day | 2.81 | 1.87 | 2.74 | **2.65** |
 
-### 12.2 Additional two-sample distances (pooled BG)
-
-Distances with different tail weighting, complementing KS and Wasserstein-1
-(§3.3). Sim-vs-real is read against the real-vs-real baselines on the right.
+### 10.2 Additional two-sample distances (pooled BG)
 
 | Distance | Sim vs Ohio | Sim vs Shang | Sim vs AZT1D | Ohio–Shang | Ohio–AZT1D | Shang–AZT1D |
 |---|---:|---:|---:|---:|---:|---:|
@@ -661,12 +383,7 @@ Distances with different tail weighting, complementing KS and Wasserstein-1
 | Hellinger | 0.045 | 0.136 | 0.158 | 0.140 | 0.160 | 0.251 |
 | Histogram overlap | 0.965 | 0.874 | 0.813 | 0.873 | 0.809 | 0.721 |
 
-CvM/AD scale with sample size, so every pair is evaluated at one common
-15,696-sample-per-arm subsample (the smallest pooled cohort); energy
-distance and the histogram rows (total variation, Hellinger, overlap) are
-sample-size-stable and use the full pooled vectors.
-
-### 12.3 Temporal structure (common 15-min grid)
+### 10.3 Temporal structure (common 15-min grid)
 
 | Metric | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
 |---|---:|---:|---:|---:|
@@ -678,12 +395,7 @@ sample-size-stable and use the full pooled vectors.
 | DFA α (Hurst) | 1.432 | 1.537 | 1.325 | **1.465** |
 | ACF e-folding (1/e) | 2.7 h | 3.4 h | 1.7 h | **2.8 h** |
 
-SD1 is short-term (step-to-step) variability, SD2 long-term; DFA α ≈ 0.5 white,
-1.0 pink/1-f, 1.5 Brownian. Glycemic-band transition structure (15-min grid):
-
 ![Band transition heatmaps](figures/band_transitions.png)
-
-Mean dwell time per band (minutes before leaving):
 
 | Band | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
 |---|---:|---:|---:|---:|
@@ -693,14 +405,11 @@ Mean dwell time per band (minutes before leaving):
 | TAR1 | 106 | 122 | 72 | 98 |
 | TAR2 | 108 | 165 | 84 | 104 |
 
-Transition-matrix distance from Sim: Ohio 0.504 · Shanghai 0.766 ·
-AZT1D 0.499 (Frobenius; lower = more similar dynamics).
+| Transition-matrix distance from Sim (Frobenius) | OhioT1DM | ShanghaiT1DM | AZT1D |
+|---|---:|---:|---:|
+| Distance | 0.504 | 0.766 | 0.499 |
 
-### 12.4 Cross-seed bootstrap 95% CIs
-
-95% CIs from resampling whole records/seeds with replacement, so the interval
-reflects between-record (between-seed) uncertainty and its width tracks the
-record count.
+### 10.4 Cross-seed bootstrap 95% CIs
 
 | Statistic | OhioT1DM | ShanghaiT1DM | AZT1D | T1DMSIM |
 |---|---|---|---|---|
@@ -709,13 +418,7 @@ record count.
 | TIR % (70–180) | 60.9 [51.1, 68.3] | 53.6 [46.0, 60.8] | 78.2 [73.6, 82.2] | **61.4 [60.4, 62.2]** |
 | LBGI | 0.86 [0.49, 1.29] | 1.87 [0.98, 2.74] | 0.51 [0.37, 0.67] | **0.90 [0.83, 0.98]** |
 
-### 12.5 Standardised strength / weakness gap score
-
-Per metric, z = (sim − mean of the three real cohorts) / SD across those three
-cohorts: |z| < 1 sits inside the band the real cohorts span among themselves,
-and |z| ≥ 2 outside all three. "within envelope" is the assumption-free check
-(sim within [min, max] of the real cohorts). Sorted by |z|, largest first.
-Of 20 metrics: 20 within (|z|<1), 0 at the edge (1–2), 0 outside (|z|≥2).
+### 10.5 Standardised strength / weakness gap score
 
 ![Standardised gap score](figures/gap_score.png)
 
@@ -742,27 +445,3 @@ Of 20 metrics: 20 within (|z|<1), 0 at the edge (1–2), 0 outside (|z|≥2).
 | cv_pct | 38.17 | 37.55 | 43.89 | 32.51 | +0.03 | yes |
 | TAR2% | 8.52 | 8.63 | 13.48 | 3.65 | -0.01 | yes |
 
-The SD across only three real cohorts is coarse, so z is an order-of-magnitude
-locator, not a test statistic; the "within envelope" column and the §3.3 /
-§12.2 distances against the real-vs-real baselines are the robust reads.
-
-
----
-
-## 13. Reproduction
-
-```bash
-# regenerates diff/stats.json + diff/README.md + diff/figures/*.png
-python diff/build_report.py                       # default 100 seeds x 70 d
-python diff/build_report.py --n-seeds 300 --days 70   # larger synthetic corpus
-```
-
-`scripts/compare_all_datasets.py` is reused for the dataset loaders and grid
-regularisation. The three real datasets must live under `datasets/`
-(`datasets/ohiot1dm/`, `datasets/ShanghaiT1DM/Shanghai_T1DM/`, and
-`datasets/AZT1D/CGM Records/Subject N/`) — all gitignored, all subject to
-their respective data-use agreements.
-
-Every number here comes from one run (300 seeds, 70 days each, 24 h
-warm-up discarded). Re-running reproduces them exactly: the simulator is
-seed-deterministic and the real-data side is fixed.
