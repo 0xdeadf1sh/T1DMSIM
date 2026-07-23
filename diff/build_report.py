@@ -1288,7 +1288,7 @@ def cohort_summary(per):
             if isinstance(v, (int, float)) and not isinstance(v, bool):
                 keys.add(k)
     out = {}
-    for k in keys:
+    for k in sorted(keys):  # set order is hash-seed dependent; stats.json must be stable
         vals = [p[k] for p in per if k in p and isinstance(p[k], (int, float))
                 and not isinstance(p[k], bool) and not np.isnan(p[k])]
         if not vals:
@@ -1478,6 +1478,7 @@ def fig_delta_distribution(cohorts, path):
 
 def fig_risk_indices(cohorts, path):
     fig, axes = plt.subplots(1, 2, figsize=(12, 5.5))
+    jitter = np.random.default_rng(0)  # seeded: the figure must be reproducible
     for ax, key, title in [(axes[0], "LBGI", "LBGI — low BG risk index"),
                            (axes[1], "HBGI", "HBGI — high BG risk index")]:
         data = []
@@ -1492,7 +1493,7 @@ def fig_risk_indices(cohorts, path):
             patch.set_alpha(0.6)
         for i, vals in enumerate(data, start=1):
             for v in vals:
-                ax.plot(i + np.random.uniform(-0.07, 0.07), v, ".",
+                ax.plot(i + jitter.uniform(-0.07, 0.07), v, ".",
                         color="black", alpha=0.55, ms=4)
         ax.set_title(title, fontweight="bold")
         ax.grid(alpha=0.3, axis="y")
