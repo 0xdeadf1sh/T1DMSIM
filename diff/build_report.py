@@ -2582,7 +2582,7 @@ def _build_extended_section(ext, cohorts):
 
 ![Standardised gap score](figures/gap_score.png)
 
-| Metric | Sim | Ohio | Shanghai | AZT1D | z | within envelope |
+| Metric | Sim | Ohio | Shanghai | AZT1D | z | within envelope (±{es.ENVELOPE_REL_TOL:.0%} of span) |
 |---|---:|---:|---:|---:|---:|:--:|
 {gap_rows}
 """

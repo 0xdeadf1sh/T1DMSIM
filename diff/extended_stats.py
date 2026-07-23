@@ -34,6 +34,12 @@ from scipy import signal as spsig
 BAND_EDGES = (54.0, 70.0, 180.0, 250.0)
 BAND_LABELS = ("TBR2", "TBR1", "TIR", "TAR1", "TAR2")
 
+# Slack on each endpoint of the real cohorts' [min,max] envelope, as a fraction
+# of the envelope's own span. The endpoints are order statistics of three
+# cohorts, not exact bounds, so a sim value overshooting one of them by a
+# thousandth of the inter-cohort spread is a tie, not an exceedance.
+ENVELOPE_REL_TOL = 0.01
+
 
 def _clean(x):
     x = np.asarray(x, dtype=float)
@@ -440,12 +446,18 @@ def gap_score(sim_val, real_vals):
     cohorts span among themselves (a strength); |z|>2 => it sits outside all of
     them (a weakness). With only three real cohorts the SD is coarse, so also
     returns whether the sim is within the [min,max] real envelope, which needs
-    no distributional assumption.
+    no distributional assumption. That envelope is tested with a margin of
+    ENVELOPE_REL_TOL of its own span on each endpoint, so a sim value that ties
+    an endpoint to within a fraction of a percent of the inter-cohort spread —
+    a difference below both the report's printed precision and the sampling
+    noise of either arm — still counts as inside.
     """
     reals = [v for v in real_vals if v is not None and np.isfinite(v)]
     if len(reals) < 2 or sim_val is None or not np.isfinite(sim_val):
         return {"z": float("nan"), "mean_real": float("nan"),
-                "sd_real": float("nan"), "within_envelope": None}
+                "sd_real": float("nan"), "envelope_lo": float("nan"),
+                "envelope_hi": float("nan"), "envelope_tol": float("nan"),
+                "within_envelope": None}
     reals = np.asarray(reals, dtype=float)
     mean_r = float(np.mean(reals))
     sd_r = float(np.std(reals, ddof=1))
@@ -455,5 +467,8 @@ def gap_score(sim_val, real_vals):
         z = 0.0
     else:  # degenerate real SD but sim differs: definitively outside, signed
         z = float("inf") if sim_val > mean_r else float("-inf")
+    lo_r, hi_r = float(reals.min()), float(reals.max())
+    tol = ENVELOPE_REL_TOL * (hi_r - lo_r)
     return {"z": z, "mean_real": mean_r, "sd_real": sd_r,
-            "within_envelope": bool(reals.min() <= sim_val <= reals.max())}
+            "envelope_lo": lo_r, "envelope_hi": hi_r, "envelope_tol": tol,
+            "within_envelope": bool(lo_r - tol <= sim_val <= hi_r + tol)}

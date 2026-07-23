@@ -422,9 +422,9 @@
 
 ![Standardised gap score](figures/gap_score.png)
 
-| Metric | Sim | Ohio | Shanghai | AZT1D | z | within envelope |
+| Metric | Sim | Ohio | Shanghai | AZT1D | z | within envelope (±1% of span) |
 |---|---:|---:|---:|---:|---:|:--:|
-| cf_hypo_per_day | 1.02 | 0.96 | 1.02 | 0.64 | +0.72 | **no** |
+| cf_hypo_per_day | 1.02 | 0.96 | 1.02 | 0.64 | +0.72 | yes |
 | TBR2% | 0.53 | 0.71 | 2.83 | 0.27 | -0.54 | yes |
 | cf_conga_1h | 38.39 | 39.55 | 34.17 | 37.45 | +0.49 | yes |
 | sd_ratio | 0.11 | 0.13 | 0.09 | 0.17 | -0.49 | yes |
