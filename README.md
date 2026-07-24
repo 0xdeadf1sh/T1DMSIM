@@ -39,7 +39,7 @@ This one models the *person*, not the pancreas. Most real-world blood sugar vari
 
 ## Paper
 
-[**T1DMSIM: A Behavioral Simulator for Synthetic Type 1 Diabetes Glucose Data Generation**](paper/main.pdf) (PDF, 15 pages) — the design of the model, its calibration, and the benchmarks against the three real CGM cohorts and the UVA/Padova simulator, in a single document. Running prose is colour-attributed by author: green is the human author, orange the model co-author.
+[T1DMSIM: A Behavioral Simulator for Synthetic Type 1 Diabetes Glucose Data Generation](paper/main.pdf)
 
 
 ## Pregenerated Datasets
