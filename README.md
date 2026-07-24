@@ -13,6 +13,7 @@ Designed by a T1DM patient, informed by lived experience.
 ## Table of contents
 
 - [Motivation](#motivation)
+- [Paper](#paper)
 - [Pregenerated Datasets](#pregenerated-datasets)
 - [Design Principles](#design-principles)
 - [Architecture](#architecture)
@@ -34,6 +35,11 @@ Designed by a T1DM patient, informed by lived experience.
 Most T1DM simulators model physiology: glucose kinetics, insulin pharmacokinetics, compartmental models. They produce accurate BG traces but need dozens of physiological parameters that are hard to measure and vary between patients.
 
 This one models the *person*, not the pancreas. Most real-world blood sugar variance comes from behavioral decisions -- what the patient eats, when they bolus, how they correct, whether they exercise -- not from subtle physiological differences. Generating diverse behavioral patterns and computing BG as a consequence yields training data whose target is what patients *do*, with blood sugar as the outcome: a near-unlimited stream of synthetic factor curves for pretraining personalized blood sugar prediction models, with real patient data reserved for fine-tuning.
+
+
+## Paper
+
+[**T1DMSIM: A Behavioral Simulator for Synthetic Type 1 Diabetes Glucose Data Generation**](paper/main.pdf) (PDF, 15 pages) — the design of the model, its calibration, and the benchmarks against the three real CGM cohorts and the UVA/Padova simulator, in a single document. Running prose is colour-attributed by author: green is the human author, orange the model co-author.
 
 
 ## Pregenerated Datasets

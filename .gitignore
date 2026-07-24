@@ -27,8 +27,9 @@ datasets/
 *.npy
 *.tar.gz
 
-# Ignore the paper for now
-paper/
+# Paper sources stay local; only the built PDF is published
+paper/*
+!paper/main.pdf
 
 # Private working notes (never shipped)
 scratch/
