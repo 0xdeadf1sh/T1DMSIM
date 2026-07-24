@@ -112,6 +112,14 @@ h1 .g { background: linear-gradient(92deg, #aaff3c, #5affdc 55%, #28d2ff); -webk
 .strip .n small { font-size: .55em; font-weight: 500; color: var(--muted); letter-spacing: 0; }
 .strip .k { display: block; font-size: 12px; color: var(--muted); margin-top: .5rem; line-height: 1.35; }
 
+/* ---- related projects ---- */
+.rel { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 1rem; margin-top: 2.5rem; }
+.rel a { display: block; background: var(--surface); border: 1px solid var(--rule); border-radius: 12px; padding: 1.35rem 1.4rem; }
+.rel a:hover { border-color: var(--accent); text-decoration: none; }
+.rel .name { display: block; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 1rem; font-weight: 600; letter-spacing: -.01em; color: var(--ink); }
+.rel a:hover .name { color: var(--accent); }
+.rel .desc { display: block; font-size: 13px; color: var(--muted); margin-top: .55rem; line-height: 1.45; }
+
 .trio { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: .75rem; margin-top: 3.5rem; }
 .trio div { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 1.35rem 1.4rem; }
 .trio .n { display: block; font-size: 1.55rem; font-weight: 650; letter-spacing: -.035em; line-height: 1; }
@@ -653,6 +661,31 @@ day = sim.generate_hours(<span class="cm">24</span>)   <span class="cm"># dict o
       <img src="screenshots/t1dm_seed42_36h.png" alt="The Pygame visualizer showing 36 hours of blood glucose, carbohydrate, insulin and resistance curves for seed 42, with the patient profile and live statistics in a sidebar." loading="lazy">
     </figure>
     <p class="btns"><a class="btn ghost" href="https://github.com/0xdeadf1sh/T1DMSIM#installation-and-usage">Install and run</a></p>
+  </div>
+</section>
+
+<section id="related">
+  <div class="wrap">
+    <p class="eyebrow">The rest of the stack</p>
+    <h2>Related projects</h2>
+    <p class="sub">T1DMSIM is the data end of it: a model trained on this output, the phone that runs
+    that model against a live sensor, and the appliance it syncs to.</p>
+    <div class="rel">
+      <a href="https://github.com/0xdeadf1sh/T1DMAI">
+        <span class="name">T1DMAI ↗</span>
+        <span class="desc">The transformer that consumes this simulator's output — training, evaluation,
+        and the ExecuTorch exporter that produces the on-device artifact.</span>
+      </a>
+      <a href="https://github.com/0xdeadf1sh/T1DMDROID">
+        <span class="name">T1DMDROID ↗</span>
+        <span class="desc">The Android app that runs that exported model on-device against a live
+        CGM feed.</span>
+      </a>
+      <a href="https://github.com/0xdeadf1sh/T1DMSERVER">
+        <span class="name">T1DMSERVER ↗</span>
+        <span class="desc">The optional self-hosted sync backend and terminal dashboard for that app.</span>
+      </a>
+    </div>
   </div>
 </section>
 
