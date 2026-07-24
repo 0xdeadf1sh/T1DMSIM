@@ -11,7 +11,7 @@
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://0xdeadf1sh.github.io/T1DMSIM/">
 <meta property="og:title" content="T1DMSIM — synthetic Type 1 Diabetes glucose data">
-<meta property="og:description" content="Model the patient, not the pancreas. Seed-deterministic, roughly 800× faster than UVA/Padova, indistinguishable from real CGM on 20 of 20 metrics.">
+<meta property="og:description" content="Model the patient, not the pancreas. Seed-deterministic, unbounded, fully labelled — and indistinguishable from real CGM on 20 of 20 metrics.">
 <meta property="og:image" content="https://0xdeadf1sh.github.io/T1DMSIM/screenshots/architecture.png">
 <meta name="twitter:card" content="summary_large_image">
 <style>
@@ -421,7 +421,6 @@ footer a { color: var(--muted); }
 <div class="strip">
   <div><span class="n">666 M</span><span class="k">CGM readings per published corpus</span></div>
   <div><span class="n">6,336 <small>yr</small></span><span class="k">Patient-years per corpus</span></div>
-  <div><span class="n">≈×800</span><span class="k">Faster than the UVA/Padova ODE core</span></div>
   <div><span class="n">20 / 20</span><span class="k">Metrics inside the real cohorts' own spread</span></div>
 </div>
 
@@ -550,8 +549,6 @@ glucose_out = insulin × ICR / sensitivity
 
     <div class="trio">
       <div><span class="n">13.7 <small>vs 30.0</small></span><span class="k">W₁ to real CGM — T1DMSIM vs UVA/Padova, against an 18.4 floor</span></div>
-      <div><span class="n">4.9 <small>ms</small></span><span class="k">Per simulated day, against 3,720 ms</span></div>
-      <div><span class="n">59,364 <small>steps/s</small></span><span class="k">Single-threaded, steady state</span></div>
     </div>
     <p class="tiny" style="margin-top:.9rem">T1DMSIM was calibrated against Ohio. Read every gap accordingly.
     <a href="https://github.com/0xdeadf1sh/T1DMSIM/blob/main/uva_padova/REALISM.md">Method →</a></p>
