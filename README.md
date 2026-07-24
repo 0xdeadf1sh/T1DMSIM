@@ -27,6 +27,7 @@ Designed by a T1DM patient, informed by lived experience.
 - [Comparison Against the UVA/Padova Simulator](#comparison-against-the-uvapadova-simulator)
 - [Testing](#testing)
 - [References](#references)
+- [Related Projects](#related-projects)
 - [License](#license)
 
 
@@ -256,6 +257,13 @@ The in-silico comparison in [`uva_padova/README.md`](uva_padova/README.md) bench
 - **UVA/Padova Type 1 Diabetes Simulator** — Dalla Man, C., Rizza, R. A., and Cobelli, C. *Meal Simulation Model of the Glucose–Insulin System.* IEEE Transactions on Biomedical Engineering 54(10), 1740–1749 (2007). doi:10.1109/TBME.2007.893506. Simulator update: Dalla Man, C., Micheletto, F., Lv, D., Breton, M., Kovatchev, B., and Cobelli, C. *The UVA/PADOVA Type 1 Diabetes Simulator: New Features.* Journal of Diabetes Science and Technology 8(1), 26–34 (2014). doi:10.1177/1932296813514502. The FDA-accepted 2008 version of this model is the in-silico reference used here.
 
 - **simglucose** — Xie, J. *simglucose: A Type-1 Diabetes Simulator as a Reinforcement Learning Environment in OpenAI Gym* (2018). An open-source Python implementation of the FDA-accepted UVA/Padova (2008) model. GitHub: <https://github.com/jxx123/simglucose> — the engine driven by the comparison scripts in `uva_padova/`.
+
+
+## Related Projects
+
+- **[T1DMAI](https://github.com/0xdeadf1sh/T1DMAI)** — the transformer that consumes this simulator's output: training, evaluation, and the ExecuTorch exporter that produces the on-device artifact.
+- **[T1DMDROID](https://github.com/0xdeadf1sh/T1DMDROID)** — the Android app that runs that exported model on-device against a live CGM feed.
+- **[T1DMSERVER](https://github.com/0xdeadf1sh/T1DMSERVER)** — the optional self-hosted sync backend and terminal dashboard for that app.
 
 
 ## License
