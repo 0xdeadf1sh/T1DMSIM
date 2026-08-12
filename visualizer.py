@@ -125,16 +125,16 @@ STEPS_PER_DAY = 24 * 60 // DT_MINUTES  # 288
 # ============================================================================
 
 CURVES = [
-    {'key': 'bg_observed', 'name': 'Blood Glucose',     'color': COLOR_BG_OBS,  'unit': 'mg/dL', 'y_min': 20,  'y_max': 500, 'toggle_key': pygame.K_1},
+    {'key': 'bg_observed', 'name': 'Blood Glucose',     'color': COLOR_BG_OBS,  'unit': 'mg/dL', 'y_min': BG_CLAMP_MIN, 'y_max': BG_CLAMP_MAX, 'toggle_key': pygame.K_1},
     {'key': 'total_carb',  'name': 'Carb Intake',       'color': COLOR_CARB,    'unit': 'g/step','y_min': 0,   'y_max': 20,   'toggle_key': pygame.K_2},
     {'key': 'total_insulin','name': 'Insulin (total)',  'color': COLOR_INSULIN, 'unit': 'U/step','y_min': 0,   'y_max': 2,   'toggle_key': pygame.K_3},
-    {'key': 'basal_insulin','name': 'Basal',             'color': (120, 235, 255), 'unit': 'U/step','y_min': 0, 'y_max': 0.3, 'toggle_key': pygame.K_4},
+    {'key': 'basal_insulin','name': 'Basal',             'color': (120, 235, 255), 'unit': 'U/step','y_min': 0, 'y_max': 0.5, 'toggle_key': pygame.K_4},
     {'key': 'bolus_insulin','name': 'Bolus',             'color': (60, 180, 255),  'unit': 'U/step','y_min': 0, 'y_max': 2,   'toggle_key': pygame.K_5},
     {'key': 'insulin_resistance','name': 'Insulin Resistance','color': COLOR_IS,'unit': '×',  'y_min': 0,   'y_max': 3,   'toggle_key': pygame.K_6},
     {'key': 'total_exercise','name': 'Exercise',        'color': COLOR_EXERCISE,'unit': 'g/step','y_min': 0,   'y_max': 10,   'toggle_key': pygame.K_7},
-    {'key': 'bg_delta',    'name': 'BG Delta',          'color': COLOR_DELTA,   'unit': 'mg/dL', 'y_min': -20, 'y_max': 10,  'toggle_key': pygame.K_8},
+    {'key': 'bg_delta',    'name': 'BG Delta',          'color': COLOR_DELTA,   'unit': 'mg/dL', 'y_min': -30, 'y_max': 45,  'toggle_key': pygame.K_8},
     {'key': 'hgo',          'name': 'Hepatic Output',   'color': (230, 240, 70), 'unit': 'g/step', 'y_min': 0, 'y_max': 1.5, 'toggle_key': pygame.K_9},
-    {'key': 'glucose_in', 'name': 'Glucose In',         'color': (255, 90, 90), 'unit': 'g/step', 'y_min': 0, 'y_max': 20, 'toggle_key': pygame.K_0},
+    {'key': 'glucose_in', 'name': 'Glucose In',         'color': (255, 90, 90), 'unit': 'g/step', 'y_min': -10, 'y_max': 20, 'toggle_key': pygame.K_0},
 ]
 
 
@@ -241,11 +241,11 @@ class Visualizer:
         # Initial zoom: fit DEFAULT_ZOOM_HOURS into the available chart width
         steps_per_hour = 60 // DT_MINUTES
         self.pixels_per_step = self._chart_rect().width / (DEFAULT_ZOOM_HOURS * steps_per_hour)
-        # One visibility flag per entry in CURVES, in the same order. Defaults:
-        # BG (1), carbs (2), total insulin (3), IR (6), hepatic output (9)
-        # visible; the rest hidden but toggleable via the digit keys bound in
-        # each CURVES entry's `toggle_key` field.
-        self.curve_visible = [True, True, True, False, False, True, False, False, True, False]
+        # One visibility flag per entry in CURVES, in the same order. Defaults to
+        # the three channels the model actually consumes — BG (1), carbs (2),
+        # total insulin (3). The rest are hidden but toggleable via the digit keys
+        # bound in each CURVES entry's `toggle_key` field.
+        self.curve_visible = [True, True, True, False, False, False, False, False, False, False]
         self.hovered_step = None     # Step under mouse cursor
 
         # Transient "screenshot saved" modal: path string + epoch deadline.
@@ -517,11 +517,11 @@ class Visualizer:
         h = chart.height
 
         zones = [
-            (30, 54, (200, 30, 40, 22)),       # Very low — red
+            (BG_CLAMP_MIN, 54, (200, 30, 40, 22)),  # Very low — red, down to the dynamics floor
             (54, 70, (220, 90, 30, 16)),       # Low — amber
             (70, 180, (90, 200, 50, 14)),      # In range — lime (the safe Grid)
             (180, 250, (210, 170, 30, 13)),    # High — yellow
-            (250, 400, (200, 30, 40, 16)),     # Very high — red
+            (250, BG_CLAMP_MAX, (200, 30, 40, 16)),  # Very high — red
         ]
 
         for zone_lo, zone_hi, rgba in zones:
