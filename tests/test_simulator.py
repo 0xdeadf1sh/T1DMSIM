@@ -294,6 +294,10 @@ class TestSevereHypoRefractory:
         # Ensure awake — wake at start, sleep far in the future
         sim._today_wake_idx = 0
         sim._today_sleep_idx = idx + STEPS_PER_DAY
+        # Clear carbs-on-board so these tests exercise the refractory TIMER
+        # alone. Otherwise the rule-of-15 recheck blocks the follow-up rescue
+        # for its own (correct) reason and the timer is never reached.
+        sim._rescue_totals[:] = 0.0
 
     def test_severe_hypo_refractory_blocks_back_to_back(self):
         """A second severe-hypo rescue within 10 min must be blocked."""
@@ -343,6 +347,7 @@ class TestSevereHypoRefractory:
         idx2 = idx + int(15 / DT_MINUTES)
         sim.state.bg = sim.state.bg_observed = 62.0
         sim.state.last_cgm_check_idx = -9999
+        sim._rescue_totals[:] = 0.0  # isolate the timer from the rule-of-15 recheck
         sim._check_and_correct(idx2)
         assert sim.state.last_hypo_correction_idx == first_idx, (
             "moderate hypo fired within 20 min — severe refractory used instead")
@@ -351,9 +356,76 @@ class TestSevereHypoRefractory:
         idx3 = idx + int(25 / DT_MINUTES)
         sim.state.bg = sim.state.bg_observed = 62.0
         sim.state.last_cgm_check_idx = -9999
+        sim._rescue_totals[:] = 0.0  # isolate the timer from the rule-of-15 recheck
         sim._check_and_correct(idx3)
         assert sim.state.last_hypo_correction_idx == idx3, (
             "moderate hypo did not re-fire after 25 min — refractory stuck")
+
+
+class TestRuleOfFifteenRecheck:
+    """Carbs-on-board gating of repeat rescues — the recheck half of rule-of-15.
+
+    The refractory timer supplies the waiting; this supplies the "and only
+    re-dose if still low". Without it a deep low cascades into a dose every
+    10 minutes, blind to the glucose already absorbing.
+    """
+
+    def _low_patient(self, competence):
+        sim = T1DMSimulator(seed=0)
+        sim.generate()
+        idx = sim.state.current_idx
+        s = sim.state
+        s.bg = s.bg_observed = 50.0
+        s.last_cgm_check_idx = -9999
+        s.last_hypo_correction_idx = -9999
+        sim._today_wake_idx = 0
+        sim._today_sleep_idx = idx + STEPS_PER_DAY
+        sim.patient.dosing_competence = competence
+        return sim, idx
+
+    def test_pending_rescue_blocks_a_redundant_dose(self):
+        """A competent patient with enough glucose already absorbing does not re-dose."""
+        sim, idx = self._low_patient(competence=0.95)
+        sim._rescue_totals[:] = 0.0
+        # 20 g still to absorb: at BG_SCALE_FACTOR that is far more than the
+        # ~30 mg/dL needed to clear the threshold from 50.
+        sim._rescue_totals[idx:idx + 12] = 20.0 / 12.0
+        sim._check_and_correct(idx)
+        assert sim.state.last_hypo_correction_idx == -9999, (
+            "re-dosed despite 20 g of rescue carbs already on board")
+
+    def test_no_carbs_on_board_still_treats(self):
+        """The gate must not suppress a genuine untreated low."""
+        sim, idx = self._low_patient(competence=0.95)
+        sim._rescue_totals[:] = 0.0
+        sim._check_and_correct(idx)
+        assert sim.state.last_hypo_correction_idx == idx, (
+            "failed to treat a low with no carbs on board")
+
+    def test_awareness_is_skill_scaled(self):
+        """Low competence discounts carbs-on-board less, so it re-doses sooner."""
+        cob, fired = 9.0, {}
+        for comp in (0.15, 0.95):
+            n = 0
+            for seed in range(40):
+                sim = T1DMSimulator(seed=seed)
+                sim.generate()
+                idx = sim.state.current_idx
+                s = sim.state
+                s.bg = s.bg_observed = 50.0
+                s.last_cgm_check_idx = -9999
+                s.last_hypo_correction_idx = -9999
+                sim._today_wake_idx = 0
+                sim._today_sleep_idx = idx + STEPS_PER_DAY
+                sim.patient.dosing_competence = comp
+                sim._rescue_totals[:] = 0.0
+                sim._rescue_totals[idx:idx + 12] = cob / 12.0
+                sim._check_and_correct(idx)
+                n += sim.state.last_hypo_correction_idx == idx
+            fired[comp] = n
+        assert fired[0.15] > fired[0.95], (
+            f"careless patients should re-dose more often on the same carbs-on-board "
+            f"(low-skill {fired[0.15]}/40 vs high-skill {fired[0.95]}/40)")
 
 
 class TestHypoFollowupSnack:

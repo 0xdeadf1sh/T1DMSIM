@@ -707,6 +707,16 @@ RAGE_EAT_BG_THRESHOLD = 50.0       # Below this, patient may rage eat
 RAGE_EAT_CARB_MIN = 12.0           # Minimum rage eat carbs
 RAGE_EAT_CARB_MAX = 30.0           # Maximum rage eat carbs
 RAGE_EAT_PROBABILITY_BASE = 0.10   # Base chance of rage eating when below threshold
+# [CF] Rule-of-15's second half: "wait, RECHECK, and only re-dose if still low".
+# The refractory timer supplies the waiting; this supplies the recheck. Without
+# it the patient re-treats purely on current BG, blind to the glucose already
+# absorbing, and a deep low turns into a cascade of doses — 16 rescues and 253 g
+# in one episode at the worst. Mirrors the IOB-aware insulin correction: a
+# baseline everyone manages plus a competence-scaled bonus. The baseline is lower
+# than insulin's 0.7 because a symptomatic hypo is a worse moment for arithmetic
+# than dialling a correction, so even careful patients over-treat somewhat.
+COB_AWARENESS_BASE = 0.40          # fraction of carbs-on-board even a careless patient accounts for
+COB_AWARENESS_SKILL = 0.50         # additional fraction scaled by dosing_competence (max 0.90 total)
 RAGE_BOLUS_BG_THRESHOLD = 300.0    # Above this, patient may rage bolus
 RAGE_BOLUS_MULTIPLIER_MIN = 1.1    # Minimum dose multiplier during rage bolus.
 RAGE_BOLUS_MULTIPLIER_MAX = 1.5    # Maximum dose multiplier during rage bolus. Capped low — wider
@@ -1296,6 +1306,7 @@ class T1DMSimulator:
         self._basal_totals: np.ndarray = np.zeros(_init_len)
         self._bolus_totals: np.ndarray = np.zeros(_init_len)
         self._exercise_totals: np.ndarray = np.zeros(_init_len)
+        self._rescue_totals: np.ndarray = np.zeros(_init_len)  # correction_carb only, for the rule-of-15 recheck
 
         # EMA-smoothed insulin level used by the HGO Hill function. Models
         # plasma-insulin lag behind subcutaneous absorption.
@@ -1351,6 +1362,7 @@ class T1DMSimulator:
         self._basal_totals = np.zeros(_init_len)
         self._bolus_totals = np.zeros(_init_len)
         self._exercise_totals = np.zeros(_init_len)
+        self._rescue_totals = np.zeros(_init_len)  # correction_carb only, for the rule-of-15 recheck
         self._smoothed_insulin_for_hgo = 0.0
 
         # Reset AR(1) noise state (mirrors __init__).
@@ -1388,6 +1400,7 @@ class T1DMSimulator:
             self._basal_totals = np.concatenate([self._basal_totals, np.zeros(extra)])
             self._bolus_totals = np.concatenate([self._bolus_totals, np.zeros(extra)])
             self._exercise_totals = np.concatenate([self._exercise_totals, np.zeros(extra)])
+            self._rescue_totals = np.concatenate([self._rescue_totals, np.zeros(extra)])
 
     def _add_to_totals(self, curve: np.ndarray, start_idx: int, curve_type: str) -> None:
         """Scatter-add a curve into the appropriate accumulation array.
@@ -1400,6 +1413,11 @@ class T1DMSimulator:
         self._ensure_totals_length(end)
         if curve_type in ('carb', 'correction_carb'):
             self._carb_totals[start_idx:end] += curve
+            if curve_type == 'correction_carb':
+                # Tracked separately so the rescue branch can see its own
+                # carbs-on-board without counting meal carbs, which come with a
+                # bolus attached and would make the patient under-treat.
+                self._rescue_totals[start_idx:end] += curve
         elif curve_type == 'basal':
             self._basal_totals[start_idx:end] += curve
         elif curve_type in ('bolus', 'insulin'):
@@ -2082,7 +2100,25 @@ class T1DMSimulator:
             if time_idx - s.last_hypo_correction_idx < refractory_steps:
                 return
 
-            severity = max(0, eff_low_thresh - s.bg_observed)
+            # Rule-of-15 recheck: account for rescue glucose already swallowed
+            # and still absorbing before deciding whether to eat more, and how
+            # much. Skill-scaled, and a rage-eat roll — likelier the less
+            # competent the patient — discards the arithmetic entirely; a
+            # frightened patient at 40 eats the whole packet.
+            rescue_cob = (float(np.sum(self._rescue_totals[time_idx:]))
+                          if time_idx < len(self._rescue_totals) else 0.0)
+            rage_eat = self.rng.random() < RAGE_EAT_PROBABILITY_BASE * (1.0 - p.dosing_competence)
+            if rage_eat:
+                cob_consideration = 0.0
+            else:
+                awareness = COB_AWARENESS_BASE + COB_AWARENESS_SKILL * p.dosing_competence
+                cob_consideration = rescue_cob * BG_SCALE_FACTOR * awareness
+            # Where the patient reckons they are heading once that glucose lands.
+            projected_bg = s.bg_observed + cob_consideration
+            if projected_bg >= eff_low_thresh:
+                return  # already treated enough — wait for it to act
+
+            severity = max(0, eff_low_thresh - projected_bg)
             # Skilled patients eat more carbs (toward classical rule-of-15) so
             # they recover from over-bolus crashes; unskilled under-correct and
             # linger in hypo.
@@ -2096,7 +2132,7 @@ class T1DMSimulator:
             # without overshooting clean past 70 to TIR), not 41g (which would
             # collapse total TBR by ejecting the patient straight to hyper).
             if severe_hypo:
-                deficit = max(0.0, SEVERE_HYPO_THRESHOLD - s.bg_observed)
+                deficit = max(0.0, SEVERE_HYPO_THRESHOLD - projected_bg)
                 correction_grams = max(correction_grams, 14.0 + 0.35 * deficit)
             # (The former probabilistic rage-eat branch below RAGE_EAT_BG_THRESHOLD=50
             # was unreachable — any BG < 50 already trips severe_hypo (< 55) above,
