@@ -658,11 +658,22 @@ GE_EQ_FLOOR = 64.0         # [GE-OU][OHIO-CARB][DIURNAL] floor on the wandering 
 # CGM noise
 # CGM interstitial lag. The sensor sits in interstitial fluid, which trails
 # plasma glucose by a first-order diffusion process (Rebrin/Steil):
-#   dIG/dt = (BG - IG) / tau,  tau = CGM_LAG_MINUTES.
+#   dIG/dt = (BG - IG) / tau,  tau = the patient's own cgm_lag_minutes.
 # Applied in `_compute_cgm_observation` before the sensor noise, so every
 # consumer of bg_observed (corrections, hypo detection, the exported CGM
 # channel) sees the delayed-and-smoothed interstitial value, not instant BG.
-CGM_LAG_MINUTES = 15
+#
+# [CF] PER PATIENT, not a single constant. The physiological interstitial lag is
+# 5-15 min, but modern CGM firmware applies predictive compensation that removes
+# much of the APPARENT lag, and how much varies by sensor generation. Pinning
+# every patient at 15 min taught the model one sensor's timing: shifting real CGM
+# forward 15 min improved every headline metric and tripled hypo recall at 30 min,
+# which is that mistuning showing through. Drawing the lag per patient makes the
+# model lag-ROBUST instead of tuned to one device, which is what deployment needs
+# — the phone cannot tell the model which sensor generation it is reading.
+CGM_LAG_MEAN_MINUTES = 8.0    # population mean; below the raw physiological 15 because firmware compensates
+CGM_LAG_SIGMA_MINUTES = 4.0   # between-patient spread over sensor generation and individual physiology
+CGM_LAG_CLIP = (0.0, 20.0)    # 0 = fully compensated (sensor reports plasma), 20 = uncompensated and slow
 CGM_NOISE_FRACTION = 0.060  # [GE-FIX] 0.120→0.060 — reverted the HIVAR 2x back to the value calibrated for the ~5.8 mg/dL Δ5min-std target; the true-BG delta scale is now carried by BG_SCALE_FACTOR, and observed acf(8h) stays ~true (~0.03) since sensor noise no longer dilutes it.
                             # (~9 mg/dL drift around BG=150). Bumped from 0.018 to compensate
                             # for the AR(1) step-to-step variance reduction; preserves the
@@ -831,6 +842,10 @@ class PatientProfile:
     # it — a patient who considers themselves low does not dose insulin, whatever
     # the meal plan said.
     hypo_threshold: float = HYPO_THRESHOLD_MEDIAN
+
+    # This patient's CGM interstitial lag in minutes (see CGM_LAG_MEAN_MINUTES).
+    # A property of their sensor and physiology, not of the simulator.
+    cgm_lag_minutes: float = CGM_LAG_MEAN_MINUTES
 
     # Derived physiological parameters
     body_weight_kg: float = BODY_WEIGHT_MEAN_KG
@@ -1151,6 +1166,8 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
         (HYPO_THRESHOLD_SKILL_MID - SKILL_MIN) if _dev < 0.0
         else (SKILL_MAX - HYPO_THRESHOLD_SKILL_MID))
     profile.hypo_threshold = HYPO_THRESHOLD_MEDIAN + _gain * _dev
+    profile.cgm_lag_minutes = float(np.clip(
+        rng.normal(CGM_LAG_MEAN_MINUTES, CGM_LAG_SIGMA_MINUTES), *CGM_LAG_CLIP))
 
     # Physiological parameters — two independent axes (body weight and insulin
     # resistance) widen the population spread enough to span real-T1D TDDs.
@@ -2025,11 +2042,13 @@ class T1DMSimulator:
 
         Interstitial glucose trails plasma by a first-order diffusion lag
         (Rebrin/Steil): ``IG += (BG - IG) * (1 - exp(-dt/tau))`` with
-        ``tau = CGM_LAG_MINUTES``. The sensor then reports this delayed-and-
-        smoothed value plus AR(1) noise, so it never sees instantaneous BG.
+        ``tau = self.patient.cgm_lag_minutes``. The sensor then reports this
+        delayed-and-smoothed value plus AR(1) noise, so it never sees
+        instantaneous BG.
         """
-        if CGM_LAG_MINUTES > 0:
-            alpha_lag = 1.0 - np.exp(-DT_MINUTES / float(CGM_LAG_MINUTES))
+        lag = self.patient.cgm_lag_minutes
+        if lag > 0:
+            alpha_lag = 1.0 - np.exp(-DT_MINUTES / float(lag))
             self._interstitial_bg += alpha_lag * (true_bg - self._interstitial_bg)
             sensed_bg = self._interstitial_bg
         else:

@@ -176,9 +176,9 @@ The anchor's between-patient spread carries the per-patient mean-glucose heterog
 
 ## CGM Observation Model
 
-The sensor reports a delayed-and-smoothed interstitial value with time-correlated multiplicative noise — never the instantaneous true BG. A first-order interstitial lag (Rebrin/Steil, timescale `CGM_LAG_MINUTES = 15`) is applied first, then AR(1) sensor noise multiplicatively:
+The sensor reports a delayed-and-smoothed interstitial value with time-correlated multiplicative noise — never the instantaneous true BG. A first-order interstitial lag (Rebrin/Steil) is applied first, then AR(1) sensor noise multiplicatively. The timescale is **per patient**, `cgm_lag_minutes ~ clip(N(CGM_LAG_MEAN_MINUTES, CGM_LAG_SIGMA_MINUTES), *CGM_LAG_CLIP)` — 8 ± 4 min clipped to [0, 20]. The mean sits below the raw physiological 5–15 min because CGM firmware compensates much of the apparent lag, and the spread covers sensor generations from fully compensated to not at all, so a model trained here is lag-robust rather than tuned to one device:
 
-    alpha_lag   = 1 - exp(-DT_MINUTES / CGM_LAG_MINUTES)
+    alpha_lag   = 1 - exp(-DT_MINUTES / cgm_lag_minutes)
     IG         += alpha_lag * (BG_true - IG)
     ar_cgm      = NOISE_AR1_RHO_SENSOR * ar_cgm + NOISE_AR1_INNOV_SENSOR * N(0, CGM_NOISE_FRACTION)
     BG_observed = IG * (1 + ar_cgm)
