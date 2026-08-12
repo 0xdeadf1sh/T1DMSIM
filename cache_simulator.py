@@ -1302,9 +1302,14 @@ def build_cache(
         raise
 
     if dataset_md:
-        with open(dataset_md, 'w') as f:
+        # Relative to the cache, not the caller's cwd — matching --rerender-report,
+        # which already joins onto the cache dir. Building from the repo root
+        # otherwise drops the report into the repo and leaves the cache without one.
+        md_path = (dataset_md if os.path.isabs(dataset_md)
+                   else os.path.join(out_dir, dataset_md))
+        with open(md_path, 'w') as f:
             f.write(_render_dataset_md(report))
-        print(f'Wrote dataset report to {dataset_md}')
+        print(f'Wrote dataset report to {md_path}')
 
     print(f'Wrote cache to {out_dir}')
     return report
