@@ -233,13 +233,13 @@ Hepatic glycogen is a finite store gating the glycogenolysis-sourced fraction of
 Hypo correction (BG_observed < eff_low_thresh):
 
     skill_avg         = (attentiveness + dosing_competence) / 2
-    eff_low_thresh    = BG_LOW_THRESHOLD + 18 * skill_avg
-    severity          = max(0, eff_low_thresh - BG_observed)
+    hypo_threshold    = HYPO_THRESHOLD_MEDIAN + HYPO_THRESHOLD_SKILL_SPAN * (skill_avg - 0.5)
+    severity          = max(0, hypo_threshold - BG_observed)
     skill_multiplier  = 1 + 1.5 * skill_avg
     correction_grams  = HYPO_CORRECTION_BASE_GRAMS * skill_multiplier
                         + panic_factor * severity / 20
 
-Trigger and severity are measured against the skill-scaled `eff_low_thresh`, not the raw `BG_LOW_THRESHOLD`: attentive/competent patients act on the drop before crossing 70 (for `skill_avg = 0.7` the trigger lands near 73). The skill multiplier is critical — without it, high-skill patients linger at TBR ~30% because the bare base grams cannot overcome a strong basal pipeline.
+Trigger and severity are measured against the per-patient `hypo_threshold` (sampled once in `generate_patient`, median 80 mg/dL, range ≈ 74–88): attentive/competent patients act on the drop earlier. The same value blocks every bolus beneath it — a patient who considers themselves low does not dose insulin, whatever the meal plan said — so one number defines "low" for both halves of the response. The skill multiplier is critical — without it, high-skill patients linger at TBR ~30% because the bare base grams cannot overcome a strong basal pipeline.
 
 Severe hypo (BG_observed < `SEVERE_HYPO_THRESHOLD`, default 55):
 

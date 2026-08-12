@@ -370,7 +370,13 @@ BG_TARGET = 158.0  # Target BG for corrections. Aims near the real-cohort median
                    # kinetics + delivery lag tend to overshoot, so a higher target keeps median BG
                    # near the real OhioT1DM ~157 and TBR1 near real's ~3% rather than runaway hypo.
 BG_HIGH_THRESHOLD = 175.0  # Threshold to trigger correction. Paired with `BG_TARGET=158`, corrections fire moderately above target.
-BG_LOW_THRESHOLD = 60.0  # Threshold for hypo correction
+BG_LOW_THRESHOLD = 60.0  # Floor of the hypo band; the acting trigger is the per-patient PatientProfile.hypo_threshold below.
+# [CF] Per-patient "what I treat as low", centred on HYPO_THRESHOLD_MEDIAN and
+# spread across the skill range: attentive, competent patients act earlier (higher
+# BG). This one value drives the rescue AND blocks every bolus beneath it.
+HYPO_THRESHOLD_MEDIAN = 80.0      # threshold of a median-skill patient (mg/dL)
+HYPO_THRESHOLD_SKILL_SPAN = 10.0  # mg/dL deviation at each end of the skill range, so the population spans MEDIAN +/- this
+HYPO_THRESHOLD_SKILL_MID = 0.5    # population-median skill_avg; the gain is applied piecewise about it because SKILL_MIN/MAX are NOT symmetric around it (0.15 vs 0.98), so one linear gain cannot hit +/-SPAN at both ends and hold the median
 
 # Pre-meal bolus BG-awareness. Real T1Ds glance at their CGM before injecting
 # the meal bolus; if they're already low or trending toward low, they skip,
@@ -378,8 +384,12 @@ BG_LOW_THRESHOLD = 60.0  # Threshold for hypo correction
 # pumps insulin into an actively hypoglycemic patient (the dominant sawtooth
 # driver — patient eats correction carbs, gets briefly above 70, then the
 # pre-scheduled meal bolus drags them straight back down).
-BOLUS_SKIP_HYPO_BG = 75.0          # Below this, the meal bolus is skipped entirely — borderline-low entries that received any bolus crashed back into hypo within minutes.
-BOLUS_REDUCE_BG = 105.0            # Below this (but above SKIP), bolus is reduced. Sits well above the hypo edge so the BG-aware gate engages on borderline-low entries.
+# [CF] The skip threshold is now PER PATIENT — PatientProfile.hypo_threshold, the
+# same value that triggers this patient's rescue. A global 75 mg/dL made a
+# cautious patient who treats at 78 still take their meal bolus, and a stoic one
+# who treats at 63 skip a dose they would in fact have given. One definition of
+# "low" per patient, governing the rescue and every bolus alike.
+BOLUS_REDUCE_MARGIN = 30.0         # Band above hypo_threshold in which the bolus is reduced rather than skipped (was the gap between the old global 75 and 105).
 BOLUS_REDUCE_FACTOR_BASE = 0.3     # Reduction floor — multiplied by (1 + 0.3*dosing_competence). When the BG-aware gate engages near borderline-low, the bolus is halved (or more) rather than scaled down marginally.
 BOLUS_BG_CHECK_BASE_PROB = 0.95    # Probability a patient checks CGM before bolusing; +0.05*attentiveness. Essentially every bolus is gated.
 MEAL_BOLUS_SKIP_BASE_PROB = 0.08   # 0.25->0.08 — the high skip rate was a pre-OU ACF trick (un-bolused meals as decorrelating shocks). The Ornstein-Uhlenbeck glucose-effectiveness equilibrium now carries the ACF, so the heavy skipping is vestigial: restoring most meal bolusing lifts the (too-low) bolus share and sharpens the diurnal amplitude toward Ohio WITHOUT raising the 8h ACF (verified: acf8h ~0.02 either way). Still weighted by (1 - s3) for realistic occasional misses.
@@ -409,6 +419,13 @@ EXERCISE_DURATION_MEAN_SIGMA_MIN = 90.0  # [HIVAR] 45→90 — wider across-pati
 EXERCISE_DURATION_MEAN_MIN_CLAMP = (12.0, 225.0)  # [HIVAR 2x] (15.0, 200.0)→(12.0, 225.0) — session-length clamp
 EXERCISE_DURATION_SIGMA_MIN = 40.0  # [HIVAR 2x] 20.0→40.0 — within-patient session-length noise
 EXERCISE_CARB_EQUIV_PER_MIN = 0.5  # Negative carb equivalent per minute of exercise
+# [CF] A session is planned hours ahead but only starts if BG allows it. Blocked
+# below hypo_threshold + this margin: exercise is negative food, so starting a
+# workout already low drives BG straight down, and nobody sets off on a run at a
+# BG they would treat at rest. The margin sits above the rest-state threshold
+# because the bar for starting exercise is higher than the bar for eating —
+# clinical guidance is to top up with carbs below ~90 mg/dL before activity.
+EXERCISE_HYPO_MARGIN = 20.0
 EXERCISE_GAMMA_K = 3.0
 EXERCISE_GAMMA_THETA = 15.0
 
@@ -798,6 +815,13 @@ class PatientProfile:
     dosing_competence: float = 0.5
     lifestyle_consistency: float = 0.5
 
+    # The BG this patient personally treats as low (see HYPO_THRESHOLD_MEDIAN).
+    # Attentive, competent patients act earlier. This is the single definition of
+    # "low" for this patient: it triggers the rescue AND blocks every bolus below
+    # it — a patient who considers themselves low does not dose insulin, whatever
+    # the meal plan said.
+    hypo_threshold: float = HYPO_THRESHOLD_MEDIAN
+
     # Derived physiological parameters
     body_weight_kg: float = BODY_WEIGHT_MEAN_KG
     insulin_resistance_factor: float = 1.0  # >1 = resistant, <1 = sensitive
@@ -1103,6 +1127,11 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     profile.attentiveness = s2
     profile.dosing_competence = s3
     profile.lifestyle_consistency = s4
+    _dev = (s2 + s3) / 2.0 - HYPO_THRESHOLD_SKILL_MID
+    _gain = HYPO_THRESHOLD_SKILL_SPAN / (
+        (HYPO_THRESHOLD_SKILL_MID - SKILL_MIN) if _dev < 0.0
+        else (SKILL_MAX - HYPO_THRESHOLD_SKILL_MID))
+    profile.hypo_threshold = HYPO_THRESHOLD_MEDIAN + _gain * _dev
 
     # Physiological parameters — two independent axes (body weight and insulin
     # resistance) widen the population spread enough to span real-T1D TDDs.
@@ -2034,7 +2063,7 @@ class T1DMSimulator:
         # than reactively after. For skill_avg=0.7 the trigger lands at 73 —
         # still below the TIR midpoint, but enough to
         # cover the ~1-step lag between detection and rescue carb.
-        eff_low_thresh = BG_LOW_THRESHOLD + 18.0 * skill_avg
+        eff_low_thresh = p.hypo_threshold
         eff_high_thresh = BG_HIGH_THRESHOLD - 25.0 * skill_avg
 
         # --- Handle hypoglycemia ---
@@ -2242,12 +2271,22 @@ class T1DMSimulator:
                 check_prob = BOLUS_BG_CHECK_BASE_PROB + 0.05 * p.attentiveness
                 if self.rng.random() < check_prob:
                     bg = s.bg_observed
-                    if bg < BOLUS_SKIP_HYPO_BG:
+                    if bg < p.hypo_threshold:
                         continue  # treat hypo first — meal carbs alone
-                    elif bg < BOLUS_REDUCE_BG:
+                    elif bg < p.hypo_threshold + BOLUS_REDUCE_MARGIN:
                         scale = BOLUS_REDUCE_FACTOR_BASE + 0.3 * p.dosing_competence
                         curve = curve * scale
                         label = f"{label} (low-BG reduced ×{scale:.2f})"
+
+            # Same glance at the CGM before a planned session. Unconditional
+            # rather than probabilistic like the bolus: setting off on a workout
+            # is a deliberate act with preparation around it, not the habitual
+            # reflex a mealtime dose is. Skipping here also skips the
+            # post-exercise IS boost below, which is correct — no session, no
+            # sensitivity tail.
+            elif event_type == 'exercise':
+                if s.bg_observed < p.hypo_threshold + EXERCISE_HYPO_MARGIN:
+                    continue
 
             self.inject_curve(curve, event_time, event_type, label=label)
             # Schedule post-exercise IS sensitivity boost
