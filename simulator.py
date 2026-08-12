@@ -555,17 +555,18 @@ INSULIN_ABSORPTION_NOISE_SIGMA = 0.0  # [MINNOISE] per-step insulin-absorption n
 
 # BG computation
 BG_SCALE_FACTOR = 3.5  # [GE-FIX] 1.5→3.5 — restored toward the pre-DAMP scale now that glucose effectiveness (below) supplies the in-band restoring force. The prior 1.5 damped every flux term including the patient's own correction insulin, slowing the correction loop and lengthening the BG memory (long-lag ACF). With Sg bounding excursions, alpha can carry realistic 5-min delta scale and faster correction dynamics again.
-BG_CLAMP_MIN = 40.0  # [HIVAR] 20→40 — match real CGM device floor (Ohio/AZT1D min = 40).
+BG_CLAMP_MIN = 10.0  # [CF] 40→10 — the 40 floor was the real CGM device floor, but a device that stops REPORTING at 40 does not stop the patient falling. Pinning the dynamics there taught every downstream model that a descent tapers out near 40 and that a dangerous low is unreachable. 10 mg/dL is below survivable, so it never binds physiologically; it exists only to keep the Kovatchev log transform defined (f is -inf at 0, NaN below 1). Risk space is now asymmetric, f(10) = -6.82 vs f(400) = +3.16, which correctly prices a deep low above a high.
 BG_CLAMP_MAX = 400.0  # [HIVAR] 500→400 — match real CGM device ceiling (Ohio/AZT1D max = 400).
 BG_INITIAL_MEAN = 120.0
 BG_INITIAL_SIGMA = 60.0  # [HIVAR] 30→60 — wider warmup start (washes out over the run).
+BG_INITIAL_FLOOR = 40.0  # [CF] a run starts at a plausible BG, not at the dynamics clamp. Clipping the N(mean, 60) draw with BG_CLAMP_MIN would start ~4% of patients pinned in severe hypo before a single step ran; the warmup washes it out, but the transient is longer now that Sg is weak.
 
 # Soft BG bounds: in the approach zone, a single step can close at most
 # SOFT_APPROACH_FRACTION of the remaining headroom to the hard bound. This
 # gives geometric asymptotic decay toward the floor/ceiling — BG never
 # actually reaches the hard clamp under normal dynamics, regardless of how
 # large the raw delta is. The hard clamp is kept only as a backstop.
-BG_SOFT_FLOOR = 50.0           # Cap kicks in when BG drops below this (10 mg/dL runway above the 40 hard floor)
+BG_SOFT_FLOOR = 20.0           # [CF] 50→20 — tracks BG_CLAMP_MIN down. Left at 50 the damping engaged 30 mg/dL above the new floor and re-imposed the taper the floor change removes.
 BG_SOFT_CEILING = 385.0        # [HIVAR] 400→385 — keep a soft runway below the new 400 hard ceiling
 SOFT_APPROACH_FRACTION = 0.15  # [DAMP] 0.3→0.15 — stronger delta-damping as BG nears the bounds.
 
@@ -592,17 +593,20 @@ SEVERE_HYPO_GLUCAGON_RATE = 2.0  # Extra mg/dL per step at severity=1.0
 # band (they are gated to BG>180 / BG<70). Without it, within-band BG is an
 # under-damped integrator of net flux — a slowly-corrected random walk — so the
 # level autocorrelation decays far too slowly (acf at 8h ~0.3 vs ~0 in real CGM).
-# The strong, fast Sg pull gives BG a short correlation time (low 8h ACF); E's
+# The Sg pull keeps BG's correlation time short (low 8h ACF); E's
 # wandering supplies distributional spread but decorrelates within hours, so it
 # does NOT re-inject long-lag memory — decoupling spread from the ACF, which a
 # fixed setpoint could not do (a fixed target damped the ACF only by homogenizing
-# the distribution). GE_RATE is the population-mean per-step reversion fraction;
+# the distribution). E's own timescale carries most of that decorrelation, which
+# is why Sg can be weak without the 8h ACF returning; keep it weak, because the
+# spring cancels the sustained component of any input slower than its own time
+# constant, insulin included. GE_RATE is the population-mean per-step reversion fraction;
 # per-patient Sg is sampled lognormally around it (real Sg varies ~2-3x across
 # individuals) so heterogeneity is preserved. The GE_EQ_FLOOR is what keeps the
 # Sg pull *upward* in a low (aiding, never opposing, the severe-hypo rescue) and
 # simultaneously anchors the pooled mean/low-tail onto the real cohorts. See
 # ge_day_weight for the diurnal lift and the OU update in generate().
-GE_RATE = 0.060            # [GE-OU] strong Sg so BG tracks the fast-wandering equilibrium (short correlation time -> acf(8h)~0)
+GE_RATE = 0.015            # [CF] 0.060→0.015 — the spring was installed to pull acf(8h) down, but E's own 3h OU timescale carries that: two independent measurements (24 x 30 d and 64 x 30 d) put acf(8h) at +0.03..0.05 before and +0.05..0.06 after, so the spring was never what held it near zero — E's own timescale is. What the spring cost was causality. Time constant 1/0.060 = 83 min high-passes any input slower than itself; insulin acts over 3-5 h, so against a Sg=0 reference of -31.1 mg/dL a 2 U bolus retained only ~20% of its 240-min effect (-6.3). At 0.015 it retains ~87% (-27.0). Price paid, same protocol: acf(2h) 0.49 -> 0.55 — note it was ALREADY on Ohio's 0.483 and moves past it toward Shanghai's 0.606, so the ACF is a cost here, not a justification — acf(24h) 0.09 -> 0.16, and time<55 0.65% -> 1.53% mean / 2.42% -> 4.05% worst patient (invariant: mean<=2%, max<=6%).
 GE_EQ_ANCHOR_MEAN = 138.0  # [GE-OU] population-mean equilibrium anchor (co-tuned with GE_EQ_SIGMA / GE_EQ_FLOOR to land the pooled mean ~162 on Ohio; with a large sigma the floor-clipping largely sets the mean, so the anchor is a fine trim)
 GE_EQ_ANCHOR_SIGMA = 15.0  # [GE-OU][HET] between-patient spread of the anchor (per-patient mean heterogeneity). Raised 12->15 to widen the too-narrow between-patient mean-BG spread (sim was the narrowest of the four cohorts, ~13.6 vs Ohio/AZT1D ~16). The anchor sigma alone SATURATES near ~14 mg/dL sd because GE_EQ_FLOOR compresses low-anchor patients upward; the remaining spread comes from the IR coupling below (high-side, floor-immune).
 GE_ANCHOR_IR_COUPLING = 30.0  # [GE-OU][HET] how much a patient's insulin resistance lifts its equilibrium anchor (mg/dL per unit ir-1). Raised 12->30 (with IR_LOGNORMAL_SIGMA 0.16->0.26) so the between-patient mean spread is carried physiologically by the resistance axis — resistant patients run higher — rather than by low-anchor patients the floor would both compress and crash into hypo.
@@ -1242,7 +1246,7 @@ class T1DMSimulator:
             bg_mean = BG_INITIAL_MEAN + 40.0 * (0.5 - skill_avg)
             self.state.bg = np.clip(
                 self.rng.normal(bg_mean, BG_INITIAL_SIGMA),
-                BG_CLAMP_MIN, BG_CLAMP_MAX
+                BG_INITIAL_FLOOR, BG_CLAMP_MAX
             )
 
         self.state.bg_observed = self.state.bg
@@ -1301,7 +1305,7 @@ class T1DMSimulator:
             bg_mean = BG_INITIAL_MEAN + 40.0 * (0.5 - skill_avg)
             self.state.bg = np.clip(
                 self.rng.normal(bg_mean, BG_INITIAL_SIGMA),
-                BG_CLAMP_MIN, BG_CLAMP_MAX
+                BG_INITIAL_FLOOR, BG_CLAMP_MAX
             )
 
         self.state.bg_observed = self.state.bg
@@ -2405,10 +2409,11 @@ class T1DMSimulator:
         # toward a STOCHASTIC equilibrium E(t). E is an Ornstein-Uhlenbeck
         # process — it mean-reverts (timescale GE_EQ_TAU_HOURS) toward the
         # patient's anchor plus a diurnal lift, perturbed each step by Gaussian
-        # noise of stationary std GE_EQ_SIGMA. The fast Sg pull gives BG a short
-        # correlation time (low 8h ACF); E's wandering adds distributional
-        # spread but decorrelates within hours, so it does not re-inject long-lag
-        # autocorrelation — decoupling spread from the ACF.
+        # noise of stationary std GE_EQ_SIGMA. E's own timescale, not the strength
+        # of the Sg pull, is what keeps the 8h ACF near zero; Sg is deliberately
+        # weak (see GE_RATE) so it does not high-pass slow inputs such as insulin.
+        # E's wandering adds distributional spread but decorrelates within hours,
+        # so it does not re-inject long-lag autocorrelation.
         ge_mu = p.ge_anchor + p.ge_dawn_amplitude * ge_diurnal_profile(hour_of_day)
         ge_rho = float(np.exp(-DT_MINUTES / (GE_EQ_TAU_HOURS * 60.0)))
         self._ge_equilibrium = (

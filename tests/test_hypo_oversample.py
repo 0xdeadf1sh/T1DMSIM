@@ -84,7 +84,10 @@ def test_load_baseline_missing_returns_none():
 
 def _build(tmp_path, name, **kw):
     defaults = dict(
-        pool_size=36, sim_hours=18.0, warmup_hours=6.0, n_jobs=1,
+        # 24 h, not 6: the Sg time constant is 1/GE_RATE = 333 min, so a 6 h
+        # warmup leaves ~1 time constant of the initial transient in the pool and
+        # the unbiased build no longer sits on the baseline. Production uses 48 h.
+        pool_size=36, sim_hours=18.0, warmup_hours=24.0, n_jobs=1,
         dataset_md='', seed_salt=7,
     )
     defaults.update(kw)

@@ -95,7 +95,7 @@ Three physiological guardrails are then applied to the delta:
 - Counter-regulatory response: below 70 mg/dL, glucagon and cortisol force the liver to dump extra sugar.
 - Severe-hypo glucagon dump: below `SEVERE_HYPO_THRESHOLD`, an additional emergency release adds glucose proportionally to severity.
 
-Soft delta-damping near the floor and ceiling shapes the tails; a hard clamp at 40-400 mg/dL acts as a backstop. The full algebra for every curve, envelope, and guardrail is in [`docs/math.md`](docs/math.md).
+Soft delta-damping near the floor and ceiling shapes the tails; a hard clamp at 10-400 mg/dL acts as a backstop. The floor is deliberately below the CGM reporting floor of 40 mg/dL: a sensor that stops reporting does not stop the patient falling, and clamping the dynamics at the reporting floor makes every descent taper out there. The full algebra for every curve, envelope, and guardrail is in [`docs/math.md`](docs/math.md).
 
 
 ## Patient Model
