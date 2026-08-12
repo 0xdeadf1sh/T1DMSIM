@@ -947,6 +947,9 @@ class SimulatorState:
 # CURVE GENERATION UTILITIES
 # ============================================================================
 
+GAMMA_CURVE_SUBSTEPS = 16  # sub-samples per step when integrating a gamma curve below
+
+
 def gamma_curve(total_amount: float, k: float, theta: float,
                 duration_minutes: float, dt: float = DT_MINUTES) -> np.ndarray:
     """
@@ -956,11 +959,17 @@ def gamma_curve(total_amount: float, k: float, theta: float,
     n_steps = int(duration_minutes / dt)
     if n_steps <= 0:
         return np.array([0.0])
-    t = np.arange(1, n_steps + 1) * dt  # time in minutes
-    # Gamma PDF (unnormalized)
-    values = t ** (k - 1) * np.exp(-t / theta)
+    # Each element is the amount appearing DURING that step, so integrate the
+    # gamma across the step instead of sampling its right edge. Sampling at
+    # t = dt, 2dt, ... skips t=0 and makes a curve materialise at a large
+    # fraction of its own peak in one step — 27% for a fast meal component, 65%
+    # for a rescue — which draws as a stair-step wherever a curve begins and
+    # stacks into a sawtooth when several start close together.
+    sub = GAMMA_CURVE_SUBSTEPS
+    t = (np.arange(n_steps * sub) + 0.5) * (dt / sub)  # sub-step midpoints from 0
+    values = (t ** (k - 1) * np.exp(-t / theta)).reshape(n_steps, sub).mean(axis=1)
     # Normalize so the sum of the array equals total_amount (amount per step)
-    area = np.sum(values)  # <-- Removed the * dt here
+    area = np.sum(values)
     if area > 0:
         values = values * (total_amount / area)
     return values
