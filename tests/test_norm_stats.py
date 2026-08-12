@@ -38,8 +38,12 @@ def test_norm_bg_risk_matches_reference():
     g = np.clip(bg.astype(np.float64), BG_CLAMP_MIN, BG_CLAMP_MAX)
     ref = cs.NORM_BG_RISK_SCALE * (np.log(g) ** cs.NORM_BG_RISK_POWER - cs.NORM_BG_RISK_OFFSET)
     assert np.allclose(got, ref, atol=1e-12)
-    # Re-anchored endpoints: f(40) = -sqrt(10), f(400) = +sqrt(10).
-    assert cs._norm_bg_risk(np.array([BG_CLAMP_MIN]))[0] == pytest.approx(-np.sqrt(10.0), abs=1e-6)
+    # Anchor points are a property of the constants, NOT of the clamp rails:
+    # f(40) = -sqrt(10), f(400) = +sqrt(10) hold whatever BG_CLAMP_MIN is.
+    assert cs._norm_bg_risk(np.array([40.0]))[0] == pytest.approx(-np.sqrt(10.0), abs=1e-6)
+    assert cs._norm_bg_risk(np.array([400.0]))[0] == pytest.approx(+np.sqrt(10.0), abs=1e-6)
+    # The floor sits below the lower anchor, so risk space is asymmetric.
+    assert cs._norm_bg_risk(np.array([BG_CLAMP_MIN]))[0] < -np.sqrt(10.0)
     assert cs._norm_bg_risk(np.array([BG_CLAMP_MAX]))[0] == pytest.approx(+np.sqrt(10.0), abs=1e-6)
 
 

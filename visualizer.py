@@ -41,10 +41,11 @@ os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
 import pygame
 import pygame.freetype
 
-from simulator import T1DMSimulator, DT_MINUTES, SIMULATION_START_DAY_OF_WEEK, BG_CLAMP_MIN, BG_CLAMP_MAX
+from simulator import (T1DMSimulator, DT_MINUTES, SIMULATION_START_DAY_OF_WEEK,
+                       BG_CLAMP_MIN, BG_CLAMP_MAX, SIMULATOR_WARMUP_HOURS)
 
 DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-WARMUP_HOURS = 24  # Hours discarded before the displayed window starts
+WARMUP_HOURS = int(SIMULATOR_WARMUP_HOURS)  # discarded before the displayed window starts; never a local literal, or the GUI shows a settling transient the corpus never contains
 WARMUP_DAYS = WARMUP_HOURS // 24
 DISPLAY_START_DOW = (SIMULATION_START_DAY_OF_WEEK + WARMUP_DAYS) % 7
 

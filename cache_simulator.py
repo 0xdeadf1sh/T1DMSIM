@@ -73,10 +73,12 @@ so it trades one-time build speed against per-read decompression waste.
 
 Window validity filter
 ----------------------
-Any trajectory whose ``bg_observed`` touches the CGM clamp rails -- a reading
-``>= --rail-high`` (399 mg/dL) or ``<= --rail-low`` (41 mg/dL) -- is discarded
-and a fresh seed is drawn for that row. This keeps clamp-saturated,
-physiologically implausible windows out of the training pool.
+Any trajectory whose ``bg_observed`` touches the clamp rails -- a reading
+``>= --rail-high`` or ``<= --rail-low``, both derived from BG_CLAMP_MAX/MIN --
+is discarded and a fresh seed is drawn for that row. This keeps rows pinned flat
+against a clamp out of the training pool. The low rail tracks the dynamics floor,
+not the CGM reporting floor: it must never discard a trajectory merely for
+reaching a severe low, which is a population the pool exists to carry.
 
 Hypo oversampling
 -----------------
@@ -120,7 +122,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import blosc2
 
-from simulator import BG_CLAMP_MIN, BG_CLAMP_MAX, DT_MINUTES, T1DMSimulator
+from simulator import (BG_CLAMP_MIN, BG_CLAMP_MAX, DT_MINUTES,
+                       SIMULATOR_WARMUP_HOURS, T1DMSimulator)
 
 
 # ============================================================================
@@ -166,16 +169,16 @@ _TRANSCODE_BLOCK_BYTES = 256 * 1024 * 1024
 # GENERATION DEFAULTS
 # ============================================================================
 
-DEFAULT_SIM_HOURS = 55.5     # post-warmup window kept per patient (666 steps @ 5 min)
-DEFAULT_WARMUP_HOURS = 48.0  # discarded lead-in so the state has forgotten its init
+DEFAULT_SIM_HOURS = 103.5    # [CF] 55.5→103.5 — room for a 72 h context, at the only nearby length that keeps hour-of-day coverage exactly uniform. T1DMAI draws patch-aligned starts in [context, N - forward_room], so the start count is (N - context - forward)/6 + 1 and must be a multiple of 48 (half-hour slots per day) or some slots are oversampled. N = 1242 gives 144 starts under today's 24 h context and 48 under a 72 h one; 1248 gives 145 and 49, which tilts every window distribution toward midnight. PAIRED CHANGE: T1DMAI/data.py ON_THE_FLY_SIM_HOURS must move with this or its loader rejects the cache outright.
+DEFAULT_WARMUP_HOURS = SIMULATOR_WARMUP_HOURS  # discarded lead-in so the state has forgotten its init
 DEFAULT_MAX_ATTEMPTS = 50    # soft cap: budget for meeting the hypo target per row
 # Extra draws devoted purely to finding a rail-VALID trajectory once the hypo
 # budget is spent, before giving up and raising. Validity is a hard requirement,
 # so this backstops the (essentially unreachable) case of a run of rail-hitters.
 _VALIDITY_HARD_EXTRA = 250
 DEFAULT_HYPO_MIN_FRAC = 0.05 # min fraction of time < 70 mg/dL for a hypo-designated row
-DEFAULT_RAIL_HIGH = 399.0    # discard a window with any bg_observed >= this
-DEFAULT_RAIL_LOW = 41.0      # discard a window with any bg_observed <= this
+DEFAULT_RAIL_HIGH = BG_CLAMP_MAX - 1.0  # discard a window with any bg_observed >= this
+DEFAULT_RAIL_LOW = BG_CLAMP_MIN + 1.0   # [CF] was a hardcoded 41, which discarded every trajectory reaching a severe low — precisely the population this corpus now exists to teach. Both rails are DERIVED so a future clamp change cannot desynchronise them; the filter only ever meant to drop rows pinned flat against a clamp.
 
 # Event-detection thresholds (mirrors the README's meal detector: upward
 # threshold-crossings with a refractory window).
@@ -191,7 +194,7 @@ BG_VERY_HIGH = 250.0
 
 # 1 mg/dL histogram over the CGM clamp span, accumulated during the transcode
 # pass to recover pooled percentiles/median without holding every reading in RAM.
-BG_HIST_EDGES = np.arange(40.0, 401.0, 1.0)  # 361 edges -> 360 bins covering [40, 400]
+BG_HIST_EDGES = np.arange(BG_CLAMP_MIN, BG_CLAMP_MAX + 1.0, 1.0)  # derived, never a literal: a hardcoded 40 floor silently drops every sub-40 reading from the pooled percentiles while still counting it in n
 
 # Path (relative to this file) to the diff report's machine-readable baseline.
 DEFAULT_BASELINE_STATS = os.path.join(
@@ -206,7 +209,10 @@ def _kovatchev_numerators(bg: np.ndarray) -> tuple[float, float]:
     left/hypo risk 10*min(f,0)^2, right/hyper risk 10*max(f,0)^2. Returns the
     *sums* so the caller divides by the pooled reading count to get LBGI/HBGI.
     """
-    f = 1.509 * (np.log(np.clip(bg, 1.0, None)) ** 1.084 - 5.381)
+    # Clinical domain floor is 20 mg/dL (SPEC/invariants.md, and T1DMDROID's
+    # CLINICAL_BG_CLAMP_MIN). The old 1.0 guard was merely an ln() safety net and
+    # was unreachable while BG could not fall below 40; it is reachable now.
+    f = 1.509 * (np.log(np.clip(bg, 20.0, None)) ** 1.084 - 5.381)
     rl = 10.0 * np.minimum(f, 0.0) ** 2
     rh = 10.0 * np.maximum(f, 0.0) ** 2
     return float(rl.sum(dtype=np.float64)), float(rh.sum(dtype=np.float64))
@@ -217,9 +223,13 @@ def _kovatchev_numerators(bg: np.ndarray) -> tuple[float, float]:
 # import). Emits normalization_stats.json alongside meta.json.
 # ============================================================================
 
-# Kovatchev risk constants re-anchored to [40, 400] (BG_CLAMP_MIN/MAX); mirror
-# T1DMAI/utils._KOVATCHEV_* -- model risk space, distinct from the clinical
-# LBGI/HBGI constants used by _kovatchev_numerators.
+# Kovatchev risk constants anchored so f(40) = -sqrt(10) and f(400) = +sqrt(10);
+# mirror T1DMAI/utils._KOVATCHEV_* -- model risk space, distinct from the clinical
+# LBGI/HBGI constants used by _kovatchev_numerators. The anchor points are a
+# property of these constants and stay fixed; they are NOT tied to
+# BG_CLAMP_MIN/MAX, which now clip to [10, 400] so the transform extends to
+# f(10) = -6.82. Re-anchoring to the new floor would compress the hypoglycemic
+# stretch, which is the whole reason the model forecasts in this space.
 NORM_BG_RISK_SCALE = 2.2211457449985317
 NORM_BG_RISK_POWER = 1.084
 NORM_BG_RISK_OFFSET = 5.540076976170212
@@ -242,9 +252,12 @@ def _norm_bg_risk(bg: np.ndarray) -> np.ndarray:
     """Kovatchev risk transform (model risk space) of raw mg/dL ``bg``.
 
     Clips to ``[BG_CLAMP_MIN, BG_CLAMP_MAX]`` then applies
-    ``f(g) = SCALE * (ln(g)^POWER - OFFSET)`` with the [40, 400]-anchored
-    constants above -- mirroring ``T1DMAI/utils.kovatchev_f_np``, the transform
-    the model applies to the bg input BEFORE the z-score. Returns float64.
+    ``f(g) = SCALE * (ln(g)^POWER - OFFSET)`` with the constants above, anchored
+    at ``f(40) = -sqrt(10)`` / ``f(400) = +sqrt(10)`` -- mirroring
+    ``T1DMAI/utils.kovatchev_f_np``, the transform the model applies to the bg
+    input BEFORE the z-score. The clip floor sits below the lower anchor, so the
+    output range is asymmetric: ``[f(10), f(400)] = [-6.82, +3.16]``.
+    Returns float64.
     """
     g = np.clip(np.asarray(bg, dtype=np.float64), BG_CLAMP_MIN, BG_CLAMP_MAX)
     return NORM_BG_RISK_SCALE * (np.log(g) ** NORM_BG_RISK_POWER - NORM_BG_RISK_OFFSET)

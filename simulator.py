@@ -25,6 +25,13 @@ from enum import Enum
 DT_MINUTES = 5  # Time step in minutes
 STEPS_PER_DAY = 24 * 60 // DT_MINUTES  # 288 steps per day
 
+# Hours a fresh simulator must run before its state is at steady state, and the
+# canonical value every consumer discards. The basal pipeline starts empty (first
+# events land 2-7 h in) and Bateman PK does not settle until ~36-48 h given the
+# 18-30 h per-patient cadence; a shorter lead-in leaves the trace in a cold-start
+# ramp that peaks near 280 mg/dL. Whole days, so day-of-week arithmetic stays exact.
+SIMULATOR_WARMUP_HOURS = 48.0
+
 # Skill correlation
 SKILL_CORRELATION = 0.7  # Off-diagonal correlation in skill covariance matrix
 SKILL_VARIANCE = 0.6  # [HIVAR 2x] 0.3→0.6 — wider skill spread

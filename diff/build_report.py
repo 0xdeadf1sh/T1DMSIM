@@ -76,7 +76,10 @@ def kovatchev_risk(bg):
     bg = bg[~np.isnan(bg)]
     if len(bg) == 0:
         return float("nan"), float("nan")
-    f = 1.509 * (np.log(np.clip(bg, 1, None)) ** 1.084 - 5.381)
+    # Clinical domain floor is 20 mg/dL (SPEC/invariants.md; T1DMDROID's
+    # CLINICAL_BG_CLAMP_MIN). The old 1.0 was an ln() safety net, unreachable
+    # while BG could not fall below 40 and reachable now.
+    f = 1.509 * (np.log(np.clip(bg, 20.0, None)) ** 1.084 - 5.381)
     rl = 10 * np.minimum(f, 0.0) ** 2  # left (hypo) risk
     rh = 10 * np.maximum(f, 0.0) ** 2  # right (hyper) risk
     return float(np.mean(rl)), float(np.mean(rh))
