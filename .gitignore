@@ -34,3 +34,8 @@ paper/*
 # Private working notes (never shipped)
 scratch/
 *.private.md
+
+# Simulator cache directories, both generations (cache_*_cf and the earlier
+# cache_*). Each carries a meta.json recording the absolute path it was built
+# at, so these must not be committed.
+cache_*/
