@@ -14,7 +14,6 @@ Designed by a T1DM patient, informed by lived experience.
 
 - [Motivation](#motivation)
 - [Paper](#paper)
-- [Pregenerated Datasets](#pregenerated-datasets)
 - [Design Principles](#design-principles)
 - [Architecture](#architecture)
 - [Blood Sugar Computation](#blood-sugar-computation)
@@ -41,14 +40,6 @@ This one models the *person*, not the pancreas. Most real-world blood sugar vari
 ## Paper
 
 [T1DMSIM: A Behavioral Simulator for Synthetic Type 1 Diabetes Glucose Data Generation](paper/main.pdf)
-
-
-## Pregenerated Datasets
-
-Two caches written by `cache_simulator.py` are published — a balanced pool and a hypoglycemia-oversampled one — each documented by the report it ships with.
-
-- [cache_balanced.tar.gz](https://drive.google.com/file/d/1pZuf6Htui-CC3Abp2NAHVvogk99X1ZR3/view?usp=sharing) — [`cache_balanced/DATASET.md`](cache_balanced/DATASET.md)
-- [cache_hypo.tar.gz](https://drive.google.com/file/d/1D1tg0GDtzLY_IzrtMkOj1foQhRj3cU9R/view?usp=sharing) — [`cache_hypo/DATASET.md`](cache_hypo/DATASET.md)
 
 
 ## Design Principles
