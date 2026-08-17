@@ -34,9 +34,12 @@ Sample from a 4D multivariate normal — `Sigma` has `SKILL_VARIANCE` on the dia
 
 ## Carbohydrate Absorption Curves
 
-Each meal becomes 2-5 overlapping gamma-distributed absorption curves:
+Each meal becomes 2-5 overlapping gamma-distributed absorption curves. Entry `n` of a curve is the amount appearing *during* step `n`, so `gamma_curve` integrates the gamma across the step — the mean of `GAMMA_CURVE_SUBSTEPS = 16` sub-step midpoints, starting from `t = 0`:
 
-    C_i(t) = A_i * t^(k_i - 1) * exp(-t / theta_i)     A_i s.t. sum(C_i) = component_carb_grams
+    C_i[n] = A_i * mean{ t^(k_i - 1) * exp(-t / theta_i) : t in [n*dt, (n+1)*dt) }
+             A_i s.t. sum_n C_i[n] = component_carb_grams
+
+Averaging the density across the step is what sizes the leading edge: the first step of a `k = 2, theta = 15` rescue curve carries 37% of the peak and a `k = 3, theta = 25` bolus 2%, so a curve rises through its onset. The same integration applies to every gamma curve — meal components, the protein/fat tail, rescue and follow-up carbs, exercise, and every bolus.
 
 Component sampling, per-component noise, and the protein/fat tail added to every meal regardless of composition:
 
@@ -145,7 +148,7 @@ In T1DM the incretin / GLP-1 axis is blunted and there is no endogenous insulin 
 
 ### Glucose effectiveness (Bergman Sg) equilibrium
 
-`Sg = glucose_effectiveness` is the per-patient Bergman minimal-model glucose effectiveness (a per-step reversion fraction), sampled lognormally around `GE_RATE` and clipped to `[GE_RATE_MIN, GE_RATE_MAX]` (~2–3× inter-individual spread; the floor prevents a pure integrator). The pull supplies the within-band mean reversion the renal / counter-regulatory guardrails do not: inside 70–180 net flux is otherwise integrated with an over-long autocorrelation.
+`Sg = glucose_effectiveness` is the per-patient Bergman minimal-model glucose effectiveness (a per-step reversion fraction), sampled lognormally around `GE_RATE = 0.015` and clipped to `[GE_RATE_MIN, GE_RATE_MAX] = [0.004, 0.150]` (~2–3× inter-individual spread; the floor prevents a pure integrator). `GE_RATE` is the MEDIAN of that lognormal, not its mean, so the median patient's reversion time constant is `1 / GE_RATE` ≈ 67 steps ≈ 5.6 h — longer than the 2.5 h bolus duration of action at the 5 U reference (`BOLUS_DIA_BASE_HOURS`, scaling as √dose), so the pull leaves insulin's sustained effect intact. The pull supplies the within-band mean reversion the renal / counter-regulatory guardrails do not: inside 70–180 net flux is otherwise integrated with an over-long autocorrelation.
 
 `E(t)` is an Ornstein–Uhlenbeck process. With `rho = exp(-DT_MINUTES / (GE_EQ_TAU_HOURS * 60))`:
 
@@ -178,10 +181,13 @@ The anchor's between-patient spread carries the per-patient mean-glucose heterog
 
 The sensor reports a delayed-and-smoothed interstitial value with time-correlated multiplicative noise — never the instantaneous true BG. A first-order interstitial lag (Rebrin/Steil) is applied first, then AR(1) sensor noise multiplicatively. The timescale is **per patient**, `cgm_lag_minutes ~ clip(N(CGM_LAG_MEAN_MINUTES, CGM_LAG_SIGMA_MINUTES), *CGM_LAG_CLIP)` — 8 ± 4 min clipped to [0, 20]. The mean sits below the raw physiological 5–15 min because CGM firmware compensates much of the apparent lag, and the spread covers sensor generations from fully compensated to not at all, so a model trained here is lag-robust rather than tuned to one device:
 
-    alpha_lag   = 1 - exp(-DT_MINUTES / cgm_lag_minutes)
-    IG         += alpha_lag * (BG_true - IG)
+    if cgm_lag_minutes > 0:                                  # 0 is inside the clip
+        alpha_lag = 1 - exp(-DT_MINUTES / cgm_lag_minutes)
+        IG       += alpha_lag * (BG_true - IG)
+    else:
+        IG        = BG_true                                  # fully compensated sensor
     ar_cgm      = NOISE_AR1_RHO_SENSOR * ar_cgm + NOISE_AR1_INNOV_SENSOR * N(0, CGM_NOISE_FRACTION)
-    BG_observed = IG * (1 + ar_cgm)
+    BG_observed = clip(IG * (1 + ar_cgm), BG_CLAMP_MIN, BG_CLAMP_MAX)
 
 Multiplying the reading makes the noise std scale with BG, matching real CGM MARD characteristics. `NOISE_AR1_RHO_SENSOR = 0.92` (~42 min half-life, with `NOISE_AR1_INNOV_SENSOR = sqrt(1 - 0.92^2)`) gives smoothly-drifting offsets over 30-60 min windows rather than white-noise spikes. Every consumer of `BG_observed` — corrections, hypo detection, the exported CGM channel — sees this value, not the current step's true BG.
 
@@ -230,20 +236,30 @@ Hepatic glycogen is a finite store gating the glycogenolysis-sourced fraction of
 
 ## Correction Behavior
 
-Hypo correction (BG_observed < eff_low_thresh):
+Hypo correction (BG_observed < hypo_threshold):
 
     skill_avg         = (attentiveness + dosing_competence) / 2
-    hypo_threshold    = HYPO_THRESHOLD_MEDIAN + HYPO_THRESHOLD_SKILL_SPAN * (skill_avg - 0.5)
-    severity          = max(0, hypo_threshold - BG_observed)
+    dev               = skill_avg - HYPO_THRESHOLD_SKILL_MID
+    gain              = HYPO_THRESHOLD_SKILL_SPAN / (HYPO_THRESHOLD_SKILL_MID - SKILL_MIN)   if dev < 0
+                        HYPO_THRESHOLD_SKILL_SPAN / (SKILL_MAX - HYPO_THRESHOLD_SKILL_MID)   otherwise
+    hypo_threshold    = HYPO_THRESHOLD_MEDIAN + gain * dev
+
+    rescue_cob        = sum of the not-yet-absorbed correction-carb curve from t onward (g)
+    awareness         = COB_AWARENESS_BASE + COB_AWARENESS_SKILL * dosing_competence
+    cob_consideration = rescue_cob * BG_SCALE_FACTOR * awareness
+    projected_bg      = BG_observed + cob_consideration
+    severity          = max(0, hypo_threshold - projected_bg)
     skill_multiplier  = 1 + 1.5 * skill_avg
     correction_grams  = HYPO_CORRECTION_BASE_GRAMS * skill_multiplier
                         + panic_factor * severity / 20
 
-Trigger and severity are measured against the per-patient `hypo_threshold` (sampled once in `generate_patient`, median 80 mg/dL, range ≈ 74–88): attentive/competent patients act on the drop earlier. The same value blocks every bolus beneath it — a patient who considers themselves low does not dose insulin, whatever the meal plan said — so one number defines "low" for both halves of the response. The skill multiplier is critical — without it, high-skill patients linger at TBR ~30% because the bare base grams cannot overcome a strong basal pipeline.
+The trigger is the per-patient `hypo_threshold`, sampled once in `generate_patient` from that patient's own `skill_avg`: attentive/competent patients act on the drop earlier. The gain is piecewise about `HYPO_THRESHOLD_SKILL_MID = 0.5` because `SKILL_MIN` and `SKILL_MAX` (0.15 / 0.98) are not symmetric around it, so the population spans `HYPO_THRESHOLD_MEDIAN ± HYPO_THRESHOLD_SKILL_SPAN` — 70 to 90 mg/dL, median 80 — with median skill landing on the median threshold. The same value defines "low" everywhere else the patient acts on it. A meal bolus is gated on the patient glancing at the CGM first — probability `BOLUS_BG_CHECK_BASE_PROB + 0.05 * attentiveness`, so 0.95 to 0.999 and not a certainty — and on that glance the bolus is skipped below the threshold and scaled by `BOLUS_REDUCE_FACTOR_BASE + 0.3 * dosing_competence` within `BOLUS_REDUCE_MARGIN` (30 mg/dL) above it; and a planned exercise session is abandoned below `hypo_threshold + EXERCISE_HYPO_MARGIN` (20 mg/dL — a higher bar than eating, since guidance is to top up with carbs before activity below ~90 mg/dL).
+
+Severity is measured against `projected_bg`, not the current reading: this is the recheck half of the rule of 15, so rescue glucose already swallowed and still absorbing is counted before more is eaten. Only correction carbs are counted (tracked separately from meal carbs, which arrive with a bolus attached), `BG_SCALE_FACTOR` converts grams to the mg/dL they will raise, and `awareness` = `COB_AWARENESS_BASE + COB_AWARENESS_SKILL * dosing_competence` rises to 0.89 at the `SKILL_MAX` ceiling of 0.98, approaching but never reaching its 0.90 limit. When `projected_bg >= hypo_threshold` the patient waits instead of eating. With probability `RAGE_EAT_PROBABILITY_BASE * (1 - dosing_competence)` the arithmetic is discarded (`cob_consideration = 0`) and the patient treats on the raw reading. The skill multiplier is critical — without it, high-skill patients linger at TBR ~30% because the bare base grams cannot overcome a strong basal pipeline.
 
 Severe hypo (BG_observed < `SEVERE_HYPO_THRESHOLD`, default 55):
 
-    deficit = SEVERE_HYPO_THRESHOLD - BG_observed
+    deficit = max(0, SEVERE_HYPO_THRESHOLD - projected_bg)
     correction_grams = max(correction_grams, 14 + 0.35 * deficit)
 
 This deterministic rescue is what keeps severe episodes under 1h. Severe hypo also bypasses the CGM check interval, but a `SEVERE_HYPO_REFRACTORY_MIN` (10 min) gate still applies between back-to-back doses so stacked carbs don't sawtooth into post-correction hypers. After any hypo correction, basal is scaled by `POST_HYPO_BASAL_SUSPEND_FACTOR` for `POST_HYPO_BASAL_SUSPEND_DURATION_HOURS` (pump-suspend / temp-basal analogue), and skill-gated patients (`skill_avg > HYPO_FOLLOWUP_SKILL_THRESHOLD`) eat a slow-carb follow-up snack of `HYPO_FOLLOWUP_FRACTION × correction_grams`.
@@ -296,7 +312,7 @@ Ahead of the hard clamp, each step's `delta_BG` is capped to a fraction of the h
         headroom = max(0, BG_CLAMP_MAX - BG(t))
         delta_BG = min(delta_BG,  SOFT_APPROACH_FRACTION * headroom)
 
-The hard clamp still runs as a backstop after this cap.
+The hard clamp still runs as a backstop after this cap. `BG_SOFT_FLOOR` is 20 mg/dL and `BG_SOFT_CEILING` 385 — a short runway inside the hard `[BG_CLAMP_MIN, BG_CLAMP_MAX] = [10, 400]` bounds, so the damping shapes only the final approach to a bound and leaves a descent through physiological range untouched.
 
 ### Per-step absorption noise
 
@@ -307,7 +323,7 @@ Multiplicative noise on the per-step contributions read from the accumulation ar
 
 ### Exercise post-effect IS envelope
 
-After an exercise event ends, IS is reduced (more sensitive) for `EXERCISE_IS_DURATION_HOURS` (6h), shaped by `envelope_intensity()` with `EXERCISE_IS_RAMP_HOURS` ramps:
+A session is planned hours ahead but starts only if `BG_observed >= hypo_threshold + EXERCISE_HYPO_MARGIN` at its scheduled time (see Correction Behavior); a session that does not start schedules no envelope. After an exercise event ends, IS is reduced (more sensitive) for `EXERCISE_IS_DURATION_HOURS` (6h), shaped by `envelope_intensity()` with `EXERCISE_IS_RAMP_HOURS` ramps:
 
     reduction            = min(0.30, EXERCISE_IS_REDUCTION * (exercise_duration / EXERCISE_DURATION_MEAN_MIN))
     exercise_envelope(t) = 1 - reduction * envelope_intensity(t; start, start+6h, ramp=1h)
@@ -362,4 +378,4 @@ All curve values are in "amount per step" units:
 | HGO | grams per step | rate g/hr converted via `DT_MINUTES / 60` |
 | Exercise | grams-equivalent per step | — |
 
-Both `gamma_curve` and `basal_curve` normalize so that `sum(values) = total_amount`. There is no `flat_curve` — `basal_curve` (Bateman PK, smooth onset/peak/decline) replaced it. Never pass a rate where `total_amount` is expected.
+Both `gamma_curve` and `basal_curve` normalize so that `sum(values) = total_amount`; `gamma_curve` reaches that per-step meaning by integrating the gamma across each step (see Carbohydrate Absorption Curves). There is no `flat_curve` — `basal_curve` (Bateman PK, smooth onset/peak/decline) replaced it. Never pass a rate where `total_amount` is expected.

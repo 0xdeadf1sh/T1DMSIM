@@ -120,8 +120,9 @@ Skills are mapped through a sigmoid and clipped to a configurable range (default
 | `ge_sigma_mult` | Lognormal, clipped | Within-patient glycemic variability |
 | `meal_appetite` | Lognormal, clipped | Per-meal carb amount |
 | `basal_type` | Uniform over `BASAL_VARIANTS` | Glargine (26h) or degludec (42h) basal PK |
+| `cgm_lag_minutes` | Normal, clipped | Interstitial lag of this patient's sensor behind plasma glucose (0-20 min) |
 
-These traits are sampled independently of skill and give the population its between-patient spread in mean glucose and variability.
+These traits are sampled independently of skill and give the population its between-patient spread in mean glucose, variability, and sensor timing.
 
 
 ## Insulin Sensitivity Model
@@ -142,11 +143,11 @@ Modifiers applied on top of the diurnal pattern:
 
 - **Basal insulin**: one long-acting injection per day, anchored to `HGO_base × 24h × (body_weight_kg / BODY_WEIGHT_MEAN_KG) × is_base / ICR` and absorbed through a Bateman one-compartment PK curve `f(t) = exp(-ke·t) − exp(-ka·t)` whose duration is the patient's assigned analogue, glargine (26h) or degludec (42h).
 
-- **Bolus insulin**: dosed per meal from a carb count carrying skill-dependent error, with competent patients pre-bolusing and duration of action scaling as `√dose` about a 5U reference, so larger doses act longer and peak slightly later.
+- **Bolus insulin**: dosed per meal from a carb count carrying skill-dependent error, with competent patients pre-bolusing and duration of action scaling as `√dose` about a 5U reference, so larger doses act longer and peak slightly later. Almost every dose is preceded by a glance at the CGM: below the patient's own hypo threshold the bolus is skipped and the meal carbs go untreated, and within 30 mg/dL above it the dose is cut.
 
-- **Corrections**: the CGM is checked at skill-dependent intervals, high-competence patients subtracting insulin-on-board before correcting and attentive ones acting on BG *trends* preemptively, while extremes above 300 mg/dL or below the 55 mg/dL severe-hypo threshold can trigger rage bolusing or reflexive rescue eating.
+- **Corrections**: the CGM is checked at skill-dependent intervals, high-competence patients subtracting insulin-on-board before correcting and attentive ones acting on BG *trends* preemptively, while extremes above 300 mg/dL or below the 55 mg/dL severe-hypo threshold can trigger rage bolusing or reflexive rescue eating. What counts as low is one number per patient — a `hypo_threshold` spanning 70-90 mg/dL across the skill range, higher for the attentive and competent — and that single value fires the rescue, gates every bolus, and sets the bar for exercise. Before eating again the patient nets off the rescue carbohydrate still absorbing, in a competence-scaled fraction, so one low is treated once rather than every few minutes; a rage-eat roll, likelier the less competent the patient, drops that arithmetic and treats on the reading alone.
 
-- **Exercise**: skill-dependent probability, reduced on weekends, modelled as a negative carb-equivalent gamma curve plus the post-exercise IS boost above.
+- **Exercise**: skill-dependent probability, reduced on weekends, modelled as a negative carb-equivalent gamma curve plus the post-exercise IS boost above. A planned session starts only if BG sits at least 20 mg/dL above the patient's hypo threshold — exercise is negative food, so setting out already low drives BG straight down — and a session that never starts leaves no sensitivity tail behind it.
 
 - **Alcohol**: more likely on weekends, holidays, and rare event days, it suppresses HGO by 30–70% for 4–8 hours starting 1–2 hours after drinking — on top of insulin's own suppression — causing the delayed nocturnal lows common in real T1DM patients.
 
