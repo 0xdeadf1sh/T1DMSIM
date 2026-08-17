@@ -28,14 +28,16 @@ sentinel::
         hour_of_day.b2nd        (N, T) float32   shuffle + zstd
         day.b2nd                (N, T) int32     shuffle + zstd
         icr.npy                 (N,)   float32   raw (tiny)
-        normalization_stats.json  3-channel {mean, std} the T1DMAI model consumes
+        normalization_stats.json  4-channel {mean, std} the T1DMAI model consumes
         meta.json               generation params + aggregate statistics
 
 ``normalization_stats.json`` is the ``{bg_absolute, carb_intake,
-insulin_combined}: {mean, std}`` contract the downstream T1DMAI model reads: the
-bg mean/std are fit in Kovatchev risk space, carb/insulin in log1p space (the
-same forward transforms the model applies before its z-score), pooled over all
-rows x timesteps during the transcode pass. It is written durably before the
+insulin_combined, exercise_equiv}: {mean, std}`` contract the downstream T1DMAI
+model reads -- all four of ``T1DMAI/normalization.CHANNEL_NAMES``, which pins its
+count at 4 and refuses a stats file missing one: the bg mean/std are fit in
+Kovatchev risk space, carb/insulin/exercise in log1p space (the same forward
+transforms the model applies before its z-score), pooled over all rows x
+timesteps during the transcode pass. It is written durably before the
 meta.json sentinel so a completed cache always carries valid stats.
 
 ``DATASET.md`` (path from ``--dataset-md``, default ``./DATASET.md``) is a
@@ -234,17 +236,22 @@ NORM_BG_RISK_SCALE = 2.2211457449985317
 NORM_BG_RISK_POWER = 1.084
 NORM_BG_RISK_OFFSET = 5.540076976170212
 
-# File name of the emitted 3-channel {mean, std} stats the T1DMAI model reads.
+# File name of the emitted 4-channel {mean, std} stats the T1DMAI model reads.
 NORM_STATS_FILE = 'normalization_stats.json'
 
 # Cache channel -> T1DMAI normalization channel name. bg_absolute is fit in
 # Kovatchev risk space, carb_intake / insulin_combined in log1p space (see
 # _norm_forward); the T1DMAI model applies the same forward transform before its
 # z-score, so the fitted mean/std live in those spaces.
+# All four of T1DMAI's normalized SIGNAL channels. Omitting exercise here does
+# not fail loudly: the cache still builds and still loads, and the model simply
+# has no scale for feat 3 until someone notices the key is absent and fits it by
+# hand. Keep this map complete against T1DMAI/normalization.CHANNEL_NAMES.
 NORM_CHANNEL_SOURCES: dict[str, str] = {
     'bg_observed': 'bg_absolute',
     'total_carb': 'carb_intake',
     'total_insulin': 'insulin_combined',
+    'total_exercise': 'exercise_equiv',
 }
 
 
@@ -266,8 +273,10 @@ def _norm_bg_risk(bg: np.ndarray) -> np.ndarray:
 def _norm_forward(cache_name: str, block: np.ndarray) -> np.ndarray:
     """Forward transform for the normalization-stats fit of ``cache_name``.
 
-    ``bg_observed`` -> Kovatchev risk space; ``total_carb`` / ``total_insulin``
-    -> ``log1p(max(x, 0))``. Returns the flattened float64 transformed values.
+    ``bg_observed`` -> Kovatchev risk space; ``total_carb`` / ``total_insulin`` /
+    ``total_exercise`` -> ``log1p(max(x, 0))``, mirroring
+    ``T1DMAI/normalization.SPARSE_LOG1P_CHANNELS``. Returns the flattened float64
+    transformed values.
     """
     v = np.asarray(block, dtype=np.float64).reshape(-1)
     if cache_name == 'bg_observed':
@@ -281,8 +290,8 @@ def _finalize_norm_stats(
     """Reduce the power-sum accumulators to the T1DMAI ``{name: {mean, std}}`` contract.
 
     ``std`` is the SAMPLE std ``sqrt(M2 / (n - 1))`` (``M2 = sum_sq - sum^2/n``),
-    matching ``T1DMAI/normalization._finalize_stats``. Returns exactly the three
-    channels bg_absolute / carb_intake / insulin_combined.
+    matching ``T1DMAI/normalization._finalize_stats``. Returns exactly the four
+    channels bg_absolute / carb_intake / insulin_combined / exercise_equiv.
     """
     stats: dict[str, dict[str, float]] = {}
     for name, a in norm_acc.items():
@@ -290,6 +299,21 @@ def _finalize_norm_stats(
         mean = a['sum'] / n if n else 0.0
         m2 = (a['sum_sq'] - (a['sum'] * a['sum']) / n) if n else 0.0
         std = float(np.sqrt(max(m2, 0.0) / max(n - 1, 1)))
+        # A zero std is not a small number, it is an ABSENT channel: the window
+        # held no event at all, which happens to the sparse channels (exercise
+        # above all) when the pool is small or the kept window short.
+        # T1DMAI/normalization.load_normalization_stats REFUSES such a file --
+        # normalize divides by std + 1e-8 and would scale that channel by ~1e8 --
+        # so writing it produces a pool nothing can train on. Fail here, at the
+        # point of cause, rather than at someone's next training run.
+        if not (std > 0.0):
+            raise ValueError(
+                f"normalization channel {name!r} fitted std={std!r} over n={n} "
+                f"values: the built window contains no variation in it at all. "
+                f"A sparse channel needs a pool long enough to hold its events "
+                f"-- raise --sim-hours or --pool-size. T1DMAI rejects a stats "
+                f"file with a non-positive std, so this cache would not load."
+            )
         stats[name] = {'mean': float(mean), 'std': std}
     return stats
 
@@ -643,7 +667,7 @@ def _transcode_to_blosc2(
     ``{raw_bytes, compressed_bytes}`` inventory; the pooled ``bg_observed``
     distribution aggregates (histogram, power sums, Kovatchev numerators); and the
     per-channel ``{sum, sum_sq, n}`` power sums of the T1DMAI forward-transformed
-    bg/carb/insulin channels (risk space for bg, log1p for carb/insulin) for the
+    bg/carb/insulin/exercise channels (risk space for bg, log1p for the rest) for the
     ``normalization_stats.json`` fit. All are accumulated block-by-block as each
     channel is read for compression -- so pooled percentiles / std / skew / LBGI /
     HBGI and the normalization stats cost no extra I/O and never materialise a
@@ -1275,7 +1299,7 @@ def build_cache(
             'baseline_stats': baseline['source'] if baseline else None,
         }
         report = _finalize_report(acc, params, inventory, icr_bytes, bg_dist, baseline)
-        # normalization_stats.json (the 3-channel {mean, std} the T1DMAI model
+        # normalization_stats.json (the 4-channel {mean, std} the T1DMAI model
         # consumes) is written BEFORE the meta.json sentinel and fsync'd inside
         # the same atomic flow, so the sentinel never surfaces a cache missing
         # valid stats.
