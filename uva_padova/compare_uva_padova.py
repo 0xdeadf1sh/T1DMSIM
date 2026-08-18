@@ -267,12 +267,24 @@ def pool_blocks(blocks: list) -> dict:
 
 
 def median_iqr(vals: list) -> dict:
+    """Summarise across seeds, skipping seeds whose metric is undefined.
+
+    A UVA/Padova patient driven to the BG floor by a replayed dose stream is a
+    constant trace, so its Pearson r is NaN. Plain np.median propagates that
+    single NaN into the median and both quartiles, nulling the row for every
+    other seed. `n_nan` keeps the drop visible instead of silent.
+    """
     v = np.array(vals, dtype=float)
+    n_nan = int(np.isnan(v).sum())
+    if n_nan == len(v):
+        return {"median": float("nan"), "iqr_lo": float("nan"),
+                "iqr_hi": float("nan"), "mean": float("nan"), "n_nan": n_nan}
     return {
-        "median": float(np.median(v)),
-        "iqr_lo": float(np.percentile(v, 25)),
-        "iqr_hi": float(np.percentile(v, 75)),
-        "mean": float(np.mean(v)),
+        "median": float(np.nanmedian(v)),
+        "iqr_lo": float(np.nanpercentile(v, 25)),
+        "iqr_hi": float(np.nanpercentile(v, 75)),
+        "mean": float(np.nanmean(v)),
+        "n_nan": n_nan,
     }
 
 
@@ -574,6 +586,9 @@ def main():
 
     paired_summary = {k: median_iqr([pm[k] for pm in paired])
                       for k in ("rmse", "mad", "r", "best_lag_r", "drift", "ks", "wasserstein")}
+    for k, v in paired_summary.items():
+        if v["n_nan"]:
+            print(f"  {k}: {v['n_nan']}/{len(paired)} seeds undefined, excluded from the summary")
 
     print("  speed benchmark...")
     sweep_days = [1, 2, 5] if args.quick else [1, 3, 7, 14]

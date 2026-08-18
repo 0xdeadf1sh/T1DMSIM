@@ -4,24 +4,24 @@
 
 | Quantity | T1DMSIM | UVA/Padova |
 |---|---|---|
-| Peak rise (mg/dL) | 48 (18–83) | 32 (22–47) |
-| Time-to-peak (min) | 75 (40–145) | 75 (60–90) |
-| 3-h excursion area (mg/dL·min) | 3866 (770–8429) | 3291 (1834–5036) |
-| Recovery to baseline (min) | 155 (75–180) | 145 (95–180) |
+| Peak rise (mg/dL) | 53 (22–93) | 33 (21–48) |
+| Time-to-peak (min) | 90 (50–135) | 75 (55–90) |
+| 3-h excursion area (mg/dL·min) | 5528 (1427–11174) | 3185 (1750–4939) |
+| Recovery to baseline (min) | 180 (91–180) | 135 (95–180) |
 
 | Per-meal paired difference (T1DMSIM − UVA/Padova) | Median | IQR |
 |---|---|---|
-| Peak rise (mg/dL) | +12 | -15–+48 |
-| Time-to-peak (min) | +0 | -35–+60 |
+| Peak rise (mg/dL) | +20 | -7–+54 |
+| Time-to-peak (min) | +15 | -24–+55 |
 
 ### By carbohydrate load
 
 | Meal size | n | T1DMSIM peak (mg/dL) | UVA/Padova peak (mg/dL) | T1DMSIM t-peak (min) | UVA/Padova t-peak (min) |
 |---|---|---|---|---|---|
-| 25-40 g | 355 | 36 (11–65) | 24 (16–34) | 85 (40–165) | 70 (55–92) |
-| 40-55 g | 205 | 49 (21–81) | 35 (26–45) | 65 (40–130) | 75 (60–90) |
-| 55-70 g | 104 | 58 (21–102) | 44 (32–65) | 78 (45–158) | 80 (65–90) |
-| 70-200 g | 110 | 89 (54–121) | 53 (41–76) | 65 (45–109) | 80 (65–90) |
+| 25-40 g | 364 | 34 (13–63) | 24 (17–35) | 80 (45–130) | 80 (60–90) |
+| 40-55 g | 170 | 56 (28–89) | 35 (24–51) | 95 (55–135) | 75 (55–90) |
+| 55-70 g | 91 | 90 (55–122) | 44 (35–56) | 100 (65–145) | 65 (50–85) |
+| 70-200 g | 121 | 113 (69–157) | 58 (44–80) | 95 (70–130) | 70 (55–80) |
 
 ![Mean excursion by carbohydrate load](figures/excursion_shape_by_size.png)
 ![Paired peak rise](figures/excursion_peak_scatter.png)
