@@ -418,8 +418,9 @@ EXERCISE_CARB_EQUIV_PER_MIN = 0.5  # Negative carb equivalent per minute of exer
 # because the bar for starting exercise is higher than the bar for eating —
 # clinical guidance is to top up with carbs below ~90 mg/dL before activity.
 EXERCISE_HYPO_MARGIN = 20.0
-EXERCISE_GAMMA_K = 3.0
-EXERCISE_GAMMA_THETA = 15.0
+EXERCISE_RAMP_UP_MIN = 15.0  # linear rise of glucose disposal at the start of a session
+EXERCISE_TAIL_MIN = 90.0  # disposal continues this long after the session ends
+EXERCISE_TAIL_TAU_MIN = 30.0  # exponential decay time of that tail
 
 # Hepatic glucose output (insulin-suppressed via Hill function)
 # At zero insulin, HGO runs near UNSUPPRESSED. As plasma insulin rises, HGO
@@ -1017,6 +1018,27 @@ def basal_curve(total_amount: float, duration_minutes: float,
     area = float(np.sum(curve))
     if area > 0.0:
         curve *= total_amount / area
+    return curve
+
+
+def exercise_curve(total_amount: float, duration_min: float,
+                   dt: float = DT_MINUTES) -> np.ndarray:
+    """Glucose-disposal curve of one session: linear ramp, plateau, exponential tail.
+
+    Peak disposal is the intensity, so a long session lasts longer rather than
+    hitting harder. Normalized so ``sum(values) = total_amount``.
+    """
+    n_steps = int((duration_min + EXERCISE_TAIL_MIN) / dt)
+    if n_steps <= 0:
+        return np.array([0.0])
+    t = (np.arange(n_steps) + 0.5) * dt
+    ramp = max(dt, min(EXERCISE_RAMP_UP_MIN, duration_min / 2.0))
+    curve = np.where(
+        t < ramp, t / ramp,
+        np.where(t <= duration_min, 1.0, np.exp(-(t - duration_min) / EXERCISE_TAIL_TAU_MIN)))
+    area = float(np.sum(curve))
+    if area > 0.0:
+        curve = curve * (total_amount / area)
     return curve
 
 
@@ -1869,9 +1891,7 @@ class T1DMSimulator:
             ex_time = today_wake + ex_offset
             ex_idx = max(self.state.current_idx, day_start_idx + int(ex_time * 60 / DT_MINUTES))
             ex_duration = max(10.0, self.rng.normal(p.exercise_duration_mean_min, EXERCISE_DURATION_SIGMA_MIN))
-            ex_magnitude = ex_duration * EXERCISE_CARB_EQUIV_PER_MIN
-            ex_curve_duration = ex_duration + 90
-            ex_curve = gamma_curve(ex_magnitude, EXERCISE_GAMMA_K, EXERCISE_GAMMA_THETA, ex_curve_duration)
+            ex_curve = exercise_curve(ex_duration * EXERCISE_CARB_EQUIV_PER_MIN, ex_duration)
             self._pending_events.append((ex_idx, 'exercise', {
                 'curve': ex_curve,
                 'label': f'Exercise {ex_duration:.0f}min',
