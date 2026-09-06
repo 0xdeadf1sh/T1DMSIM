@@ -1,104 +1,7 @@
-"""
-cache_simulator.py -- pre-generate a pool of simulator trajectories to disk.
-============================================================================
+"""Pre-generate a pool of simulator rows to disk as blosc2 ``.b2nd`` channels.
 
-``T1DMSimulator.generate()`` is a stateful Python step loop; running it inside
-every training DataLoader worker starves a fast GPU. This tool generates a pool
-of ``N`` post-warmup trajectories once, compresses them to disk, and emits a
-full statistical summary (``DATASET.md``) describing the corpus. Downstream
-training then memory-maps the cache and never runs the simulator.
-
-The script is deliberately dependency-light: ``numpy`` for numerics and
-``blosc2`` for the compressed on-disk arrays. It never imports or mutates the
-simulator's internals -- it only drives the public ``generate()`` API.
-
-Layout
-------
-The output directory holds one compressed ``.b2nd`` (blosc2 NDArray) file per
-channel, a raw ``icr.npy``, a ``normalization_stats.json``, and a ``meta.json``
-sentinel::
-
-    <out_dir>/
-        bg_observed.b2nd        (N, T) float32   shuffle + zstd
-        total_carb.b2nd         (N, T) float32   shuffle + zstd
-        total_insulin.b2nd      (N, T) float32   shuffle + zstd
-        insulin_resistance.b2nd (N, T) float32   shuffle + zstd
-        hgo.b2nd                (N, T) float32   shuffle + zstd
-        total_exercise.b2nd     (N, T) float32   shuffle + zstd
-        hour_of_day.b2nd        (N, T) float32   shuffle + zstd
-        day.b2nd                (N, T) int32     shuffle + zstd
-        icr.npy                 (N,)   float32   raw (tiny)
-        normalization_stats.json  4-channel {mean, std} the T1DMAI model consumes
-        meta.json               generation params + aggregate statistics
-
-``normalization_stats.json`` is the ``{bg_absolute, carb_intake,
-insulin_combined, exercise_equiv}: {mean, std}`` contract the downstream T1DMAI
-model reads -- all four of ``T1DMAI/normalization.CHANNEL_NAMES``, which pins its
-count at 4 and refuses a stats file missing one: the bg mean/std are fit in
-Kovatchev risk space, carb/insulin/exercise in log1p space (the same forward
-transforms the model applies before its z-score), pooled over all rows x
-timesteps during the transcode pass. It is written durably before the
-meta.json sentinel so a completed cache always carries valid stats.
-
-``DATASET.md`` (path from ``--dataset-md``, default ``./DATASET.md``) is a
-human-readable render of the same statistics.
-
-Performance
------------
-Single-threaded: each patient calls ``generate()`` exactly ``warmup + keep``
-times; the warmup steps are advanced and discarded, and only the eight cached
-channels (plus the basal/bolus split used for statistics) are pulled out of the
-per-step dict straight into pre-allocated arrays -- avoiding the 21-list build
-that ``generate_hours`` performs.
-
-Multi-threaded: the simulator is pure-Python and GIL-bound, so parallelism is
-via processes (``fork`` on Linux -- the already-imported simulator module is
-inherited, so there is no per-worker re-import). Each worker simulates one row
-and writes it *directly* into a shared per-channel ``.npy`` staging memmap at
-its own row offset; only a tiny per-patient statistics dict is returned over the
-IPC boundary, never the (T,)-length channel arrays. Disjoint-row writes into a
-``MAP_SHARED`` file-backed mapping are safe across processes, and the pool join
-happens-before the transcode read.
-
-After the worker fan-out, a single transcode pass converts each staging channel
-to a compressed ``.b2nd`` (byte-shuffle + zstd), deleting the ``.npy`` as soon
-as its channel finishes so peak disk stays near ``max(raw, compressed)`` rather
-than their sum. Every file and the staging directory are fsync'd before
-``meta.json`` (the sentinel) is written and the directory is atomically renamed
-into place, so neither a process crash nor a power loss can surface a
-sentinel-present, data-truncated cache.
-
-blosc2 parallelizes compression across the blocks *within* a chunk, so transcode
-throughput scales with ``--rows-per-chunk`` (a small chunk is one block and
-transcodes single-threaded); that same value is the random-row read granularity,
-so it trades one-time build speed against per-read decompression waste.
-
-Window validity filter
-----------------------
-Any trajectory whose ``bg_observed`` touches the clamp rails -- a reading
-``>= --rail-high`` or ``<= --rail-low``, both derived from BG_CLAMP_MAX/MIN --
-is discarded and a fresh seed is drawn for that row. This keeps rows pinned flat
-against a clamp out of the training pool. The low rail tracks the dynamics floor,
-not the CGM reporting floor: it must never discard a trajectory merely for
-reaching a severe low, which is a population the pool exists to carry.
-
-Hypo oversampling
------------------
-With ``--hypo-oversample P``, a deterministic fraction ``P`` of rows are
-"hypo-designated": for those rows the seed is re-rolled until the trajectory
-spends at least ``--hypo-min-frac`` of its time below 70 mg/dL (or the attempt
-cap is hit, in which case the hypo-richest attempt is kept). Every row -- hypo
-or not -- still respects the rail filter, and each stored row is one whole,
-physiologically-consistent patient. Rejection sampling is per-row and keyed on
-``(seed_salt, cache_idx, attempt)``, so the pool is fully reproducible and the
-work parallelizes without coordination.
-
-Usage
------
-::
-
-    python cache_simulator.py --out-dir simulator_cache --pool-size 50000
-    python cache_simulator.py --pool-size 20000 --hypo-oversample 0.25 --jobs 30
+Row = ``--sim-hours`` after a 24-48 h warm-up (random clock at step 0); a row ending at the death
+step is kept and marked in ``ends_in_death.npy``, an earlier death is redrawn. No NaN anywhere.
 """
 
 from __future__ import annotations
@@ -125,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import blosc2
 
 from simulator import (BG_CLAMP_MIN, BG_CLAMP_MAX, DT_MINUTES,
-                       SIMULATOR_WARMUP_HOURS, T1DMSimulator)
+                       SIMULATOR_WARMUP_HOURS, T1DMSimulator, PatientDeath)
 
 
 # ============================================================================
@@ -171,16 +74,14 @@ _TRANSCODE_BLOCK_BYTES = 256 * 1024 * 1024
 # GENERATION DEFAULTS
 # ============================================================================
 
-DEFAULT_SIM_HOURS = 199.5    # [CF] 103.5→199.5 — room for a 7-day (336-patch) context, at the smallest length that keeps hour-of-day coverage exactly uniform. T1DMAI draws patch-aligned starts in [context, N - forward_room], so the start count is (N - context - forward)/6 + 1 and must be a multiple of 48 (half-hour slots per day) or some slots are oversampled. N = 2394 gives 384 - n_ctx starts, a multiple of 48 at EVERY whole-day context width from 24 h (336 starts) to 7 days (48); 2400 gives 385 - n_ctx and is a multiple of 48 at none of them, tilting every window distribution toward midnight. The congruence is N ≡ 90 (mod 288); 2394 is the smallest such N that leaves a 336-patch context any candidate at all, since it needs (336 + 16) * 6 = 2112 steps and the previous congruent length is 2106. PAIRED CHANGE: T1DMAI/data.py ON_THE_FLY_SIM_HOURS must move with this or its loader rejects the cache outright.
+DEFAULT_SIM_HOURS = 199.5    # PAIRED with T1DMAI/data.py ON_THE_FLY_SIM_HOURS
 DEFAULT_WARMUP_HOURS = SIMULATOR_WARMUP_HOURS  # discarded lead-in so the state has forgotten its init
+WARMUP_HOURS_MIN = 24.0  # per-row warm-up is uniform in [min(this, --warmup-hours), --warmup-hours]
+SIM_HORIZON_MULTIPLE = 2  # kept lengths simulated, so a death can end a full row
 DEFAULT_MAX_ATTEMPTS = 50    # soft cap: budget for meeting the hypo target per row
-# Extra draws devoted purely to finding a rail-VALID trajectory once the hypo
-# budget is spent, before giving up and raising. Validity is a hard requirement,
-# so this backstops the (essentially unreachable) case of a run of rail-hitters.
-_VALIDITY_HARD_EXTRA = 250
+_VALIDITY_HARD_EXTRA = 250  # extra draws for a valid row before raising
 DEFAULT_HYPO_MIN_FRAC = 0.05 # min fraction of time < 70 mg/dL for a hypo-designated row
 DEFAULT_RAIL_HIGH = BG_CLAMP_MAX - 1.0  # discard a window with any bg_observed >= this
-DEFAULT_RAIL_LOW = BG_CLAMP_MIN + 1.0   # [CF] was a hardcoded 41, which discarded every trajectory reaching a severe low — precisely the population this corpus now exists to teach. Both rails are DERIVED so a future clamp change cannot desynchronise them; the filter only ever meant to drop rows pinned flat against a clamp.
 
 # Event-detection thresholds (mirrors the README's meal detector: upward
 # threshold-crossings with a refractory window).
@@ -321,11 +222,12 @@ def _finalize_norm_stats(
 @dataclasses.dataclass(frozen=True)
 class RowConfig:
     """Per-row rejection-sampling knobs, shared read-only across workers."""
-    warmup_steps: int
+    warmup_min_steps: int
+    warmup_max_steps: int
     keep_steps: int
+    horizon_multiple: int
     max_attempts: int
     rail_high: float
-    rail_low: float
     hypo_prob: float
     hypo_min_frac: float
     hypo_threshold: float
@@ -393,44 +295,56 @@ def _count_crossings(x: np.ndarray, thresh: float, refractory_steps: int) -> int
 
 def _simulate_patient(
     seed: int, cfg: RowConfig
-) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    """
-    Simulate one patient and return its cached channels plus a statistics dict.
+) -> tuple[dict[str, np.ndarray], dict[str, Any]] | None:
+    """Simulate one patient; cached channels plus statistics, or None on an early death.
 
-    Advances ``cfg.warmup_steps`` steps unstored, then pulls the eight cached
-    channels (and the basal/bolus split, used only for statistics) out of the
-    per-step ``generate()`` dict into pre-allocated arrays.
+    Warm-up is a per-row uniform draw in steps. A survivor keeps the first keep_steps after
+    it; a death at buffer step d >= keep_steps - 1 keeps the keep_steps ending at the death.
     """
     sim = T1DMSimulator(seed=int(seed))
     gen = sim.generate
-
-    for _ in range(cfg.warmup_steps):
-        gen()
+    warm = int(np.random.default_rng([int(seed), 0x5EED]).integers(
+        cfg.warmup_min_steps, cfg.warmup_max_steps + 1))
 
     T = cfg.keep_steps
-    bg_obs = np.empty(T, np.float32)
-    carb = np.empty(T, np.float32)
-    ins = np.empty(T, np.float32)
-    ir = np.empty(T, np.float32)
-    hgo = np.empty(T, np.float32)
-    exer = np.empty(T, np.float32)
-    hod = np.empty(T, np.float32)
-    day = np.empty(T, np.int32)
-    basal = np.empty(T, np.float32)   # not cached; only for the basal:bolus split
-    bolus = np.empty(T, np.float32)
+    horizon = T * cfg.horizon_multiple
+    bg_obs = np.empty(horizon, np.float32)
+    carb = np.empty(horizon, np.float32)
+    ins = np.empty(horizon, np.float32)
+    ir = np.empty(horizon, np.float32)
+    hgo = np.empty(horizon, np.float32)
+    exer = np.empty(horizon, np.float32)
+    hod = np.empty(horizon, np.float32)
+    day = np.empty(horizon, np.int32)
+    basal = np.empty(horizon, np.float32)   # not cached; only for the basal:bolus split
+    bolus = np.empty(horizon, np.float32)
 
-    for i in range(T):
-        s = gen()
-        bg_obs[i] = s['bg_observed']
-        carb[i] = s['total_carb']
-        ins[i] = s['total_insulin']
-        ir[i] = s['insulin_resistance']
-        hgo[i] = s['hgo']
-        exer[i] = s['total_exercise']
-        hod[i] = s['hour_of_day']
-        day[i] = s['day']
-        basal[i] = s['basal_insulin']
-        bolus[i] = s['bolus_insulin']
+    died_at = -1
+    try:
+        for _ in range(warm):
+            gen()
+        for i in range(horizon):
+            s = gen()
+            bg_obs[i] = s['bg_observed']
+            carb[i] = s['total_carb']
+            ins[i] = s['total_insulin']
+            ir[i] = s['insulin_resistance']
+            hgo[i] = s['hgo']
+            exer[i] = s['total_exercise']
+            hod[i] = s['hour_of_day']
+            day[i] = s['day']
+            basal[i] = s['basal_insulin']
+            bolus[i] = s['bolus_insulin']
+            if s['is_dead']:
+                died_at = i
+                break
+    except PatientDeath:
+        return None
+    if died_at >= 0 and died_at < T - 1:
+        return None
+    lo, hi = (died_at - T + 1, died_at + 1) if died_at >= 0 else (0, T)
+    bg_obs, carb, ins, ir, hgo, exer, hod, day, basal, bolus = (
+        a[lo:hi] for a in (bg_obs, carb, ins, ir, hgo, exer, hod, day, basal, bolus))
 
     channels = {
         'bg_observed': bg_obs,
@@ -471,6 +385,8 @@ def _simulate_patient(
         # Fraction of time below the configurable hypo cutoff, used only for the
         # oversampling criterion (the class ratios below always use the fixed 70).
         'frac_below_hypo': float((bg_obs < cfg.hypo_threshold).mean()),
+        'ends_in_death': bool(died_at >= 0),
+        'warmup_steps': int(warm),
     }
     return channels, stats
 
@@ -487,19 +403,10 @@ def _finish(
 
 
 def _resolve_row(cache_idx: int, cfg: RowConfig) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    """
-    Rejection-sample the trajectory stored at ``cache_idx``.
+    """Rejection-sample the trajectory stored at ``cache_idx``.
 
-    Rail-validity (no bg_observed touching the clamp rails) is a HARD gate: an
-    invalid trajectory is never a stored candidate. Seeds are redrawn until a
-    valid one is found, and -- for a hypo-designated row -- a valid trajectory
-    that also spends at least ``hypo_min_frac`` of its time below
-    ``hypo_threshold`` is preferred. The hypo target is the only *soft* one: if
-    it cannot be met within ``max_attempts``, the hypo-richest *valid* trajectory
-    is kept (``accepted=False``). Validity is pursued for up to
-    ``max_attempts + _VALIDITY_HARD_EXTRA`` draws before giving up; exhausting
-    that without a single valid trajectory raises rather than store a rail-hitter
-    (only reachable with a degenerate rail band).
+    Valid = below the high rail and no death before a full row; redraw until valid, then
+    prefer a hypo-rich draw for a hypo-designated row (soft: past max_attempts keep the best).
     """
     is_hypo = _is_hypo_row(cache_idx, cfg.hypo_prob, cfg.seed_salt)
     hard_cap = cfg.max_attempts + _VALIDITY_HARD_EXTRA
@@ -509,11 +416,14 @@ def _resolve_row(cache_idx: int, cfg: RowConfig) -> tuple[dict[str, np.ndarray],
 
     for attempt in range(hard_cap):
         seed = _row_seed(cache_idx, attempt, cfg.seed_salt)
-        channels, stats = _simulate_patient(seed, cfg)
+        result = _simulate_patient(seed, cfg)
         n_sims += 1
+        if result is None:
+            continue  # died before a full post-warm-up row could end at the death
+        channels, stats = result
 
-        if not (stats['bg_max'] < cfg.rail_high and stats['bg_min'] > cfg.rail_low):
-            continue  # rail-hitting: never a stored candidate
+        if not stats['bg_max'] < cfg.rail_high:
+            continue  # pinned at the sensor ceiling: never a stored candidate
 
         if not is_hypo:
             return _finish(channels, stats, cache_idx, n_sims, is_hypo, accepted=True)
@@ -533,9 +443,8 @@ def _resolve_row(cache_idx: int, cfg: RowConfig) -> tuple[dict[str, np.ndarray],
         ch, st = best_valid
         return _finish(ch, st, cache_idx, n_sims, is_hypo, accepted=False)
     raise RuntimeError(
-        f'row {cache_idx}: no rail-valid trajectory (bg_observed in '
-        f'({cfg.rail_low}, {cfg.rail_high})) found in {hard_cap} attempts; '
-        f'check --rail-low / --rail-high.'
+        f'row {cache_idx}: no valid trajectory (bg_observed < {cfg.rail_high}, '
+        f'no early death) found in {hard_cap} attempts; check --rail-high.'
     )
 
 
@@ -593,9 +502,11 @@ class StatAccumulator:
         self.n_fallback = 0
         self.n_hypo_rows = 0
         self.n_hypo_qualified = 0
+        self.n_death_rows = 0
 
     def add(self, stats: dict[str, Any]) -> None:
         self.n_rows += 1
+        self.n_death_rows += int(stats['ends_in_death'])
         for k in self._SUM_KEYS:
             self.sums[k] += stats[k]
         icr = stats['icr']
@@ -949,6 +860,8 @@ def _finalize_report(
             'n_fallback_rows': acc.n_fallback,
             'n_hypo_designated': acc.n_hypo_rows,
             'n_hypo_qualified': acc.n_hypo_qualified,
+            'n_death_rows': acc.n_death_rows,
+            'death_row_frac': acc.n_death_rows / n if n else 0.0,
         },
         'storage': {
             'inventory': inventory,
@@ -1102,6 +1015,9 @@ def _render_dataset_md(report: dict[str, Any]) -> str:
             f'{_fmt_bytes(inv["raw_bytes"])} | {_fmt_bytes(inv["compressed_bytes"])} | {r:.2f}× |'
         )
     lines.append(f'| `icr` | float32 | {_fmt_bytes(st["icr_bytes"])} | {_fmt_bytes(st["icr_bytes"])} | 1.00× (raw) |')
+    if 'ends_in_death_bytes' in st:
+        lines.append(f'| `ends_in_death` | bool | {_fmt_bytes(st["ends_in_death_bytes"])} | '
+                     f'{_fmt_bytes(st["ends_in_death_bytes"])} | 1.00× (raw) |')
     lines.append('')
 
     lines.append('## Generation parameters')
@@ -1109,9 +1025,15 @@ def _render_dataset_md(report: dict[str, Any]) -> str:
     lines.append('| Parameter | Value |')
     lines.append('|---|---|')
     lines.append(f'| Post-warmup window | {p["sim_hours"]:.1f} h ({c["n_timesteps"]} steps) |')
-    lines.append(f'| Warmup discarded | {p["warmup_hours"]:.1f} h |')
+    if 'warmup_hours_min' in p:
+        lines.append(f'| Warmup discarded | {p["warmup_hours_min"]:.1f}–{p["warmup_hours"]:.1f} h per row, uniform (random clock at step 0) |')
+    else:
+        lines.append(f'| Warmup discarded | {p["warmup_hours"]:.1f} h |')
     lines.append(f'| Seed salt | {p["seed_salt"]} |')
-    lines.append(f'| Rail filter | discard bg_observed ≥ {p["rail_high"]:.0f} or ≤ {p["rail_low"]:.0f} mg/dL |')
+    lines.append(f'| Rail filter | discard bg_observed ≥ {p["rail_high"]:.0f} mg/dL |')
+    if 'n_death_rows' in smp:
+        lines.append(f'| Death rows | {smp["n_death_rows"]:,} rows end at the death step '
+                     f'({100.0 * smp["death_row_frac"]:.2f}%); a death before a full row is redrawn |')
     lines.append(f'| Hypo oversampling | prob {p["hypo_oversample"]:.3g}, ≥ {pct(p["hypo_min_frac"])} of time < {p["hypo_threshold"]:.0f} mg/dL |')
     lines.append(f'| Rejection cap | {p["max_attempts"]} attempts/row (soft) |')
     lines.append(f'| Compression | blosc2 zstd-{p["zstd_clevel"]} + byte-shuffle, {p["rows_per_chunk"]} rows/chunk |')
@@ -1145,7 +1067,6 @@ def build_cache(
     hypo_threshold: float = BG_LOW,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     rail_high: float = DEFAULT_RAIL_HIGH,
-    rail_low: float = DEFAULT_RAIL_LOW,
     seed_salt: int = 0,
     dataset_md: str = 'DATASET.md',
     baseline_stats: str | None = DEFAULT_BASELINE_STATS,
@@ -1154,8 +1075,6 @@ def build_cache(
     """Build the cache at ``out_dir`` atomically and emit ``dataset_md``."""
     if pool_size < 1:
         raise ValueError(f'pool_size must be >= 1, got {pool_size}')
-    if not rail_low < rail_high:
-        raise ValueError(f'rail_low ({rail_low}) must be < rail_high ({rail_high})')
     if not 0.0 <= hypo_oversample <= 1.0:
         raise ValueError(f'hypo_oversample must be in [0, 1], got {hypo_oversample}')
     if not 0.0 <= hypo_min_frac <= 1.0:
@@ -1180,12 +1099,14 @@ def build_cache(
         raise ValueError(f'sim_hours={sim_hours} yields {keep_steps} steps; need >= 1')
     effective_rpc = _resolve_rows_per_chunk(rows_per_chunk, pool_size, keep_steps)
 
+    warmup_min_hours = min(WARMUP_HOURS_MIN, warmup_hours)
     cfg = RowConfig(
-        warmup_steps=warmup_steps,
+        warmup_min_steps=_steps_for_hours(warmup_min_hours),
+        warmup_max_steps=warmup_steps,
         keep_steps=keep_steps,
+        horizon_multiple=SIM_HORIZON_MULTIPLE,
         max_attempts=max_attempts,
         rail_high=rail_high,
-        rail_low=rail_low,
         hypo_prob=hypo_oversample,
         hypo_min_frac=hypo_min_frac,
         hypo_threshold=hypo_threshold,
@@ -1195,8 +1116,9 @@ def build_cache(
 
     print(f'Pool size:          {pool_size:,}')
     print(f'Post-warmup window: {sim_hours} h ({keep_steps} steps/patient)')
-    print(f'Warmup discarded:   {warmup_hours} h ({warmup_steps} steps)')
-    print(f'Rail filter:        discard bg_observed >= {rail_high} or <= {rail_low} mg/dL')
+    print(f'Warmup discarded:   {warmup_min_hours:g}-{warmup_hours:g} h per row, uniform')
+    print(f'Death rows:         a row ends at the death step when a full row precedes it; earlier deaths redrawn')
+    print(f'Rail filter:        discard bg_observed >= {rail_high} mg/dL')
     print(f'Hypo oversampling:  prob {hypo_oversample} (>= {hypo_min_frac} of time < {hypo_threshold:g} mg/dL)')
     print(f'Rejection cap:      {max_attempts} attempts/row (soft; hypo target)')
     print(f'Workers:            {n_jobs}')
@@ -1206,6 +1128,7 @@ def build_cache(
 
     acc = StatAccumulator()
     icr_arr = np.zeros(pool_size, dtype=np.float32)
+    death_arr = np.zeros(pool_size, dtype=np.bool_)
     t0 = time.time()
 
     try:
@@ -1225,6 +1148,7 @@ def build_cache(
             nonlocal completed
             acc.add(stats)
             icr_arr[stats['idx']] = stats['icr']
+            death_arr[stats['idx']] = stats['ends_in_death']
             completed += 1
             if completed == 1 or completed % 100 == 0 or completed == pool_size:
                 elapsed = time.time() - t0
@@ -1277,6 +1201,9 @@ def build_cache(
         np.save(icr_path, icr_arr)
         _fsync_file(icr_path)
         icr_bytes = os.path.getsize(icr_path)
+        death_path = os.path.join(partial_dir, 'ends_in_death.npy')
+        np.save(death_path, death_arr)
+        _fsync_file(death_path)
 
         params = {
             'out_dir': out_dir,
@@ -1284,13 +1211,14 @@ def build_cache(
             'n_timesteps': int(keep_steps),
             'sim_hours': float(sim_hours),
             'warmup_hours': float(warmup_hours),
+            'warmup_hours_min': float(warmup_min_hours),
+            'sim_horizon_multiple': int(SIM_HORIZON_MULTIPLE),
             'dt_minutes': float(DT_MINUTES),
             'hypo_oversample': float(hypo_oversample),
             'hypo_min_frac': float(hypo_min_frac),
             'hypo_threshold': float(hypo_threshold),
             'max_attempts': int(max_attempts),
             'rail_high': float(rail_high),
-            'rail_low': float(rail_low),
             'seed_salt': int(seed_salt),
             'rows_per_chunk': int(effective_rpc),
             'zstd_clevel': int(zstd_clevel),
@@ -1299,6 +1227,8 @@ def build_cache(
             'baseline_stats': baseline['source'] if baseline else None,
         }
         report = _finalize_report(acc, params, inventory, icr_bytes, bg_dist, baseline)
+        report['storage']['ends_in_death_bytes'] = int(os.path.getsize(death_path))
+        report['storage']['disk_total_bytes'] += report['storage']['ends_in_death_bytes']
         # normalization_stats.json (the 4-channel {mean, std} the T1DMAI model
         # consumes) is written BEFORE the meta.json sentinel and fsync'd inside
         # the same atomic flow, so the sentinel never surfaces a cache missing
@@ -1382,8 +1312,6 @@ def main() -> int:
                         help='Soft rejection cap per row for meeting the hypo target.')
     parser.add_argument('--rail-high', type=float, default=DEFAULT_RAIL_HIGH,
                         help='Discard a window with any bg_observed >= this (mg/dL).')
-    parser.add_argument('--rail-low', type=float, default=DEFAULT_RAIL_LOW,
-                        help='Discard a window with any bg_observed <= this (mg/dL).')
     parser.add_argument('--seed-salt', type=int, default=0,
                         help='Salt folded into every seed; change to draw an independent corpus.')
     parser.add_argument('--dataset-md', type=str, default='DATASET.md',
@@ -1424,7 +1352,6 @@ def main() -> int:
         hypo_threshold=args.hypo_threshold,
         max_attempts=args.max_attempts,
         rail_high=args.rail_high,
-        rail_low=args.rail_low,
         seed_salt=args.seed_salt,
         dataset_md=args.dataset_md,
         baseline_stats=None if args.no_baseline else args.baseline_stats,
