@@ -673,10 +673,14 @@ SEVERE_HYPO_REFRACTORY_MIN = 10.0      # Shorter refractory for severe hypo (<55
                                        # bounced between severe hypo and post-overcorrection peaks.
 
 # Rage behavior
-RAGE_EAT_BG_THRESHOLD = 50.0       # Below this, patient may rage eat
-RAGE_EAT_CARB_MIN = 12.0           # Minimum rage eat carbs
-RAGE_EAT_CARB_MAX = 30.0           # Maximum rage eat carbs
-RAGE_EAT_PROBABILITY_BASE = 0.10   # Base chance of rage eating when below threshold
+RAGE_EAT_CARB_MIN = 40.0  # one large fast-carb intake, no rule-of-15 recheck
+RAGE_EAT_CARB_MAX = 80.0
+RAGE_EAT_PROBABILITY_BASE = 0.10  # per rescue, chance of rage-eating anyway, times (1 - competence)
+HYPO_STUCK_RESCUES = 3  # the n-th rescue inside the window below is a rage-eat
+HYPO_STUCK_WINDOW_MIN = 120.0
+HYPO_STUCK_STILL_LOW_MIN = 30.0  # still below threshold this long after a rescue: rage-eat
+RAGE_EAT_BG_THRESHOLD = 45.0  # below this reading every rescue is a rage-eat
+RAGE_EAT_ON_SECOND_SEVERE = True  # a second rescue inside a severe (<55) episode is a rage-eat
 # [CF] Rule-of-15's second half: "wait, RECHECK, and only re-dose if still low".
 # The refractory timer supplies the waiting; this supplies the recheck. Without
 # it the patient re-treats purely on current BG, blind to the glucose already
@@ -920,6 +924,7 @@ class SimulatorState:
     last_cgm_alarm_idx: int = -9999
     # Counter-regulatory hormone response in [0, 1]; ramps below COUNTER_REGULATORY_THRESHOLD.
     counter_reg_level: float = 0.0
+    rescue_history: list = field(default_factory=list)  # step indices of nibble rescues, windowed
     # Time index of the next scheduled basal injection. -1 = uninitialised
     # (anchored to the first day's wake_idx on the first _generate_day_events
     # call). Advanced by the fixed once-daily BASAL_DOSE_INTERVAL_HOURS (24h)
@@ -2120,33 +2125,43 @@ class T1DMSimulator:
 
         # --- Handle hypoglycemia ---
         if s.bg_observed < eff_low_thresh:
-            # Refractory: in moderate hypo (55-70) a second correction within
-            # 20 min just stacks carbs on top of carbs that haven't acted yet.
-            # Severe hypo (<55) uses a SHORTER refractory (10 min) rather than
-            # bypassing entirely — symptomatic patients still rage-eat multiple
-            # times if BG stays low, but rule-of-15 says wait between doses so
-            # the first rescue's carbs can start acting. Without the gap the
-            # CGM-check bypass let the patient stack 3-5 rage doses in 10-15 min,
-            # then overshoot to 140-180 (visible sawtooth). A full bypass also
-            # broke TBR2 when stacked carbs produced post-correction crashes.
+            # A stuck low: repeated nibbles inside the window, or still low well after one.
+            window_steps = int(HYPO_STUCK_WINDOW_MIN / DT_MINUTES)
+            s.rescue_history = [i for i in s.rescue_history if time_idx - i < window_steps]
+            since_last = time_idx - s.last_hypo_correction_idx
+            # Below the rage threshold, or still low long after a rescue, nothing waits.
+            no_wait = (s.bg_observed < RAGE_EAT_BG_THRESHOLD
+                       or (bool(s.rescue_history)
+                           and since_last >= int(HYPO_STUCK_STILL_LOW_MIN / DT_MINUTES)))
+
+            # Refractory between rescues: rule-of-15 says wait for the last dose to act.
             refractory_min = SEVERE_HYPO_REFRACTORY_MIN if severe_hypo else HYPO_CORRECTION_REFRACTORY_MIN
-            refractory_steps = int(refractory_min / DT_MINUTES)
-            if time_idx - s.last_hypo_correction_idx < refractory_steps:
+            if not no_wait and since_last < int(refractory_min / DT_MINUTES):
                 return
 
-            # Rule-of-15 recheck: account for rescue glucose already swallowed
-            # and still absorbing before deciding whether to eat more, and how
-            # much. Skill-scaled, and a rage-eat roll — likelier the less
-            # competent the patient — discards the arithmetic entirely; a
-            # frightened patient at 40 eats the whole packet.
+            stuck = (no_wait
+                     or len(s.rescue_history) >= HYPO_STUCK_RESCUES - 1
+                     or (RAGE_EAT_ON_SECOND_SEVERE and severe_hypo and bool(s.rescue_history)))
+
+            # Rage-eat: one large fast-carb intake with no recheck, ending the episode outright.
+            rage_eat = stuck or self.rng.random() < RAGE_EAT_PROBABILITY_BASE * (1.0 - p.dosing_competence)
+            if rage_eat:
+                grams = float(self.rng.uniform(RAGE_EAT_CARB_MIN, RAGE_EAT_CARB_MAX))
+                duration = max(HYPO_CARB_K * HYPO_CARB_THETA * 4, 60)
+                self.inject_curve(gamma_curve(grams, HYPO_CARB_K, HYPO_CARB_THETA, duration),
+                                  time_idx, 'correction_carb', f'Rage eat {grams:.0f}g')
+                s.last_hypo_correction_idx = time_idx
+                s.rescue_history = []
+                if severe_hypo:
+                    recheck_steps = max(1, 15 // DT_MINUTES)
+                    s.last_cgm_check_idx = time_idx - check_interval_steps + recheck_steps
+                return
+
+            # Rule-of-15 recheck: count rescue glucose still absorbing before eating more.
             rescue_cob = (float(np.sum(self._rescue_totals[time_idx:]))
                           if time_idx < len(self._rescue_totals) else 0.0)
-            rage_eat = self.rng.random() < RAGE_EAT_PROBABILITY_BASE * (1.0 - p.dosing_competence)
-            if rage_eat:
-                cob_consideration = 0.0
-            else:
-                awareness = COB_AWARENESS_BASE + COB_AWARENESS_SKILL * p.dosing_competence
-                cob_consideration = rescue_cob * BG_SCALE_FACTOR * awareness
+            awareness = COB_AWARENESS_BASE + COB_AWARENESS_SKILL * p.dosing_competence
+            cob_consideration = rescue_cob * BG_SCALE_FACTOR * awareness
             # Where the patient reckons they are heading once that glucose lands.
             projected_bg = s.bg_observed + cob_consideration
             if projected_bg >= eff_low_thresh:
@@ -2197,6 +2212,7 @@ class T1DMSimulator:
                 self.inject_curve(followup_curve, time_idx, 'correction_carb',
                                   f'Hypo followup {followup_grams:.0f}g slow')
             s.last_hypo_correction_idx = time_idx
+            s.rescue_history.append(time_idx)
 
             # After a SEVERE hypo correction, recheck soon (don't wait the full
             # CGM interval). Mild hypos keep the normal cadence so they linger

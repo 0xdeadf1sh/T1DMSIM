@@ -295,8 +295,8 @@ class TestSevereHypoRefractory:
     def _setup_severe_hypo(self, sim, idx):
         """Force the simulator into a severe-hypo state the patient will act on."""
         s = sim.state
-        s.bg = 40.0
-        s.bg_observed = 40.0
+        s.bg = 50.0  # severe, but above RAGE_EAT_BG_THRESHOLD so the refractory applies
+        s.bg_observed = 50.0
         s.last_cgm_check_idx = -9999
         s.last_hypo_correction_idx = -9999
         # Ensure awake — wake at start, sleep far in the future
@@ -446,8 +446,8 @@ class TestHypoFollowupSnack:
         sim.generate()
         idx = sim.state.current_idx
         s = sim.state
-        s.bg = 40.0
-        s.bg_observed = 40.0
+        s.bg = 50.0  # severe, above RAGE_EAT_BG_THRESHOLD: the first rescue is a nibble
+        s.bg_observed = 50.0
         s.last_cgm_check_idx = -9999
         s.last_hypo_correction_idx = -9999
         sim._today_wake_idx = 0
@@ -494,8 +494,15 @@ class TestHypoFollowupSnack:
             # Toggle ONLY the follow-up snack (via its carb fraction), holding
             # the patient and skill fixed — comparing high- vs low-skill patients
             # confounds the snack with every other skill-dependent behaviour.
-            _saved = _sim.HYPO_FOLLOWUP_FRACTION
-            _sim.HYPO_FOLLOWUP_FRACTION = _saved if with_followup else 0.0
+            _keys = ('HYPO_FOLLOWUP_FRACTION', 'RAGE_EAT_PROBABILITY_BASE', 'RAGE_EAT_BG_THRESHOLD',
+                     'RAGE_EAT_ON_SECOND_SEVERE', 'HYPO_STUCK_RESCUES', 'HYPO_STUCK_STILL_LOW_MIN')
+            _saved = {k: getattr(_sim, k) for k in _keys}
+            _sim.HYPO_FOLLOWUP_FRACTION = _saved['HYPO_FOLLOWUP_FRACTION'] if with_followup else 0.0
+            _sim.RAGE_EAT_PROBABILITY_BASE = 0.0  # rage-eating would dominate both arms
+            _sim.RAGE_EAT_BG_THRESHOLD = 0.0
+            _sim.RAGE_EAT_ON_SECOND_SEVERE = False
+            _sim.HYPO_STUCK_RESCUES = 10 ** 6
+            _sim.HYPO_STUCK_STILL_LOW_MIN = 1e9
             try:
                 sim = T1DMSimulator(seed=seed)
                 p = sim.patient
@@ -507,7 +514,8 @@ class TestHypoFollowupSnack:
                 p.glucose_effectiveness = 0.0
                 return _run_body(sim)
             finally:
-                _sim.HYPO_FOLLOWUP_FRACTION = _saved
+                for k, v in _saved.items():
+                    setattr(_sim, k, v)
 
         def _run_body(sim):
             sim._pending_events = []
@@ -579,8 +587,9 @@ class TestSevereHypoRescueAmount:
             f"{[c.label for c in rescues]}")
         return float(np.sum(rescues[0].values))
 
-    def test_rescue_minimum_is_at_least_14g(self):
+    def test_rescue_minimum_is_at_least_14g(self, monkeypatch):
         """Severe hypo with tiny deficit should still rescue with >=14g."""
+        monkeypatch.setattr(simulator, 'RAGE_EAT_PROBABILITY_BASE', 0.0)
         sim = T1DMSimulator(seed=0)
         # BG just below threshold: deficit ~= 0
         g = self._force_correction_and_get_grams(sim, SEVERE_HYPO_THRESHOLD - 0.5)
@@ -588,8 +597,9 @@ class TestSevereHypoRescueAmount:
             f"rescue at BG={SEVERE_HYPO_THRESHOLD-0.5} returned {g:.2f}g, "
             f"below the 14g floor")
 
-    def test_rescue_grams_grow_with_deficit(self):
+    def test_rescue_grams_grow_with_deficit(self, monkeypatch):
         """Deeper hypo must yield strictly more carbs (deficit-driven term)."""
+        monkeypatch.setattr(simulator, 'RAGE_EAT_PROBABILITY_BASE', 0.0)
         # Use the same patient (same seed) so skill multiplier is constant.
         sim_shallow = T1DMSimulator(seed=4)
         sim_deep = T1DMSimulator(seed=4)
@@ -611,8 +621,6 @@ class TestHypoCorrectionSkillScaling:
         p = sim.patient
         p.attentiveness = attentiveness
         p.dosing_competence = dosing
-        # Cancel the rage-eat random branch by raising BG above
-        # RAGE_EAT_BG_THRESHOLD but keeping it below eff_low_thresh.
         sim.generate()
         idx = sim.state.current_idx
         s = sim.state
@@ -632,9 +640,10 @@ class TestHypoCorrectionSkillScaling:
             f"expected one rescue curve, got {len(rescues)}")
         return float(np.sum(rescues[0].values))
 
-    def test_high_skill_corrects_with_more_grams(self):
+    def test_high_skill_corrects_with_more_grams(self, monkeypatch):
         """High-skill (skill_avg=0.9) > low-skill (skill_avg=0.3) by the
         (1 + 1.5*skill_avg) multiplier — ratio ~= 2.35/1.45 ~= 1.6×."""
+        monkeypatch.setattr(simulator, 'RAGE_EAT_PROBABILITY_BASE', 0.0)
         sim_low = T1DMSimulator(seed=0)
         sim_high = T1DMSimulator(seed=0)  # same patient, only skills overridden
         g_low = self._moderate_hypo_grams(sim_low, 0.3, 0.3)
