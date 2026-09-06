@@ -353,8 +353,7 @@ PATIENCE_TIME_COMPETENT = 120  # Minutes before re-correcting (competent). IOB-a
                                # every ~2 h when high. Longer patience drops correction frequency
                                # well below the real-cohort rate.
 PATIENCE_TIME_INCOMPETENT = 60  # Minutes before re-correcting (incompetent)
-CORRECTION_FACTOR_MEAN = 40.0  # mg/dL drop per unit of insulin
-CORRECTION_FACTOR_SIGMA = 20.0  # [HIVAR 2x] 10.0→20.0 — correction-factor scatter
+CORRECTION_FACTOR_REL_SIGMA = 0.15  # lognormal error of the patient's CF estimate
 BG_TARGET = 158.0  # Target BG for corrections. Aims near the real-cohort median (155–157) — corrections targeting lower routinely overshoot into hypo because absorbed insulin keeps acting after BG arrives at target. Sits well above the ATTD ideal (~110) — sim correction
                    # kinetics + delivery lag tend to overshoot, so a higher target keeps median BG
                    # near the real OhioT1DM ~157 and TBR1 near real's ~3% rather than runaway hypo.
@@ -1184,7 +1183,8 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     ir = profile.insulin_resistance_factor
     profile.is_base = max(0.3, ir * np.exp(rng.normal(0.0, IR_TO_IS_NOISE_SIGMA)))
     profile.icr = max(3.0, (ICR_MEAN / ir) * np.exp(rng.normal(0.0, IR_TO_ICR_NOISE_SIGMA)))
-    profile.correction_factor = max(10.0, rng.normal(CORRECTION_FACTOR_MEAN, CORRECTION_FACTOR_SIGMA) / ir)
+    profile.correction_factor = (BG_SCALE_FACTOR * ICR_MEAN / ir
+                                 * float(np.exp(rng.normal(0.0, CORRECTION_FACTOR_REL_SIGMA))))
     # Per-patient glucose effectiveness (Sg), lognormal around the population
     # mean so real ~2-3x inter-individual spread is preserved; floored so no
     # patient is a pure integrator (which would re-open the long-ACF tail).
@@ -1225,7 +1225,7 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     # Skipping the IS_base or weight factors systematically biases populations.
     # Competent patients (high s3) stay close to ideal; incompetent ones deviate more.
     weight_factor = profile.body_weight_kg / BODY_WEIGHT_MEAN_KG
-    ideal_basal = (HGO_BASE_GRAMS_PER_HOUR * 24.0) * weight_factor * profile.is_base / profile.icr
+    ideal_basal = (HGO_BASE_GRAMS_PER_HOUR * 24.0) * weight_factor * profile.is_base / ICR_MEAN
     # Strong nonlinearity on s3 so high-skill patients have near-perfect basal
     # and don't rely on the basal_adjustment feedback (which can oscillate).
     noise_scale = BASAL_DOSE_SIGMA * (1.5 - s3) ** 2.5
@@ -2508,7 +2508,7 @@ class T1DMSimulator:
         # IS now divides insulin's effect: resistant patients (IR>1) clear less
         # glucose per unit insulin; sensitive patients (IR<1) clear more.
         glucose_in = total_carb + hgo_value - total_exercise
-        glucose_out = total_insulin * p.icr / insulin_resistance_factor
+        glucose_out = total_insulin * ICR_MEAN / insulin_resistance_factor
         bg_delta = BG_SCALE_FACTOR * (glucose_in - glucose_out)
 
         # Glucose effectiveness (Bergman Sg): insulin-independent restoring pull

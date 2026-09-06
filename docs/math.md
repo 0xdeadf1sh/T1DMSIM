@@ -126,11 +126,11 @@ In T1DM the incretin / GLP-1 axis is blunted and there is no endogenous insulin 
 ## BG Delta Computation
 
     glucose_in  = total_carb + HGO - exercise
-    glucose_out = total_insulin * ICR / IS(t)
+    glucose_out = total_insulin * ICR_MEAN / IS(t)
     delta_BG    = BG_SCALE_FACTOR * (glucose_in - glucose_out)
     delta_BG   += Sg * (E(t) - BG)     # glucose-effectiveness restoring pull (see below)
 
-`IS(t)` divides the insulin side only: insulin-resistant patients (IS > 1) clear less glucose per unit insulin. HGO suppression by insulin is handled separately by the Hill function (see Hepatic Glucose Output). Physiological guardrails, then the clamp:
+`IS(t)` divides the insulin side only: insulin-resistant patients (IS > 1) clear less glucose per unit insulin. The grams one unit clears is `ICR_MEAN / IS(t)`; the patient's `icr = ICR_MEAN / ir · noise` and `correction_factor = BG_SCALE_FACTOR · ICR_MEAN / ir · noise` are estimates of it, so a dose is wrong only by the estimate's error. HGO suppression by insulin is handled separately by the Hill function (see Hepatic Glucose Output). Physiological guardrails, then the ceiling and the death line:
 
     if BG > RENAL_THRESHOLD:
         delta_BG -= (BG - RENAL_THRESHOLD) * RENAL_CLEARANCE_RATE

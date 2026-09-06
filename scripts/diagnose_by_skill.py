@@ -23,7 +23,7 @@ import argparse
 import numpy as np
 from simulator import (
     T1DMSimulator, DT_MINUTES,
-    BODY_WEIGHT_MEAN_KG, HGO_BASE_GRAMS_PER_HOUR,
+    BODY_WEIGHT_MEAN_KG, HGO_BASE_GRAMS_PER_HOUR, ICR_MEAN,
 )
 
 
@@ -114,7 +114,7 @@ def main():
 
     # Ideal basal from generate_patient() formula
     weight_factor = weight / BODY_WEIGHT_MEAN_KG
-    ideal_basal = HGO_BASE_GRAMS_PER_HOUR * 24.0 * weight_factor * is_base / icr
+    ideal_basal = HGO_BASE_GRAMS_PER_HOUR * 24.0 * weight_factor * is_base / ICR_MEAN
     titration = basal / ideal_basal
 
     s3_med = float(np.median(s3))

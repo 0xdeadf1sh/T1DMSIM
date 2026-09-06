@@ -15,7 +15,7 @@ import simulator
 from simulator import (
     T1DMSimulator, gamma_curve, basal_curve, bolus_pk_for_dose,
     HGO_BASE_GRAMS_PER_HOUR, DT_MINUTES,
-    BASAL_DURATION_HOURS,
+    BASAL_DURATION_HOURS, ICR_MEAN,
 )
 
 
@@ -114,6 +114,7 @@ def _quiet_sim(seed: int, initial_bg: float = 100.0) -> T1DMSimulator:
     sim.patient.body_weight_kg = 75.0
     sim.patient.insulin_resistance_factor = 1.0
     sim.patient.is_base = 1.0
+    sim.patient.icr = ICR_MEAN
     return sim
 
 

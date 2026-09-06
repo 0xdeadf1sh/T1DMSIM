@@ -66,11 +66,11 @@ At each 5-minute time step, the BG delta is computed as:
 
 ```
 glucose_in  = carbs + hepatic_output - exercise
-glucose_out = insulin_units * ICR / insulin_sensitivity
+glucose_out = insulin_units * ICR_MEAN / insulin_sensitivity
 delta_BG    = alpha * (glucose_in - glucose_out) + S_g * (E(t) - BG)
 ```
 
-`alpha` is `BG_SCALE_FACTOR`, the master constant converting abstract units to mg/dL. Insulin sensitivity divides the clearance term: resistant patients (IS > 1) clear less glucose per unit insulin, sensitive patients (IS < 1) clear more. HGO suppression by insulin is handled separately by the Hill function, so IS modulates only peripheral insulin action.
+`alpha` is `BG_SCALE_FACTOR`, the master constant converting abstract units to mg/dL. Insulin sensitivity divides the clearance term: resistant patients (IS > 1) clear less glucose per unit insulin, sensitive patients (IS < 1) clear more. The patient's own carb ratio and correction factor are estimates of that clearance, each carrying its own error, and dosing error is that estimation error alone. HGO suppression by insulin is handled separately by the Hill function, so IS modulates only peripheral insulin action.
 
 `S_g * (E(t) - BG)` is glucose effectiveness — the Bergman-minimal-model insulin-independent pull toward a stochastic equilibrium `E(t)`, without which within-band BG would drift as an undamped integrator of net flux.
 
@@ -126,7 +126,7 @@ Modifiers applied on top of the diurnal pattern:
 
 - **Meals**: number, timing, and carb amount are all skill-dependent, and each meal decomposes into 2-5 overlapping gamma absorption components classified fast / medium / slow by the patient's `slow_carb_preference`, plus a protein/fat tail.
 
-- **Basal insulin**: one long-acting injection per day, anchored to `HGO_base × 24h × (body_weight_kg / BODY_WEIGHT_MEAN_KG) × is_base / ICR` and absorbed through a Bateman one-compartment PK curve `f(t) = exp(-ke·t) − exp(-ka·t)` whose duration is the patient's assigned analogue, glargine (26h) or degludec (42h).
+- **Basal insulin**: one long-acting injection per day, anchored to `HGO_base × 24h × (body_weight_kg / BODY_WEIGHT_MEAN_KG) × is_base / ICR_MEAN` and absorbed through a Bateman one-compartment PK curve `f(t) = exp(-ke·t) − exp(-ka·t)` whose duration is the patient's assigned analogue, glargine (26h) or degludec (42h).
 
 - **Bolus insulin**: dosed per meal from a carb count carrying skill-dependent error, with competent patients pre-bolusing and duration of action scaling as `√dose` about a 5U reference, so larger doses act longer and peak slightly later. Almost every dose is preceded by a glance at the CGM: below the patient's own hypo threshold the bolus is skipped and the meal carbs go untreated, and within 30 mg/dL above it the dose is cut.
 

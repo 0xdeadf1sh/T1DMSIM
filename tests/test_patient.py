@@ -15,7 +15,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from simulator import (
     generate_patient, SKILL_MIN, SKILL_MAX, HGO_BASE_GRAMS_PER_HOUR,
-    BASAL_DOSE_SIGMA,
+    BASAL_DOSE_SIGMA, ICR_MEAN,
     BOLUS_VARIANTS, BASAL_VARIANTS, BASAL_DOSE_INTERVAL_HOURS,
 )
 
@@ -69,17 +69,15 @@ class TestPhysiologicalParameters:
             assert p.is_base > 0
 
     def test_basal_dose_tied_to_hgo_icr(self):
-        """Basal dose should be near ideal = HGO * 24 * weight_factor * IS_base / ICR.
+        """Basal dose should be near ideal = HGO * 24 * weight_factor * IS_base / ICR_MEAN.
 
-        The ideal dose balances 24h of HGO at the patient's own insulin
-        sensitivity (glucose_out = insulin * ICR / IS at steady state) AND the
-        patient's body weight (HGO scales with liver mass). Patients should be
-        within a few sigma of that ideal.
+        The ideal dose balances 24h of HGO at the patient's own insulin sensitivity
+        (glucose_out = insulin * ICR_MEAN / IS at steady state) and body weight.
         """
         for seed in range(50):
             p = make_patient(seed)
             weight_factor = p.body_weight_kg / 75.0
-            ideal = (HGO_BASE_GRAMS_PER_HOUR * 24.0) * weight_factor * p.is_base / p.icr
+            ideal = (HGO_BASE_GRAMS_PER_HOUR * 24.0) * weight_factor * p.is_base / ICR_MEAN
             tolerance = BASAL_DOSE_SIGMA * 5.0
             assert abs(p.basal_dose - ideal) < tolerance, (
                 f"seed={seed}: basal_dose={p.basal_dose:.1f} too far from "
