@@ -86,7 +86,7 @@ def isolated_biology(monkeypatch):
     # all four leaves the measured bg_delta as the pure basal-vs-HGO / bolus-vs-
     # meal flux, so a broken dose actually shows up (a zero basal used to pass).
     monkeypatch.setattr(simulator, 'RENAL_CLEARANCE_RATE', 0.0)
-    monkeypatch.setattr(simulator, 'COUNTER_REGULATORY_RATE', 0.0)
+    monkeypatch.setattr(simulator, 'COUNTER_REG_MAX_RATE', 0.0)
     monkeypatch.setattr(simulator, 'SEVERE_HYPO_GLUCAGON_RATE', 0.0)
     monkeypatch.setattr(simulator, 'BG_DEATH_MGDL', -1e9)
     monkeypatch.setattr(T1DMSimulator, '_check_and_correct', lambda self, idx: None)

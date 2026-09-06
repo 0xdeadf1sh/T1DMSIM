@@ -390,6 +390,9 @@ HYPO_CORRECTION_BASE_GRAMS = 8.0  # Base correction (still under rule-of-15 of 1
 HYPO_PANIC_FACTOR_BASE = 1.0  # How much extra is eaten, scaled by 1/s3
 HYPO_DETECTION_AWAKE_MINUTES = 5.0  # Detection delay awake
 HYPO_DETECTION_ASLEEP_LAMBDA = 30.0  # Exponential mean for detection delay asleep (severe hypo bypasses this)
+HYPO_UNAWARE_PROB_BASE = 0.10  # chance a median-attentiveness patient misses a severe hypo
+HYPO_UNAWARE_SKILL_SCALE = 5.0  # attentiveness exponent on that chance
+HYPO_UNAWARE_PROB_MAX = 0.30  # per-patient cap
 
 # Exercise
 EXERCISE_PROBABILITY_BASE = 0.3  # Base daily probability
@@ -571,8 +574,11 @@ BG_DEATH_MGDL = 20.0  # true BG at or below this ends the trajectory; the next g
 # BG regulatory computation
 RENAL_THRESHOLD = 180.0  # Kidneys start excreting glucose above this
 RENAL_CLEARANCE_RATE = 0.015  # [DAMP] 0.005→0.015 — arrest hyper excursions faster (shorter/shallower highs).
-COUNTER_REGULATORY_THRESHOLD = 70.0  # Body releases glucagon below this
-COUNTER_REGULATORY_RATE = 1.5  # [DAMP] 0.8→1.5 — arrest hypo excursions faster.
+COUNTER_REGULATORY_THRESHOLD = 70.0  # hormone response begins below this
+COUNTER_REG_FULL_BG = 40.0  # response saturates at this BG
+COUNTER_REG_MAX_RATE = 3.0  # mg/dL per step at full response with glycogen available (36/h)
+COUNTER_REG_TAU_UP_MIN = 20.0  # rise time constant of the hormone response
+COUNTER_REG_TAU_DOWN_MIN = 60.0  # decay time constant once BG recovers
 SEVERE_HYPO_THRESHOLD = 55.0  # Below this, glucagon dump kicks in
 SEVERE_HYPO_GLUCAGON_RATE = 2.0  # Extra mg/dL per step at severity=1.0
 
@@ -640,6 +646,14 @@ CGM_NOISE_FRACTION = 0.060  # [GE-FIX] 0.120→0.060 — reverted the HIVAR 2x b
 # matches documented Dexcom/Libre ARMA models).
 NOISE_AR1_RHO_METABOLIC = 0.85
 NOISE_AR1_RHO_SENSOR = 0.92
+
+# CGM low alarm
+CGM_LOW_ALARM_MGDL = 55.0  # the alarm fires on a reading below this
+CGM_ALARM_ENABLED_PROB = 0.85  # share of patients who keep the alarm on
+CGM_ALARM_REPEAT_MIN = 15.0  # re-alert interval while the reading stays low
+CGM_ALARM_RESPONSE_AWAKE = 0.95  # chance one alert is acted on while awake
+CGM_ALARM_RESPONSE_ASLEEP_BASE = 0.5  # asleep: base + skill * attentiveness
+CGM_ALARM_RESPONSE_ASLEEP_SKILL = 0.4
 # Pre-computed √(1 − ρ²) — the per-step innovation scale that preserves
 # stationary variance σ² when iterating x_t = ρ·x_{t−1} + scale·ε_t.
 NOISE_AR1_INNOV_METABOLIC = float(np.sqrt(1.0 - NOISE_AR1_RHO_METABOLIC ** 2))
@@ -836,6 +850,10 @@ class PatientProfile:
     exercise_probability: float = 0.5
     panic_factor: float = 1.0
     basal_miss_prob: float = 0.01
+    hypo_unaware_prob: float = HYPO_UNAWARE_PROB_BASE
+    cgm_alarm_enabled: bool = True
+    alarm_response_awake: float = CGM_ALARM_RESPONSE_AWAKE
+    alarm_response_asleep: float = CGM_ALARM_RESPONSE_ASLEEP_BASE
     meal_jitter_sigma_min: float = 30.0
 
 
@@ -896,6 +914,12 @@ class SimulatorState:
     # Basal dose programme: cumulative titration factor and the step of the next change.
     basal_program_factor: float = 1.0
     next_basal_titration_idx: int = -1
+    # Severe-hypo episode perception, rolled once at onset against hypo_unaware_prob.
+    in_severe_episode: bool = False
+    severe_episode_unaware: bool = False
+    last_cgm_alarm_idx: int = -9999
+    # Counter-regulatory hormone response in [0, 1]; ramps below COUNTER_REGULATORY_THRESHOLD.
+    counter_reg_level: float = 0.0
     # Time index of the next scheduled basal injection. -1 = uninitialised
     # (anchored to the first day's wake_idx on the first _generate_day_events
     # call). Advanced by the fixed once-daily BASAL_DOSE_INTERVAL_HOURS (24h)
@@ -1227,6 +1251,13 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     profile.basal_miss_prob = float(np.clip(
         BASAL_MISS_PROB_BASE * np.exp(BASAL_MISS_SKILL_SCALE * (0.5 - s2)),
         BASAL_MISS_PROB_MIN, BASAL_MISS_PROB_MAX))
+    profile.hypo_unaware_prob = float(np.clip(
+        HYPO_UNAWARE_PROB_BASE * np.exp(HYPO_UNAWARE_SKILL_SCALE * (0.5 - s2)),
+        0.0, HYPO_UNAWARE_PROB_MAX))
+    profile.cgm_alarm_enabled = bool(rng.random() < CGM_ALARM_ENABLED_PROB)
+    profile.alarm_response_awake = CGM_ALARM_RESPONSE_AWAKE
+    profile.alarm_response_asleep = float(
+        CGM_ALARM_RESPONSE_ASLEEP_BASE + CGM_ALARM_RESPONSE_ASLEEP_SKILL * s2)
     profile.meal_jitter_sigma_min = MEAL_TIME_JITTER_BASE_MIN / (0.2 + 0.8 * s4)
 
     profile.wake_time_hours = np.clip(profile.wake_time_hours, 4.0, 12.0)
@@ -2028,27 +2059,41 @@ class T1DMSimulator:
         p = self.patient
         s = self.state
 
-        # Severe hypo (<55 mg/dL) produces symptoms the patient cannot ignore:
-        # sweating, shaking, confusion. Awake patients act immediately; asleep
-        # patients wake up. This bypass is what prevents 6+ hour stretches in
-        # dangerous hypoglycemia.
+        # A severe hypo (<55) is symptomatic unless this episode went unperceived (rolled at onset).
         severe_hypo = s.bg_observed < SEVERE_HYPO_THRESHOLD
-
+        if severe_hypo and not s.in_severe_episode:
+            s.in_severe_episode = True
+            s.severe_episode_unaware = self.rng.random() < p.hypo_unaware_prob
+        elif not severe_hypo:
+            s.in_severe_episode = False
+            s.severe_episode_unaware = False
         is_awake = self._today_wake_idx <= time_idx < self._today_sleep_idx
+
+        # CGM low alarm: re-alerts while low; each alert is heard with a per-patient chance.
+        heard = False
+        if p.cgm_alarm_enabled and s.bg_observed < CGM_LOW_ALARM_MGDL:
+            if time_idx - s.last_cgm_alarm_idx >= int(CGM_ALARM_REPEAT_MIN / DT_MINUTES):
+                s.last_cgm_alarm_idx = time_idx
+                heard = self.rng.random() < (
+                    p.alarm_response_awake if is_awake else p.alarm_response_asleep)
+        symptomatic = (severe_hypo and not s.severe_episode_unaware) or heard
+
         if not is_awake:
-            if severe_hypo:
-                pass  # symptoms wake them — proceed to act this step
-            elif s.bg_observed < 55 or s.bg_observed > 350:
+            if symptomatic:
+                pass  # symptoms or the alarm wake them — proceed to act this step
+            elif severe_hypo:
+                return  # unperceived: nothing wakes them
+            elif s.bg_observed > 350:
                 delay_steps = int(self.rng.exponential(HYPO_DETECTION_ASLEEP_LAMBDA) / DT_MINUTES)
                 if delay_steps > 0:
                     return
             else:
                 return
 
-        # Check interval — bypassed by severe hypo
+        # Check interval — bypassed only by a symptomatic severe hypo
         steps_since_check = time_idx - s.last_cgm_check_idx
         check_interval_steps = int(p.cgm_check_interval_min / DT_MINUTES)
-        if steps_since_check < check_interval_steps and not severe_hypo:
+        if steps_since_check < check_interval_steps and not symptomatic:
             return
 
         s.last_cgm_check_idx = time_idx
@@ -2451,8 +2496,15 @@ class T1DMSimulator:
         if s.bg > RENAL_THRESHOLD:
             bg_delta -= (s.bg - RENAL_THRESHOLD) * RENAL_CLEARANCE_RATE
 
-        if s.bg < COUNTER_REGULATORY_THRESHOLD:
-            bg_delta += COUNTER_REGULATORY_RATE * (COUNTER_REGULATORY_THRESHOLD - s.bg) / COUNTER_REGULATORY_THRESHOLD
+        # Counter-regulation: ramps in below 70, saturates at 40, glycogen-limited.
+        cr_target = min(1.0, max(0.0, (COUNTER_REGULATORY_THRESHOLD - s.bg)
+                                 / (COUNTER_REGULATORY_THRESHOLD - COUNTER_REG_FULL_BG)))
+        cr_tau = COUNTER_REG_TAU_UP_MIN if cr_target > s.counter_reg_level else COUNTER_REG_TAU_DOWN_MIN
+        s.counter_reg_level += (cr_target - s.counter_reg_level) * (1.0 - np.exp(-DT_MINUTES / cr_tau))
+        cr_avail = min(1.0, s.glycogen_grams / glycogen_low_threshold) if glycogen_low_threshold > 0 else 1.0
+        cr_rate = COUNTER_REG_MAX_RATE * s.counter_reg_level * cr_avail
+        bg_delta += cr_rate
+        s.glycogen_grams = max(0.0, s.glycogen_grams - cr_rate / BG_SCALE_FACTOR * GLYCOGEN_DRAIN_FRACTION)
 
         # Severe-hypo glucagon dump — escalates the response below SEVERE_HYPO_THRESHOLD
         if s.bg < SEVERE_HYPO_THRESHOLD:
@@ -2558,6 +2610,9 @@ class T1DMSimulator:
             'patience_time': f'{p.patience_time_min:.0f}min',
             'exercise_prob': f'{p.exercise_probability:.2f}',
             'basal_miss_prob': f'{p.basal_miss_prob:.4f}',
+            'hypo_unaware_prob': f'{p.hypo_unaware_prob:.4f}',
+            'cgm_alarm': f'{"on" if p.cgm_alarm_enabled else "off"} '
+                         f'({p.alarm_response_awake:.2f}/{p.alarm_response_asleep:.2f})',
             'slow_carb_pref': f'{p.slow_carb_preference:.2f}',
             'panic_factor': f'{p.panic_factor:.2f}',
         }

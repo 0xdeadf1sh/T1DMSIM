@@ -442,6 +442,7 @@ class TestHypoFollowupSnack:
     """
 
     def _trigger_correction(self, sim):
+        sim.patient.hypo_unaware_prob = 0.0
         sim.generate()
         idx = sim.state.current_idx
         s = sim.state
@@ -500,6 +501,7 @@ class TestHypoFollowupSnack:
                 p = sim.patient
                 p.attentiveness = 0.9  # above HYPO_FOLLOWUP_SKILL_THRESHOLD so the snack is eaten
                 p.dosing_competence = 0.9
+                p.hypo_unaware_prob = 0.0
                 # Isolate the snack's effect from the always-on glucose-
                 # effectiveness mean-reversion, which would clear the lift.
                 p.glucose_effectiveness = 0.0
@@ -556,6 +558,7 @@ class TestSevereHypoRescueAmount:
     The grams floor is what keeps severe episodes <= 1h."""
 
     def _force_correction_and_get_grams(self, sim, target_bg):
+        sim.patient.hypo_unaware_prob = 0.0
         sim.generate()
         idx = sim.state.current_idx
         s = sim.state
