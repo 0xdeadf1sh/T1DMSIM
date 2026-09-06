@@ -88,6 +88,7 @@ def isolated_biology(monkeypatch):
     monkeypatch.setattr(simulator, 'RENAL_CLEARANCE_RATE', 0.0)
     monkeypatch.setattr(simulator, 'COUNTER_REGULATORY_RATE', 0.0)
     monkeypatch.setattr(simulator, 'SEVERE_HYPO_GLUCAGON_RATE', 0.0)
+    monkeypatch.setattr(simulator, 'BG_DEATH_MGDL', -1e9)
     monkeypatch.setattr(T1DMSimulator, '_check_and_correct', lambda self, idx: None)
     # Flatten the diurnal-IS profile and daily drift so is_val == is_base across
     # the window; with is_base pinned to 1.0 in _quiet_sim, runtime IS == 1 and

@@ -16,6 +16,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import simulator
 from simulator import (
     T1DMSimulator, BG_CLAMP_MIN, BG_CLAMP_MAX,
     gamma_curve, BOLUS_GAMMA_K, BOLUS_GAMMA_THETA, BOLUS_DURATION_HOURS,
@@ -26,6 +27,12 @@ from simulator import (
     SEVERE_HYPO_REFRACTORY_MIN, HYPO_FOLLOWUP_SKILL_THRESHOLD,
     SEVERE_HYPO_THRESHOLD, ActiveCurve, STEPS_PER_DAY,
 )
+
+
+@pytest.fixture
+def immortal(monkeypatch):
+    """Disable death for tests about mechanics that need a full-length run."""
+    monkeypatch.setattr(simulator, 'BG_DEATH_MGDL', -1e9)
 
 
 class TestReproducibility:
@@ -108,8 +115,9 @@ class TestMealAndInsulinEffect:
         assert bg_after > bg_before, (
             f"BG did not rise after large carb injection: before={bg_before:.0f}, after={bg_after:.0f}")
 
-    def test_insulin_lowers_bg(self):
+    def test_insulin_lowers_bg(self, immortal, monkeypatch):
         """Injecting a large insulin curve into a high-BG simulation lowers BG."""
+        monkeypatch.setattr(T1DMSimulator, '_check_and_correct', lambda self, idx: None)
         sim = T1DMSimulator(seed=5, initial_bg=280.0)
         for _ in range(5):
             sim.generate()
@@ -151,7 +159,7 @@ class TestGenerateHours:
 
 
 class TestWeekdayWeekend:
-    def test_day_of_week_cycles(self):
+    def test_day_of_week_cycles(self, immortal):
         """day_of_week increments correctly through the week."""
         sim = T1DMSimulator(seed=0)
         # Generate 7 days worth of steps; check day_of_week at each day boundary
@@ -162,7 +170,7 @@ class TestWeekdayWeekend:
         assert seen_days == {0, 1, 2, 3, 4, 5, 6}, (
             f"Not all days of week seen: {seen_days}")
 
-    def test_weekend_flag_matches_day_of_week(self):
+    def test_weekend_flag_matches_day_of_week(self, immortal):
         """is_weekend flag is True iff day_of_week >= 5."""
         sim = T1DMSimulator(seed=3)
         for _ in range(7 * 288):
@@ -236,7 +244,7 @@ class TestGlycogenReservoir:
     """The hepatic glycogen reservoir is a finite store. It must stay in
     [0, GLYCOGEN_CAPACITY_GRAMS] at every step under any simulation trace."""
 
-    def test_glycogen_within_bounds_over_long_run(self):
+    def test_glycogen_within_bounds_over_long_run(self, immortal):
         """Glycogen never goes negative or exceeds capacity across 72h."""
         for seed in [0, 3, 7, 11, 19]:
             sim = T1DMSimulator(seed=seed)
@@ -688,7 +696,7 @@ class TestBasalInjectionCadence:
     24h-average insulin delivery aligned with `basal_dose`.
     """
 
-    def test_basal_cadence_matches_patient_duration(self):
+    def test_basal_cadence_matches_patient_duration(self, immortal):
         for seed in [0, 5, 13, 27]:
             sim = T1DMSimulator(seed=seed)
             basal_indices: list = []

@@ -577,15 +577,7 @@ BG_CLAMP_MAX = 400.0  # [HIVAR] 500→400 — match real CGM device ceiling (Ohi
 BG_INITIAL_MEAN = 120.0
 BG_INITIAL_SIGMA = 60.0  # [HIVAR] 30→60 — wider warmup start (washes out over the run).
 BG_INITIAL_FLOOR = 40.0  # [CF] a run starts at a plausible BG, not at the dynamics clamp. Clipping the N(mean, 60) draw with BG_CLAMP_MIN would start ~4% of patients pinned in severe hypo before a single step ran; the warmup washes it out, but the transient is longer now that Sg is weak.
-
-# Soft BG bounds: in the approach zone, a single step can close at most
-# SOFT_APPROACH_FRACTION of the remaining headroom to the hard bound. This
-# gives geometric asymptotic decay toward the floor/ceiling — BG never
-# actually reaches the hard clamp under normal dynamics, regardless of how
-# large the raw delta is. The hard clamp is kept only as a backstop.
-BG_SOFT_FLOOR = 20.0           # [CF] 50→20 — tracks BG_CLAMP_MIN down. Left at 50 the damping engaged 30 mg/dL above the new floor and re-imposed the taper the floor change removes.
-BG_SOFT_CEILING = 385.0        # [HIVAR] 400→385 — keep a soft runway below the new 400 hard ceiling
-SOFT_APPROACH_FRACTION = 0.15  # [DAMP] 0.3→0.15 — stronger delta-damping as BG nears the bounds.
+BG_DEATH_MGDL = 20.0  # true BG at or below this ends the trajectory; the next generate() raises
 
 # BG regulatory computation
 RENAL_THRESHOLD = 180.0  # Kidneys start excreting glucose above this
@@ -595,37 +587,10 @@ COUNTER_REGULATORY_RATE = 1.5  # [DAMP] 0.8→1.5 — arrest hypo excursions fas
 SEVERE_HYPO_THRESHOLD = 55.0  # Below this, glucagon dump kicks in
 SEVERE_HYPO_GLUCAGON_RATE = 2.0  # Extra mg/dL per step at severity=1.0
 
-# Glucose effectiveness (Bergman minimal-model Sg): the insulin-INDEPENDENT
-# glucose disposal + hepatic-glucose-output autoregulation that clears a
-# glucose load even at basal insulin. Modeled as an always-on linear restoring
-# pull of the BG delta toward a STOCHASTIC equilibrium E(t):
-#     bg_delta += glucose_effectiveness * (E(t) - bg)
-# E(t) is an Ornstein-Uhlenbeck process: each step it mean-reverts (timescale
-# GE_EQ_TAU_HOURS) toward the patient's anchor plus a dawn-phenomenon lift
-# (ge_anchor + ge_dawn_amplitude * ge_diurnal_profile(hour)), perturbed by Gaussian
-# noise of stationary std GE_EQ_SIGMA * ge_sigma_mult, then floored at GE_EQ_FLOOR so the
-# restoring target is never *severely* hypoglycemic (the floor sits above the
-# 55 mg/dL severe threshold). Sg is the mean-reverting force the
-# renal/counter-regulatory guardrails do NOT supply inside the normal 70-180
-# band (they are gated to BG>180 / BG<70). Without it, within-band BG is an
-# under-damped integrator of net flux — a slowly-corrected random walk — so the
-# level autocorrelation decays far too slowly (acf at 8h ~0.3 vs ~0 in real CGM).
-# The Sg pull keeps BG's correlation time short (low 8h ACF); E's
-# wandering supplies distributional spread but decorrelates within hours, so it
-# does NOT re-inject long-lag memory — decoupling spread from the ACF, which a
-# fixed setpoint could not do (a fixed target damped the ACF only by homogenizing
-# the distribution). E's own timescale carries most of that decorrelation, which
-# is why Sg can be weak without the 8h ACF returning; keep it weak, because the
-# spring cancels the sustained component of any input slower than its own time
-# constant, insulin included. GE_RATE is the population-mean per-step reversion fraction;
-# per-patient Sg is sampled lognormally around it (real Sg varies ~2-3x across
-# individuals) so heterogeneity is preserved. The GE_EQ_FLOOR is what keeps the
-# Sg pull *upward* in a low (aiding, never opposing, the severe-hypo rescue) and
-# simultaneously anchors the pooled mean/low-tail onto the real cohorts. See
-# ge_day_weight for the diurnal lift and the OU update in generate().
+# Bergman Sg: bg_delta += Sg * (E - bg); E is an OU equilibrium about the anchor plus dawn lift.
 GE_RATE = 0.015            # [CF] 0.060→0.015 — the spring was installed to pull acf(8h) down, but E's own 3h OU timescale carries that: two independent measurements (24 x 30 d and 64 x 30 d) put acf(8h) at +0.03..0.05 before and +0.05..0.06 after, so the spring was never what held it near zero — E's own timescale is. What the spring cost was causality. Time constant 1/0.060 = 83 min high-passes any input slower than itself; insulin acts over 3-5 h, so against a Sg=0 reference of -31.1 mg/dL a 2 U bolus retained only ~20% of its 240-min effect (-6.3). At 0.015 it retains ~87% (-27.0). Price paid, same protocol: acf(2h) 0.49 -> 0.55 — note it was ALREADY on Ohio's 0.483 and moves past it toward Shanghai's 0.606, so the ACF is a cost here, not a justification — acf(24h) 0.09 -> 0.16, and time<55 0.65% -> 1.53% mean / 2.42% -> 4.05% worst patient (invariant: mean<=2%, max<=6%).
-GE_EQ_ANCHOR_MEAN = 138.0  # [GE-OU] population-mean equilibrium anchor (co-tuned with GE_EQ_SIGMA / GE_EQ_FLOOR to land the pooled mean ~162 on Ohio; with a large sigma the floor-clipping largely sets the mean, so the anchor is a fine trim)
-GE_EQ_ANCHOR_SIGMA = 15.0  # [GE-OU][HET] between-patient spread of the anchor (per-patient mean heterogeneity). Raised 12->15 to widen the too-narrow between-patient mean-BG spread (sim was the narrowest of the four cohorts, ~13.6 vs Ohio/AZT1D ~16). The anchor sigma alone SATURATES near ~14 mg/dL sd because GE_EQ_FLOOR compresses low-anchor patients upward; the remaining spread comes from the IR coupling below (high-side, floor-immune).
+GE_EQ_ANCHOR_MEAN = 138.0  # population-mean equilibrium anchor
+GE_EQ_ANCHOR_SIGMA = 15.0  # between-patient spread of the anchor
 GE_ANCHOR_IR_COUPLING = 30.0  # [GE-OU][HET] how much a patient's insulin resistance lifts its equilibrium anchor (mg/dL per unit ir-1). Raised 12->30 (with IR_LOGNORMAL_SIGMA 0.16->0.26) so the between-patient mean spread is carried physiologically by the resistance axis — resistant patients run higher — rather than by low-anchor patients the floor would both compress and crash into hypo.
 GE_EQ_SIGMA = 95.0                # [GE-OU][OHIO-CARB][DAWN] stationary std of the equilibrium's APERIODIC wandering. Was 105; lowered to 95 when the structured dawn rhythm (GE_EQ_DAWN_AMPLITUDE) took over part of the equilibrium's variance — the point of the dawn work is to trade opaque aperiodic wander for day-to-day-consistent, learnable variance while holding the pooled BG spread (std ~61) on Ohio. Now scaled PER PATIENT by ge_sigma_mult (below) so patients differ in within-patient variability.
 # [HET] Per-patient multiplier on GE_EQ_SIGMA (lognormal), so different virtual
@@ -653,7 +618,6 @@ GE_DAY_RAMP_HOURS = 3.0    # smootherstep ramp width for the day/night setpoint 
 GE_REL_SIGMA = 0.30        # per-patient lognormal spread of Sg around GE_RATE (~2x inter-individual range)
 GE_RATE_MIN = 0.004        # floor so no patient is a pure (undamped) integrator
 GE_RATE_MAX = 0.150        # [GE-OU] raised so the strong per-patient Sg (lognormal around GE_RATE) is not clipped
-GE_EQ_FLOOR = 64.0         # [GE-OU][OHIO-CARB][DIURNAL] floor on the wandering equilibrium, kept above the severe-hypo threshold (SEVERE_HYPO_THRESHOLD=55) so the Sg pull stays upward across a severe low (aids, never opposes, the rescue). Journey 75->60 (OU/carb co-tune) then 60->64 (diurnal fix): the strengthened deep-sleep HGO dip that gives the real day>night shape also removes overnight glucose, so a slightly higher floor lifts the low tail back onto Ohio's mean AND strengthens the overnight rescue pull (TBR 3.3->3.1), while severe episodes stay bounded (>2h = 0).
 
 # CGM noise
 # CGM interstitial lag. The sensor sits in interstitial fluid, which trails
@@ -696,12 +660,7 @@ NOISE_AR1_INNOV_SENSOR = float(np.sqrt(1.0 - NOISE_AR1_RHO_SENSOR ** 2))
 RARE_EVENT_PROBABILITY = 0.04  # [HIVAR 2x] 0.02→0.04 — chaotic-day rate
 RARE_EVENT_SKILL_REDUCTION = 0.3  # Even skilled people have bad days sometimes
 
-# Hypo correction refractory + post-hypo basal stand-down. Without the basal
-# stand-down a hypo cascades into 3-5 consecutive corrections (or a sawtooth
-# of snacking) because the forward basal pipeline keeps clearing glucose just
-# as the patient eats to recover. Real patients respond by reducing or
-# suspending basal coverage — for pump users a temp basal / pump suspend,
-# for MDI users skipping the next basal injection — not by stacking carbs.
+# Hypo correction refractory
 HYPO_CORRECTION_REFRACTORY_MIN = 20.0  # Min minutes between hypo corrections (moderate hypo 55-70).
 SEVERE_HYPO_REFRACTORY_MIN = 10.0      # Shorter refractory for severe hypo (<55). Rule-of-15 spirit:
                                        # symptomatic patient still rage-eats, but waits ~10 min between
@@ -709,9 +668,6 @@ SEVERE_HYPO_REFRACTORY_MIN = 10.0      # Shorter refractory for severe hypo (<55
                                        # the CGM-check bypass let the patient eat every 5 min, stacking
                                        # 3-5 rage doses (60+ g) and producing visible sawtooth as BG
                                        # bounced between severe hypo and post-overcorrection peaks.
-POST_HYPO_BASAL_SUSPEND_DURATION_HOURS = 6.0  # Scale-down window after any hypo correction. The sin² envelope below has max slope π/window, so a 6h window with depth 0.35 caps the worst single-envelope 10-min change at ~3%, and even at multi-envelope crossover points the per-10-min change stays under ~6%. Widened from the legacy 2h trapezoidal window after the user observed ~56% 10-min drops in total_insulin.
-POST_HYPO_BASAL_SUSPEND_FACTOR = 0.65          # Basal contribution multiplier at the peak of the suspend window. Shallower than the legacy 0.35 — the integrated suspend stays close to the original (0.35 × 0.5 × 360 ≈ 63 unit-minutes vs legacy ~65) but spread over a wider window so per-step changes are gentle.
-POST_HYPO_BASAL_SUSPEND_RAMP_MIN = 20.0        # Legacy constant from the previous smootherstep-plus-plateau implementation. The active envelope is now a single sin² profile over the full duration window (no separate ramp/plateau), so this constant is unused — kept only for backward compatibility with anything that imports it.
 
 # Rage behavior
 RAGE_EAT_BG_THRESHOLD = 50.0       # Below this, patient may rage eat
@@ -945,17 +901,18 @@ class SimulatorState:
     glucotox_bg_ema: float = 120.0  # 3h EMA of true BG, drives glucotoxic IR
     # Hypo correction tracking (see HYPO_CORRECTION_REFRACTORY_MIN).
     last_hypo_correction_idx: int = -9999
-    # Active post-hypo basal-suspend envelopes — each entry is
-    # (start_idx, until_idx). Multiple can overlap when corrections fire in
-    # close succession; the effective factor is the min across active
-    # envelopes, which keeps the per-step transition smooth (an extra
-    # correction can deepen the suspend but never jumps the factor upward).
-    post_hypo_basal_suspend_windows: list = field(default_factory=list)
+    # Set on the step true BG reaches BG_DEATH_MGDL; the next generate() raises PatientDeath.
+    is_dead: bool = False
+    death_idx: int = -1
     # Time index of the next scheduled basal injection. -1 = uninitialised
     # (anchored to the first day's wake_idx on the first _generate_day_events
     # call). Advanced by the fixed once-daily BASAL_DOSE_INTERVAL_HOURS (24h)
     # after each schedule, decoupled from the analogue's action duration.
     next_basal_due_idx: int = -1
+
+
+class PatientDeath(RuntimeError):
+    """Raised by generate() once the trajectory has ended at BG_DEATH_MGDL."""
 
 
 # ============================================================================
@@ -2192,21 +2149,6 @@ class T1DMSimulator:
                                   f'Hypo followup {followup_grams:.0f}g slow')
             s.last_hypo_correction_idx = time_idx
 
-            # Scale down basal insulin for the next ~90 min after any hypo
-            # correction (awake or asleep). Real patients respond to a hypo by
-            # also reducing future basal coverage — pump suspend / temp basal
-            # for pump users, skipping the next basal injection for MDI — not
-            # just by eating. Without this scale-down the forward basal pipeline
-            # keeps clearing glucose as fast as the patient eats, producing a
-            # sawtooth of repeated snacks that never bring BG back to range.
-            suspend_steps = int(POST_HYPO_BASAL_SUSPEND_DURATION_HOURS * 60 / DT_MINUTES)
-            # Each correction adds a fresh sin² envelope anchored at the
-            # current step. Overlapping envelopes are combined by taking the
-            # min factor at each step, so the transition stays smooth no
-            # matter how often corrections fire.
-            s.post_hypo_basal_suspend_windows.append(
-                (time_idx, time_idx + suspend_steps))
-
             # After a SEVERE hypo correction, recheck soon (don't wait the full
             # CGM interval). Mild hypos keep the normal cadence so they linger
             # naturally — what we're killing here is the dangerous tail, not
@@ -2314,6 +2256,8 @@ class T1DMSimulator:
         idx = self.state.current_idx
         s = self.state
         p = self.patient
+        if s.is_dead:
+            raise PatientDeath(f'patient died at step {s.death_idx}')
 
         # Check if we need to plan a new day
         if idx > 0 and idx % STEPS_PER_DAY == 0:
@@ -2365,32 +2309,6 @@ class T1DMSimulator:
         total_carb = float(self._carb_totals[idx]) if idx < len(self._carb_totals) else 0.0
         basal_step = float(self._basal_totals[idx]) if idx < len(self._basal_totals) else 0.0
         bolus_step = float(self._bolus_totals[idx]) if idx < len(self._bolus_totals) else 0.0
-        # Post-hypo basal stand-down (set by _check_cgm_and_correct after any
-        # hypo correction). Represents pump suspend / next-basal skip behavior.
-        # Each correction queues a sin² envelope over the suspend window;
-        # multiple overlapping envelopes are combined by taking the minimum
-        # factor at each step. The sin² profile is C∞-smooth (no slope
-        # discontinuities anywhere) with max slope π / window — over a 4h
-        # window with depth 0.50 the worst 10-min change is ~6.5%. The
-        # min-over-envelopes combiner means a fresh correction during an
-        # ongoing suspend deepens or extends the dip without ever jumping
-        # the factor upward.
-        if s.post_hypo_basal_suspend_windows:
-            min_factor = 1.0
-            still_active = []
-            for start, until in s.post_hypo_basal_suspend_windows:
-                if idx >= until:
-                    continue  # expired — drop it
-                still_active.append((start, until))
-                if idx < start:
-                    continue
-                total = until - start
-                envelope = np.sin(np.pi * (idx - start) / total) ** 2
-                factor = 1.0 - envelope * (1.0 - POST_HYPO_BASAL_SUSPEND_FACTOR)
-                if factor < min_factor:
-                    min_factor = factor
-            s.post_hypo_basal_suspend_windows = still_active
-            basal_step *= min_factor
         total_insulin = basal_step + bolus_step
         total_exercise = float(self._exercise_totals[idx]) if idx < len(self._exercise_totals) else 0.0
 
@@ -2522,7 +2440,7 @@ class T1DMSimulator:
         self._ge_equilibrium = (
             ge_mu + ge_rho * (self._ge_equilibrium - ge_mu)
             + np.sqrt(1.0 - ge_rho * ge_rho) * GE_EQ_SIGMA * p.ge_sigma_mult * self.rng.normal())
-        self._ge_equilibrium = max(self._ge_equilibrium, GE_EQ_FLOOR)
+        self._ge_equilibrium = max(self._ge_equilibrium, BG_DEATH_MGDL)
         bg_delta += p.glucose_effectiveness * (self._ge_equilibrium - s.bg)
 
         # Physiological guardrails
@@ -2537,26 +2455,12 @@ class T1DMSimulator:
             severity = (SEVERE_HYPO_THRESHOLD - s.bg) / SEVERE_HYPO_THRESHOLD
             bg_delta += SEVERE_HYPO_GLUCAGON_RATE * severity
 
-        # Soft-bound headroom cap: if a step would carry BG past the soft
-        # threshold toward the hard clamp, cap the move to a fraction of the
-        # remaining headroom from the *current* position. BG decays geometrically
-        # toward the bound (e.g. with fraction=0.3, gap halves every ~2 steps),
-        # so it asymptotes smoothly instead of slamming into a flat line.
-        # Checking the projected position (not current) catches large single-step
-        # deltas that would otherwise leap clear over the soft zone.
-        if bg_delta < 0:
-            projected = s.bg + bg_delta
-            if projected < BG_SOFT_FLOOR:
-                headroom = max(0.0, s.bg - BG_CLAMP_MIN)
-                bg_delta = max(bg_delta, -SOFT_APPROACH_FRACTION * headroom)
-        elif bg_delta > 0:
-            projected = s.bg + bg_delta
-            if projected > BG_SOFT_CEILING:
-                headroom = max(0.0, BG_CLAMP_MAX - s.bg)
-                bg_delta = min(bg_delta, SOFT_APPROACH_FRACTION * headroom)
-
-        # Hard clamp as absolute backstop (should rarely fire)
-        s.bg = float(np.clip(s.bg + bg_delta, BG_CLAMP_MIN, BG_CLAMP_MAX))
+        # No floor: 400 is the sensor ceiling, and reaching BG_DEATH_MGDL ends the trajectory.
+        s.bg = float(min(s.bg + bg_delta, BG_CLAMP_MAX))
+        if s.bg <= BG_DEATH_MGDL:
+            s.is_dead = True
+            s.death_idx = idx
+            s.bg = float(max(s.bg, BG_CLAMP_MIN))
 
         # Update glucotoxicity BG EMA (slow, ~3h half-life). Drives transient
         # IR when chronically elevated.
@@ -2608,10 +2512,11 @@ class T1DMSimulator:
             'is_weekend': s.day_of_week >= 5,
             'is_holiday': s.is_holiday,
             'alcohol_hgo_factor': alcohol_hgo_factor,
+            'is_dead': s.is_dead,
         }
 
     def generate_hours(self, hours: float) -> dict:
-        """Generate multiple steps at once. Returns dict of numpy arrays."""
+        """Generate multiple steps at once. Returns dict of numpy arrays, truncated at death."""
         n_steps = int(hours * 60 / DT_MINUTES)
         results: dict = {
             'index': [], 'time_hours': [], 'day': [], 'hour_of_day': [],
@@ -2620,10 +2525,13 @@ class T1DMSimulator:
             'bolus_insulin': [], 'total_exercise': [],
             'insulin_resistance': [], 'hgo': [], 'glucose_in': [], 'glucose_out': [],
             'is_sick': [], 'is_rare_day': [], 'is_weekend': [], 'is_holiday': [],
-            'alcohol_hgo_factor': [],
+            'alcohol_hgo_factor': [], 'is_dead': [],
         }
         for _ in range(n_steps):
-            step = self.generate()
+            try:
+                step = self.generate()
+            except PatientDeath:
+                break
             for k, v in step.items():
                 results[k].append(v)
 

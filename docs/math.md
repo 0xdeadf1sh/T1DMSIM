@@ -142,9 +142,11 @@ In T1DM the incretin / GLP-1 axis is blunted and there is no endogenous insulin 
         severity = (SEVERE_HYPO_THRESHOLD - BG) / SEVERE_HYPO_THRESHOLD
         delta_BG += SEVERE_HYPO_GLUCAGON_RATE * severity
 
-    BG(t+1) = clamp(BG(t) + delta_BG, BG_CLAMP_MIN, BG_CLAMP_MAX)
+    BG(t+1) = min(BG(t) + delta_BG, BG_CLAMP_MAX)
+    if BG(t+1) <= BG_DEATH_MGDL:       # 20 mg/dL
+        the trajectory ends on this step; the next generate() raises PatientDeath
 
-`BG_CLAMP_MIN` is 10 mg/dL. It is not a device floor — a real CGM stops reporting near 40 but the patient keeps falling, and clamping the dynamics at the reporting floor made a descent taper out there. 10 mg/dL is below survivable, so it never binds physiologically; it exists to keep the Kovatchev log transform defined. The counter-regulatory and glucagon-dump terms plus the soft-bound headroom cap normally arrest a fall well above it.
+There is no floor. `BG_CLAMP_MAX` (400) is the sensor ceiling. `BG_CLAMP_MIN` (10) exists only to keep the Kovatchev log transform defined and is unreachable alive: the death step's value is held at or above it. The counter-regulatory and glucagon-dump terms are the only physiology opposing a fall; whether the patient survives is decided by the rescue behaviour below.
 
 ### Glucose effectiveness (Bergman Sg) equilibrium
 
