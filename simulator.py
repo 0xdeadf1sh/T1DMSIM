@@ -202,11 +202,7 @@ ILLNESS_IS_RAMP_RATE = 0.4  # How fast illness IS factor changes per day (0 to 1
 # Basal insulin (long-acting)
 # Note: ideal basal dose is derived from HGO and ICR in generate_patient().
 BASAL_DOSE_SIGMA = 9.0  # [HIVAR 2x] 4.5→9.0 — inter-patient basal-dose scatter
-BASAL_DOSE_COMPETENCE_NOISE = 0.1  # [HIVAR 2x] 0.05→0.1 — day-to-day basal-dose noise
-                                    # Tightened from 0.15: real intra-individual basal CV is 5-15%
-                                    # for modern long-acting analogues (glargine ~12%, degludec ~6%),
-                                    # not 20-30%. Larger values produced visible "uneven hill" basal
-                                    # traces from dose-to-dose magnitude swings.
+BASAL_DOSE_COMPETENCE_NOISE = 0.30  # day-to-day dose noise sigma, times (1.2 - dosing_competence)
 BASAL_DURATION_HOURS = 28.0  # Population reference duration of action (kept for
                               # tests and as the basal_curve default). Per-patient
                               # duration of action is set from the assigned long-acting
@@ -216,13 +212,13 @@ BASAL_DURATION_HOURS = 28.0  # Population reference duration of action (kept for
                               # decoupled from the duration.
 BASAL_DURATION_HOURS_MIN = 15.0  # Legacy basal-duration span bound — no longer read
 BASAL_DURATION_HOURS_MAX = 34.0  # Legacy basal-duration span bound — no longer read
-BASAL_MISS_PROB_BASE = 0.02  # Base probability of fully skipping a basal dose. Lowered from
-                              # 0.10: at the legacy rate even high-skill patients missed ~1%, and
-                              # low-skill patients missed ~35%, producing long full-cadence zero
-                              # gaps in the basal trace. Real T1D MDI patients fully skip <3% of
-                              # long-acting doses; "missed" doses are usually delayed by a few
-                              # hours, not skipped (the PK overlap below absorbs short delays).
-BASAL_MISS_SKILL_SCALE = 5.0  # How much skills reduce miss probability
+BASAL_MISS_PROB_BASE = 0.10  # per-injection skip probability of a median-attentiveness patient
+BASAL_MISS_SKILL_SCALE = 5.0  # attentiveness exponent on the miss probability
+BASAL_MISS_PROB_MIN = 0.05  # per-patient clip of the miss probability
+BASAL_MISS_PROB_MAX = 0.35
+BASAL_TITRATION_INTERVAL_DAYS = (7.0, 21.0)  # uniform gap between dose-programme changes
+BASAL_TITRATION_STEP = (0.10, 0.30)  # uniform relative size of a programme change, sign random
+BASAL_PROGRAM_CLIP = (0.5, 2.0)  # bounds on the cumulative programme factor
 BASAL_CORRECTION_MAX_ADJUSTMENT = 0.22  # Max % a patient will adjust basal vs base dose in one day.
                                         # Set wide enough that under-dosed IR patients can break out of
                                         # stuck-high streaks (lower caps left mean BG > 200 mg/dL for
@@ -248,14 +244,7 @@ BASAL_TAIL_CLIP_HOURS = 5.0  # Smootherstep window at the end of the curve that
 # long tail also bridges a skipped dose, glargine's shorter one largely does not.
 BASAL_PK_OVERLAP_FRACTION = 1.00
 
-# Per-basal-dose damping of the lipohypertrophy site-quality multiplier.
-# `_site_quality` returns a per-injection absorption factor whose variance
-# is calibrated for rapid-acting bolus into abdomen (the dominant rotation
-# site). Long-acting basal goes into larger, less-frequently-used depots
-# (thigh, buttock) and has much more consistent dose-to-dose absorption.
-# We contract the per-basal site multiplier toward 1.0 by this factor so
-# the basal trace doesn't inherit bolus-grade per-dose noise.
-BASAL_SITE_QUALITY_DAMPING = 0.30
+BASAL_SITE_QUALITY_DAMPING = 1.0  # 1.0 = a basal dose carries the full site-quality spread
 # Legacy aliases kept for tests / warmup math. With the Bateman PK these no
 # longer represent literal trapezoid ramps — interpret as "approx time-to-peak"
 # and "tail-clip duration" respectively.
@@ -904,6 +893,9 @@ class SimulatorState:
     # Set on the step true BG reaches BG_DEATH_MGDL; the next generate() raises PatientDeath.
     is_dead: bool = False
     death_idx: int = -1
+    # Basal dose programme: cumulative titration factor and the step of the next change.
+    basal_program_factor: float = 1.0
+    next_basal_titration_idx: int = -1
     # Time index of the next scheduled basal injection. -1 = uninitialised
     # (anchored to the first day's wake_idx on the first _generate_day_events
     # call). Advanced by the fixed once-daily BASAL_DOSE_INTERVAL_HOURS (24h)
@@ -1232,7 +1224,9 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     profile.bolus_timing_sigma = BOLUS_TIMING_SIGMA_BASE / (0.3 + 0.7 * s3)
     profile.exercise_probability = EXERCISE_PROBABILITY_BASE + EXERCISE_SKILL_BONUS * s4
     profile.panic_factor = HYPO_PANIC_FACTOR_BASE * (1.2 - s3)
-    profile.basal_miss_prob = BASAL_MISS_PROB_BASE * np.exp(BASAL_MISS_SKILL_SCALE * (0.5 - s2))
+    profile.basal_miss_prob = float(np.clip(
+        BASAL_MISS_PROB_BASE * np.exp(BASAL_MISS_SKILL_SCALE * (0.5 - s2)),
+        BASAL_MISS_PROB_MIN, BASAL_MISS_PROB_MAX))
     profile.meal_jitter_sigma_min = MEAL_TIME_JITTER_BASE_MIN / (0.2 + 0.8 * s4)
 
     profile.wake_time_hours = np.clip(profile.wake_time_hours, 4.0, 12.0)
@@ -1630,6 +1624,16 @@ class T1DMSimulator:
         basal_interval_steps = max(1, int(p.basal_dose_interval_hours * 60 / DT_MINUTES))
         per_dose_factor = p.basal_dose_interval_hours / 24.0
 
+        # Dose-programme titration: a clinic-style step change every 1-3 weeks, sign random.
+        if s.next_basal_titration_idx < 0 or day_start_idx >= s.next_basal_titration_idx:
+            if s.next_basal_titration_idx >= 0:
+                step = self.rng.uniform(*BASAL_TITRATION_STEP)
+                sign = 1.0 if self.rng.random() < 0.5 else -1.0
+                s.basal_program_factor = float(np.clip(
+                    s.basal_program_factor * (1.0 + sign * step), *BASAL_PROGRAM_CLIP))
+            gap_days = self.rng.uniform(*BASAL_TITRATION_INTERVAL_DAYS)
+            s.next_basal_titration_idx = day_start_idx + int(gap_days * STEPS_PER_DAY)
+
         if s.next_basal_due_idx < 0:
             # First-ever basal — anchor at today's wake_idx (un-jittered;
             # the per-iteration jitter below adds the ±30 min noise).
@@ -1647,7 +1651,7 @@ class T1DMSimulator:
                 raw_site_q = self._site_quality(eff_s4)
                 site_q = 1.0 + (raw_site_q - 1.0) * BASAL_SITE_QUALITY_DAMPING
                 actual_dose = max(0.5, p.basal_dose * per_dose_factor
-                                  * s.basal_dose_drift * dose_noise
+                                  * s.basal_dose_drift * s.basal_program_factor * dose_noise
                                   * basal_adjustment * site_q)
                 duration = p.basal_duration_hours * 60
                 curve = basal_curve(float(actual_dose), duration,

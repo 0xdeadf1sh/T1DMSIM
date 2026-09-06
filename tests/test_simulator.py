@@ -699,6 +699,7 @@ class TestBasalInjectionCadence:
     def test_basal_cadence_matches_patient_duration(self, immortal):
         for seed in [0, 5, 13, 27]:
             sim = T1DMSimulator(seed=seed)
+            sim.patient.basal_miss_prob = 0.0  # cadence, not adherence, is under test
             basal_indices: list = []
             original_inject = sim.inject_curve
 
