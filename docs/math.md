@@ -135,8 +135,12 @@ In T1DM the incretin / GLP-1 axis is blunted and there is no endogenous insulin 
     if BG > RENAL_THRESHOLD:
         delta_BG -= (BG - RENAL_THRESHOLD) * RENAL_CLEARANCE_RATE
 
-    if BG < COUNTER_REGULATORY_THRESHOLD:
-        delta_BG += COUNTER_REGULATORY_RATE * (COUNTER_REGULATORY_THRESHOLD - BG) / COUNTER_REGULATORY_THRESHOLD
+    target   = clip((COUNTER_REGULATORY_THRESHOLD - BG) / (COUNTER_REGULATORY_THRESHOLD - COUNTER_REG_FULL_BG), 0, 1)
+    tau      = COUNTER_REG_TAU_UP_MIN if target > level else COUNTER_REG_TAU_DOWN_MIN
+    level   += (target - level) * (1 - exp(-DT_MINUTES / tau))
+    avail    = max(COUNTER_REG_AVAIL_FLOOR, min(1, glycogen / glycogen_low_threshold)) * gain
+    delta_BG += COUNTER_REG_MAX_RATE * level * avail
+    delta_BG += BG_SCALE_FACTOR * glucose_out * COUNTER_REG_INSULIN_BLOCK * level * avail
 
     if BG < SEVERE_HYPO_THRESHOLD:
         severity = (SEVERE_HYPO_THRESHOLD - BG) / SEVERE_HYPO_THRESHOLD
@@ -146,7 +150,9 @@ In T1DM the incretin / GLP-1 axis is blunted and there is no endogenous insulin 
     if BG(t+1) <= BG_DEATH_MGDL:       # 20 mg/dL
         the trajectory ends on this step; the next generate() raises PatientDeath
 
-There is no floor. `BG_CLAMP_MAX` (400) is the sensor ceiling. `BG_CLAMP_MIN` (10) exists only to keep the Kovatchev log transform defined and is unreachable alive: the death step's value is held at or above it. The counter-regulatory and glucagon-dump terms are the only physiology opposing a fall; whether the patient survives is decided by the rescue behaviour below.
+There is no floor. `BG_CLAMP_MAX` (400) is the sensor ceiling. `BG_CLAMP_MIN` (10) exists only to keep the Kovatchev log transform defined and is unreachable alive: the death step's value is held at or above it. The counter-regulatory and glucagon-dump terms are the only physiology opposing a fall.
+
+The counter-regulation is a hormone level in `[0, 1]` that ramps in below `COUNTER_REGULATORY_THRESHOLD` (70) and saturates at `COUNTER_REG_FULL_BG` (66), rising with time constant `COUNTER_REG_TAU_UP_MIN` (3 min) and decaying with `COUNTER_REG_TAU_DOWN_MIN` (90 min), so it is a switch at the crossing that overshoots and holds the rebound rather than a taper. Starting at the crossing rather than above it lets a fast post-meal fall register as a low before it is arrested. It does two things: adds up to `COUNTER_REG_MAX_RATE` (10 mg/dL per step) of hepatic glucose, and blocks up to `COUNTER_REG_INSULIN_BLOCK` (0.9) of insulin-mediated clearance, the epinephrine effect that arrests a fall with insulin still on board. Glycogen availability scales it, floored at `COUNTER_REG_AVAIL_FLOOR` (0.3) by gluconeogenesis. `gain` is drawn once per episode as the level leaves rest: `COUNTER_REG_IMPAIRED_GAIN` (0.2) with probability `COUNTER_REG_IMPAIRED_PROB` (0.35), else 1. Intact episodes are brief dips that bottom near 67; impaired ones are the deep, long lows.
 
 ### Glucose effectiveness (Bergman Sg) equilibrium
 
@@ -158,7 +164,7 @@ There is no floor. `BG_CLAMP_MAX` (400) is the sensor ceiling. `BG_CLAMP_MIN` (1
     E  = mu + rho * (E_prev - mu) + sqrt(1 - rho^2) * GE_EQ_SIGMA * ge_sigma_mult * N(0, 1)
     E  = max(E, GE_EQ_FLOOR)
 
-The `sqrt(1 - rho^2)` factor makes the stationary std equal `GE_EQ_SIGMA * ge_sigma_mult`. `E`'s own timescale, not the strength of the Sg pull, is what keeps the 8h ACF near zero: `E` wanders enough to supply the distributional spread but decorrelates within hours, decoupling spread from the autocorrelation. Sg itself is deliberately weak, because a strong spring high-passes any input slower than its own time constant — insulin included. `GE_EQ_FLOOR = 64` sits above `SEVERE_HYPO_THRESHOLD = 55`, so the pull is always upward in a severe low (it aids, never opposes, the rescue). `ge_diurnal_profile(hour)` is a mean-zero wrapped-Gaussian dawn-phenomenon rhythm peaking at `GE_DAWN_PEAK_HOUR = 8` with width `GE_DAWN_WIDTH_HOURS = 5.5`, mean-subtracted over the 24h day so it adds rhythm without shifting the pooled mean; its per-patient amplitude `ge_dawn_amplitude` scales with the same dawn trait as the HGO surge.
+The `sqrt(1 - rho^2)` factor makes the stationary std equal `GE_EQ_SIGMA * ge_sigma_mult`. `E`'s own timescale, not the strength of the Sg pull, is what keeps the 8h ACF near zero: `E` wanders enough to supply the distributional spread but decorrelates within hours, decoupling spread from the autocorrelation. Sg itself is deliberately weak, because a strong spring high-passes any input slower than its own time constant — insulin included. `GE_EQ_FLOOR = 70` keeps the equilibrium at or above euglycaemia, so the pull is always upward in a low (it aids, never opposes, the counter-regulation and the rescue) and never drags a resting patient into one. `ge_diurnal_profile(hour)` is a mean-zero wrapped-Gaussian dawn-phenomenon rhythm peaking at `GE_DAWN_PEAK_HOUR = 8` with width `GE_DAWN_WIDTH_HOURS = 5.5`, mean-subtracted over the 24h day so it adds rhythm without shifting the pooled mean; its per-patient amplitude `ge_dawn_amplitude` scales with the same dawn trait as the HGO surge.
 
 Per-patient heterogeneity, sampled once in `generate_patient`:
 
@@ -255,7 +261,7 @@ Hypo correction (BG_observed < hypo_threshold):
     correction_grams  = HYPO_CORRECTION_BASE_GRAMS * skill_multiplier
                         + panic_factor * severity / 20
 
-The trigger is the per-patient `hypo_threshold`, sampled once in `generate_patient` from that patient's own `skill_avg`: attentive/competent patients act on the drop earlier. The gain is piecewise about `HYPO_THRESHOLD_SKILL_MID = 0.5` because `SKILL_MIN` and `SKILL_MAX` (0.15 / 0.98) are not symmetric around it, so the population spans `HYPO_THRESHOLD_MEDIAN ± HYPO_THRESHOLD_SKILL_SPAN` — 70 to 90 mg/dL, median 80 — with median skill landing on the median threshold. The same value defines "low" everywhere else the patient acts on it. A meal bolus is gated on the patient glancing at the CGM first — probability `BOLUS_BG_CHECK_BASE_PROB + 0.05 * attentiveness`, so 0.95 to 0.999 and not a certainty — and on that glance the bolus is skipped below the threshold and scaled by `BOLUS_REDUCE_FACTOR_BASE + 0.3 * dosing_competence` within `BOLUS_REDUCE_MARGIN` (30 mg/dL) above it; and a planned exercise session is abandoned below `hypo_threshold + EXERCISE_HYPO_MARGIN` (20 mg/dL — a higher bar than eating, since guidance is to top up with carbs before activity below ~90 mg/dL).
+The trigger is the per-patient `hypo_threshold`, sampled once in `generate_patient` from that patient's own `skill_avg`: attentive/competent patients act on the drop earlier. The gain is piecewise about `HYPO_THRESHOLD_SKILL_MID = 0.5` because `SKILL_MIN` and `SKILL_MAX` (0.15 / 0.98) are not symmetric around it, so the population spans `HYPO_THRESHOLD_MEDIAN ± HYPO_THRESHOLD_SKILL_SPAN` — 55 to 75 mg/dL, median 65 — with median skill landing on the median threshold; the skill distribution puts about 95 % of patients below 70, so most treat a low only after it has crossed. The same value defines "low" everywhere else the patient acts on it. A meal bolus is gated on the patient glancing at the CGM first — probability `BOLUS_BG_CHECK_BASE_PROB + 0.05 * attentiveness`, so 0.95 to 0.999 and not a certainty — and on that glance the bolus is skipped below the threshold and scaled by `BOLUS_REDUCE_FACTOR_BASE + 0.3 * dosing_competence` within `BOLUS_REDUCE_MARGIN` (30 mg/dL) above it; and a planned exercise session is abandoned below `hypo_threshold + EXERCISE_HYPO_MARGIN` (20 mg/dL — a higher bar than eating, since guidance is to top up with carbs before activity below ~90 mg/dL).
 
 Severity is measured against `projected_bg`, not the current reading: this is the recheck half of the rule of 15, so rescue glucose already swallowed and still absorbing is counted before more is eaten. Only correction carbs are counted (tracked separately from meal carbs, which arrive with a bolus attached), `BG_SCALE_FACTOR` converts grams to the mg/dL they will raise, and `awareness` = `COB_AWARENESS_BASE + COB_AWARENESS_SKILL * dosing_competence` rises to 0.89 at the `SKILL_MAX` ceiling of 0.98, approaching but never reaching its 0.90 limit. When `projected_bg >= hypo_threshold` the patient waits instead of eating. The skill multiplier is critical — without it, high-skill patients linger at TBR ~30% because the bare base grams cannot overcome a strong basal pipeline.
 
@@ -352,7 +358,7 @@ Drinking suppresses HGO multiplicatively, with an onset delay, plateau, and ramp
 
 ### Trend-based anticipatory corrections
 
-Attentive patients with sufficient skill act on a recent BG trend before crossing a threshold. From a sliding window of the last `TREND_CORRECTION_WINDOW_STEPS` BG samples, a preemptive correction bolus is considered when `trend > TREND_HIGH_RATE_THRESHOLD` and BG is approaching the upper band; a preemptive snack when `trend < TREND_LOW_RATE_THRESHOLD` and BG is approaching the lower band. The projected rise/fall over the next `2 * TREND_CORRECTION_WINDOW_STEPS` steps sizes the dose / carbs.
+Attentive patients with sufficient skill act on a recent BG trend before crossing a threshold. From a sliding window of the last `TREND_CORRECTION_WINDOW_STEPS` BG samples, a preemptive correction bolus is considered when `trend > TREND_HIGH_RATE_THRESHOLD` and BG is approaching the upper band; a preemptive snack when `trend < TREND_LOW_RATE_THRESHOLD` and BG is approaching the lower band, and only for patients with `attentiveness >= TREND_LOW_ATTENTIVENESS_MIN` (0.7); everyone else treats the low at its crossing. The projected rise/fall over the next `2 * TREND_CORRECTION_WINDOW_STEPS` steps sizes the dose / carbs.
 
     trend = (window[-1] - window[0]) / (TREND_CORRECTION_WINDOW_STEPS - 1)   (mg/dL/step)
 

@@ -621,6 +621,7 @@ class TestHypoCorrectionSkillScaling:
         p = sim.patient
         p.attentiveness = attentiveness
         p.dosing_competence = dosing
+        p.hypo_threshold = 70.0   # the population median sits below the 65 mg/dL probe
         sim.generate()
         idx = sim.state.current_idx
         s = sim.state
@@ -785,3 +786,60 @@ class TestInjectCurveUpdatesTotals:
             f"raw-append effect (Δ={delta_b:+.1f}). Either the totals arrays "
             f"are being bypassed, or raw append is being silently honored — "
             f"both violate the documented contract.")
+
+
+class TestCounterRegulationArrestsAFall:
+    """An intact response stops an insulin-driven fall above 55; an impaired one lets it through."""
+
+    def _nadir(self, monkeypatch, impaired_prob: float) -> float:
+        monkeypatch.setattr(simulator, 'BG_DEATH_MGDL', -1e9)
+        monkeypatch.setattr(simulator, 'COUNTER_REG_IMPAIRED_PROB', impaired_prob)
+        monkeypatch.setattr(T1DMSimulator, '_check_and_correct', lambda self, idx: None)
+        sim = T1DMSimulator(seed=3, initial_bg=110.0)
+        for _ in range(3):
+            sim.generate()
+        bolus = gamma_curve(6.0, BOLUS_GAMMA_K, BOLUS_GAMMA_THETA, BOLUS_DURATION_HOURS * 60)
+        sim.inject_curve(bolus, sim.state.current_idx, 'insulin', 'test bolus')
+        return min(sim.generate()['bg'] for _ in range(36))
+
+    def test_intact_response_arrests_above_55(self, monkeypatch):
+        nadir = self._nadir(monkeypatch, 0.0)
+        assert nadir >= 55.0, f"intact response let BG fall to {nadir:.0f}"
+
+    def test_impaired_response_falls_deeper(self, monkeypatch):
+        intact = self._nadir(monkeypatch, 0.0)
+        impaired = self._nadir(monkeypatch, 1.0)
+        assert impaired < intact - 5.0, f"impaired {impaired:.0f} vs intact {intact:.0f}"
+
+
+class TestTrendLowPreemptionGate:
+    """A falling trend is pre-empted only at attentiveness >= TREND_LOW_ATTENTIVENESS_MIN."""
+
+    def _trend_snacks(self, seed: int, attentiveness: float) -> int:
+        sim = T1DMSimulator(seed=seed, initial_bg=120.0)
+        sim.generate()
+        idx = sim.state.current_idx
+        s, p = sim.state, sim.patient
+        p.attentiveness = attentiveness
+        p.hypo_unaware_prob = 0.0
+        s.bg_obs_history = [125.0, 119.0, 113.0, 107.0, 101.0, 95.0]
+        s.bg = 95.0
+        s.bg_observed = 95.0
+        s.last_cgm_check_idx = -9999
+        s.last_correction_idx = -9999
+        s.last_hypo_correction_idx = -9999
+        sim._today_wake_idx = 0
+        sim._today_sleep_idx = idx + STEPS_PER_DAY
+        before = {id(c) for c in s.active_curves}
+        sim._check_and_correct(idx)
+        return sum(1 for c in s.active_curves
+                   if id(c) not in before and c.label.startswith('Trend corr'))
+
+    def test_below_gate_never_preempts(self):
+        assert simulator.TREND_LOW_ATTENTIVENESS_MIN == 0.7
+        fired = sum(self._trend_snacks(seed, 0.6) for seed in range(40))
+        assert fired == 0, f"{fired} pre-emptive snacks below the attentiveness gate"
+
+    def test_above_gate_preempts(self):
+        fired = sum(self._trend_snacks(seed, 0.98) for seed in range(40))
+        assert fired >= 30, f"only {fired}/40 pre-emptive snacks at attentiveness 0.98"

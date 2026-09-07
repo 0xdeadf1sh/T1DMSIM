@@ -17,6 +17,7 @@ from simulator import (
     generate_patient, SKILL_MIN, SKILL_MAX, HGO_BASE_GRAMS_PER_HOUR,
     BASAL_DOSE_SIGMA, ICR_MEAN,
     BOLUS_VARIANTS, BASAL_VARIANTS, BASAL_DOSE_INTERVAL_HOURS,
+    HYPO_THRESHOLD_MEDIAN, HYPO_THRESHOLD_SKILL_SPAN,
 )
 
 
@@ -152,3 +153,20 @@ class TestBehavioralParameters:
         if low_disc and high_disc:
             assert np.mean([p.slow_carb_preference for p in low_disc]) < \
                    np.mean([p.slow_carb_preference for p in high_disc])
+
+
+class TestHypoThreshold:
+    def test_threshold_spans_55_to_75(self):
+        """Most of the population treats a low only after it has crossed 70."""
+        thr = np.array([make_patient(s).hypo_threshold for s in range(400)])
+        assert thr.min() >= HYPO_THRESHOLD_MEDIAN - HYPO_THRESHOLD_SKILL_SPAN - 1e-9
+        assert thr.max() <= HYPO_THRESHOLD_MEDIAN + HYPO_THRESHOLD_SKILL_SPAN + 1e-9
+        assert HYPO_THRESHOLD_MEDIAN == 65.0 and HYPO_THRESHOLD_SKILL_SPAN == 10.0
+        below_70 = float(np.mean(thr < 70.0))
+        assert below_70 >= 0.8, f"only {below_70:.2f} of patients treat below 70"
+
+    def test_threshold_rises_with_skill(self):
+        patients = [make_patient(s) for s in range(400)]
+        skill = np.array([(p.attentiveness + p.dosing_competence) / 2 for p in patients])
+        thr = np.array([p.hypo_threshold for p in patients])
+        assert np.corrcoef(skill, thr)[0, 1] > 0.95

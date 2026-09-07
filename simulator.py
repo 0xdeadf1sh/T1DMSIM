@@ -362,7 +362,7 @@ BG_LOW_THRESHOLD = 60.0  # Floor of the hypo band; the acting trigger is the per
 # [CF] Per-patient "what I treat as low", centred on HYPO_THRESHOLD_MEDIAN and
 # spread across the skill range: attentive, competent patients act earlier (higher
 # BG). This one value drives the rescue AND blocks every bolus beneath it.
-HYPO_THRESHOLD_MEDIAN = 80.0      # threshold of a median-skill patient (mg/dL)
+HYPO_THRESHOLD_MEDIAN = 65.0      # median-skill patient, mg/dL; treats the crossing of 70
 HYPO_THRESHOLD_SKILL_SPAN = 10.0  # mg/dL deviation at each end of the skill range, so the population spans MEDIAN +/- this
 HYPO_THRESHOLD_SKILL_MID = 0.5    # population-median skill_avg; the gain is applied piecewise about it because SKILL_MIN/MAX are NOT symmetric around it (0.15 vs 0.98), so one linear gain cannot hit +/-SPAN at both ends and hold the median
 
@@ -574,11 +574,15 @@ BG_DEATH_MGDL = 20.0  # true BG at or below this ends the trajectory; the next g
 # BG regulatory computation
 RENAL_THRESHOLD = 180.0  # Kidneys start excreting glucose above this
 RENAL_CLEARANCE_RATE = 0.015  # [DAMP] 0.005→0.015 — arrest hyper excursions faster (shorter/shallower highs).
-COUNTER_REGULATORY_THRESHOLD = 70.0  # hormone response begins below this
-COUNTER_REG_FULL_BG = 40.0  # response saturates at this BG
-COUNTER_REG_MAX_RATE = 3.0  # mg/dL per step at full response with glycogen available (36/h)
-COUNTER_REG_TAU_UP_MIN = 20.0  # rise time constant of the hormone response
-COUNTER_REG_TAU_DOWN_MIN = 60.0  # decay time constant once BG recovers
+COUNTER_REGULATORY_THRESHOLD = 70.0  # hormone response begins below this: at the crossing
+COUNTER_REG_FULL_BG = 66.0  # response saturates at this BG
+COUNTER_REG_MAX_RATE = 10.0  # mg/dL per step at full response with glycogen available (120/h)
+COUNTER_REG_TAU_UP_MIN = 3.0  # rise time constant of the hormone response
+COUNTER_REG_TAU_DOWN_MIN = 90.0  # decay time constant once BG recovers; holds the rebound
+COUNTER_REG_INSULIN_BLOCK = 0.9  # share of insulin-mediated clearance the full response blocks
+COUNTER_REG_AVAIL_FLOOR = 0.3  # response kept by gluconeogenesis when glycogen is spent
+COUNTER_REG_IMPAIRED_PROB = 0.35  # per episode: chance the response is the impaired one
+COUNTER_REG_IMPAIRED_GAIN = 0.2  # amplitude of an impaired episode's response
 SEVERE_HYPO_THRESHOLD = 55.0  # Below this, glucagon dump kicks in
 SEVERE_HYPO_GLUCAGON_RATE = 2.0  # Extra mg/dL per step at severity=1.0
 
@@ -613,6 +617,7 @@ GE_DAY_RAMP_HOURS = 3.0    # smootherstep ramp width for the day/night setpoint 
 GE_REL_SIGMA = 0.30        # per-patient lognormal spread of Sg around GE_RATE (~2x inter-individual range)
 GE_RATE_MIN = 0.004        # floor so no patient is a pure (undamped) integrator
 GE_RATE_MAX = 0.150        # [GE-OU] raised so the strong per-patient Sg (lognormal around GE_RATE) is not clipped
+GE_EQ_FLOOR = 70.0         # the insulin-independent equilibrium never sits below euglycaemia
 
 # CGM noise
 # CGM interstitial lag. The sensor sits in interstitial fluid, which trails
@@ -739,6 +744,7 @@ TREND_HIGH_BG_MIN = 145.0              # BG must exceed this for trend-based hig
                                        # low-skill, allowing preemptive corrections on dinner climbs.
 TREND_LOW_RATE_THRESHOLD = -5.0        # mg/dL/step falling trend to trigger preemptive carb
 TREND_LOW_BG_MAX = 110.0               # BG must be below this for trend-based low correction. Attentive patients catch falling trends *well* before 70 — they eat preemptive carbs when BG is dropping through the 90–110 band.
+TREND_LOW_ATTENTIVENESS_MIN = 0.7      # below this, no pre-emption: the low is treated at 70
 
 # ============================================================================
 # ALCOHOL MODELING
@@ -924,6 +930,9 @@ class SimulatorState:
     last_cgm_alarm_idx: int = -9999
     # Counter-regulatory hormone response in [0, 1]; ramps below COUNTER_REGULATORY_THRESHOLD.
     counter_reg_level: float = 0.0
+    # Per-episode amplitude, drawn when the response starts from rest; held until it has decayed.
+    cr_episode_open: bool = False
+    cr_gain: float = 1.0
     rescue_history: list = field(default_factory=list)  # step indices of nibble rescues, windowed
     # Time index of the next scheduled basal injection. -1 = uninitialised
     # (anchored to the first day's wake_idx on the first _generate_day_events
@@ -2320,7 +2329,8 @@ class T1DMSimulator:
                     refractory_steps = int(HYPO_CORRECTION_REFRACTORY_MIN / DT_MINUTES)
                     if time_idx - s.last_hypo_correction_idx < refractory_steps:
                         return
-                    if self.rng.random() < p.attentiveness:
+                    if (p.attentiveness >= TREND_LOW_ATTENTIVENESS_MIN
+                            and self.rng.random() < p.attentiveness):
                         correction_grams = float(np.clip(
                             abs(trend) * TREND_CORRECTION_WINDOW_STEPS * 2.0, 5.0, 20.0))
                         # Pre-emptive low correction uses fast-acting carbs
@@ -2525,21 +2535,32 @@ class T1DMSimulator:
         self._ge_equilibrium = (
             ge_mu + ge_rho * (self._ge_equilibrium - ge_mu)
             + np.sqrt(1.0 - ge_rho * ge_rho) * GE_EQ_SIGMA * p.ge_sigma_mult * self.rng.normal())
-        self._ge_equilibrium = max(self._ge_equilibrium, BG_DEATH_MGDL)
+        self._ge_equilibrium = max(self._ge_equilibrium, GE_EQ_FLOOR)
         bg_delta += p.glucose_effectiveness * (self._ge_equilibrium - s.bg)
 
         # Physiological guardrails
         if s.bg > RENAL_THRESHOLD:
             bg_delta -= (s.bg - RENAL_THRESHOLD) * RENAL_CLEARANCE_RATE
 
-        # Counter-regulation: ramps in below 70, saturates at 40, glycogen-limited.
+        # Counter-regulation: ramps in below 70, full at 66; adds glucose and blocks clearance.
         cr_target = min(1.0, max(0.0, (COUNTER_REGULATORY_THRESHOLD - s.bg)
                                  / (COUNTER_REGULATORY_THRESHOLD - COUNTER_REG_FULL_BG)))
+        # One amplitude per episode, drawn as the response leaves rest and held until it decays.
+        if cr_target > 0.0 and s.counter_reg_level < 0.05 and not s.cr_episode_open:
+            s.cr_episode_open = True
+            s.cr_gain = (COUNTER_REG_IMPAIRED_GAIN
+                         if self.rng.random() < COUNTER_REG_IMPAIRED_PROB else 1.0)
+        elif cr_target <= 0.0 and s.counter_reg_level < 0.05:
+            s.cr_episode_open = False
         cr_tau = COUNTER_REG_TAU_UP_MIN if cr_target > s.counter_reg_level else COUNTER_REG_TAU_DOWN_MIN
         s.counter_reg_level += (cr_target - s.counter_reg_level) * (1.0 - np.exp(-DT_MINUTES / cr_tau))
-        cr_avail = min(1.0, s.glycogen_grams / glycogen_low_threshold) if glycogen_low_threshold > 0 else 1.0
+        # Glycogen limits the response; gluconeogenesis keeps a floor of it.
+        cr_avail = (max(COUNTER_REG_AVAIL_FLOOR, min(1.0, s.glycogen_grams / glycogen_low_threshold))
+                    if glycogen_low_threshold > 0 else 1.0) * s.cr_gain
         cr_rate = COUNTER_REG_MAX_RATE * s.counter_reg_level * cr_avail
         bg_delta += cr_rate
+        bg_delta += (BG_SCALE_FACTOR * glucose_out * COUNTER_REG_INSULIN_BLOCK
+                     * s.counter_reg_level * cr_avail)
         s.glycogen_grams = max(0.0, s.glycogen_grams - cr_rate / BG_SCALE_FACTOR * GLYCOGEN_DRAIN_FRACTION)
 
         # Severe-hypo glucagon dump — escalates the response below SEVERE_HYPO_THRESHOLD
