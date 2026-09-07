@@ -138,9 +138,11 @@ In T1DM the incretin / GLP-1 axis is blunted and there is no endogenous insulin 
     target   = clip((COUNTER_REGULATORY_THRESHOLD - BG) / (COUNTER_REGULATORY_THRESHOLD - COUNTER_REG_FULL_BG), 0, 1)
     tau      = COUNTER_REG_TAU_UP_MIN if target > level else COUNTER_REG_TAU_DOWN_MIN
     level   += (target - level) * (1 - exp(-DT_MINUTES / tau))
+    gain     = COUNTER_REG_IMPAIRED_GAIN with prob COUNTER_REG_IMPAIRED_PROB else 1   (once per episode)
     avail    = max(COUNTER_REG_AVAIL_FLOOR, min(1, glycogen / glycogen_low_threshold)) * gain
     delta_BG += COUNTER_REG_MAX_RATE * level * avail
     delta_BG += BG_SCALE_FACTOR * glucose_out * COUNTER_REG_INSULIN_BLOCK * level * avail
+    glycogen -= COUNTER_REG_MAX_RATE * level * avail / BG_SCALE_FACTOR * GLYCOGEN_DRAIN_FRACTION
 
     if BG < SEVERE_HYPO_THRESHOLD:
         severity = (SEVERE_HYPO_THRESHOLD - BG) / SEVERE_HYPO_THRESHOLD
@@ -150,7 +152,7 @@ In T1DM the incretin / GLP-1 axis is blunted and there is no endogenous insulin 
     if BG(t+1) <= BG_DEATH_MGDL:       # 20 mg/dL
         the trajectory ends on this step; the next generate() raises PatientDeath
 
-There is no floor. `BG_CLAMP_MAX` (400) is the sensor ceiling. `BG_CLAMP_MIN` (10) exists only to keep the Kovatchev log transform defined and is unreachable alive: the death step's value is held at or above it. The counter-regulatory and glucagon-dump terms are the only physiology opposing a fall.
+There is no floor. `BG_CLAMP_MAX` (400) is the sensor ceiling. `BG_CLAMP_MIN` (10) exists only to keep the Kovatchev log transform defined and is unreachable alive: the death step's value is held at or above it. The counter-regulatory and glucagon-dump terms are the only physiology that acts ONLY in a low; the always-on Sg pull toward `E(t) >= GE_EQ_FLOOR` opposes a fall too (at BG 40 the median patient gets +0.45 mg/dL/step from it).
 
 The counter-regulation is a hormone level in `[0, 1]` that ramps in below `COUNTER_REGULATORY_THRESHOLD` (70) and saturates at `COUNTER_REG_FULL_BG` (66), rising with time constant `COUNTER_REG_TAU_UP_MIN` (3 min) and decaying with `COUNTER_REG_TAU_DOWN_MIN` (90 min), so it is a switch at the crossing that overshoots and holds the rebound rather than a taper. Starting at the crossing rather than above it lets a fast post-meal fall register as a low before it is arrested. It does two things: adds up to `COUNTER_REG_MAX_RATE` (10 mg/dL per step) of hepatic glucose, and blocks up to `COUNTER_REG_INSULIN_BLOCK` (0.9) of insulin-mediated clearance, the epinephrine effect that arrests a fall with insulin still on board. Glycogen availability scales it, floored at `COUNTER_REG_AVAIL_FLOOR` (0.3) by gluconeogenesis. `gain` is drawn once per episode as the level leaves rest: `COUNTER_REG_IMPAIRED_GAIN` (0.2) with probability `COUNTER_REG_IMPAIRED_PROB` (0.35), else 1. Intact episodes are brief dips that bottom near 67; impaired ones are the deep, long lows.
 
@@ -164,7 +166,7 @@ The counter-regulation is a hormone level in `[0, 1]` that ramps in below `COUNT
     E  = mu + rho * (E_prev - mu) + sqrt(1 - rho^2) * GE_EQ_SIGMA * ge_sigma_mult * N(0, 1)
     E  = max(E, GE_EQ_FLOOR)
 
-The `sqrt(1 - rho^2)` factor makes the stationary std equal `GE_EQ_SIGMA * ge_sigma_mult`. `E`'s own timescale, not the strength of the Sg pull, is what keeps the 8h ACF near zero: `E` wanders enough to supply the distributional spread but decorrelates within hours, decoupling spread from the autocorrelation. Sg itself is deliberately weak, because a strong spring high-passes any input slower than its own time constant — insulin included. `GE_EQ_FLOOR = 70` keeps the equilibrium at or above euglycaemia, so the pull is always upward in a low (it aids, never opposes, the counter-regulation and the rescue) and never drags a resting patient into one. `ge_diurnal_profile(hour)` is a mean-zero wrapped-Gaussian dawn-phenomenon rhythm peaking at `GE_DAWN_PEAK_HOUR = 8` with width `GE_DAWN_WIDTH_HOURS = 5.5`, mean-subtracted over the 24h day so it adds rhythm without shifting the pooled mean; its per-patient amplitude `ge_dawn_amplitude` scales with the same dawn trait as the HGO surge.
+The `sqrt(1 - rho^2)` factor makes the stationary std equal `GE_EQ_SIGMA * ge_sigma_mult` for the UNCLAMPED process; the `max(E, GE_EQ_FLOOR)` write-back truncates the realized std to about 0.76× it and lifts the mean (for the mean patient: 95 → 72.6, mean 138 → 171, 6.0 % of steps sitting on the floor). `E`'s own timescale, not the strength of the Sg pull, is what keeps the 8h ACF near zero: `E` wanders enough to supply the distributional spread but decorrelates within hours, decoupling spread from the autocorrelation. Sg itself is deliberately weak, because a strong spring high-passes any input slower than its own time constant — insulin included. `GE_EQ_FLOOR = 70` keeps the equilibrium at or above euglycaemia, so the pull is always upward in a low (it aids, never opposes, the counter-regulation and the rescue) and never drags a resting patient into one. `ge_diurnal_profile(hour)` is a mean-zero wrapped-Gaussian dawn-phenomenon rhythm peaking at `GE_DAWN_PEAK_HOUR = 8` with width `GE_DAWN_WIDTH_HOURS = 5.5`, mean-subtracted over the 24h day so it adds rhythm without shifting the pooled mean; its per-patient amplitude `ge_dawn_amplitude` scales with the same dawn trait as the HGO surge.
 
 Per-patient heterogeneity, sampled once in `generate_patient`:
 
@@ -238,6 +240,7 @@ Hepatic glycogen is a finite store gating the glycogenolysis-sourced fraction of
         glycogen_gate = 1.0
 
     glycogen -= HGO(t) * GLYCOGEN_DRAIN_FRACTION        (drain from glycogenolysis)
+    glycogen -= cr_rate / BG_SCALE_FACTOR * GLYCOGEN_DRAIN_FRACTION   (drain from counter-regulation)
     glycogen += total_carb * GLYCOGEN_REFILL_FRACTION   (refill from absorbed carbs)
     glycogen  = clip(glycogen, 0, GLYCOGEN_CAPACITY)
 

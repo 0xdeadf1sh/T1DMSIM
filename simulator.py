@@ -2144,11 +2144,6 @@ class T1DMSimulator:
         # before acting. Mild offsets — large offsets caused skilled patients to
         # over-correct frequently and rebound into hypo.
         skill_avg = (p.attentiveness + p.dosing_competence) / 2.0
-        # Effective thresholds. The low-side skill multiplier (18) is chosen
-        # so attentive patients catch BG drops *before* crossing 70 rather
-        # than reactively after. For skill_avg=0.7 the trigger lands at 73 —
-        # still below the TIR midpoint, but enough to
-        # cover the ~1-step lag between detection and rescue carb.
         eff_low_thresh = p.hypo_threshold
         eff_high_thresh = BG_HIGH_THRESHOLD - 25.0 * skill_avg
 

@@ -7,6 +7,7 @@ import argparse
 import csv
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -15,12 +16,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 THRESHOLD = 70.0
 SEVERE = 55.0
+STEP_MIN = 5.0
 LEAD_STEPS = 24          # two hours at 5 min
 HIGH_ORIGIN = 130.0
 BRIEF_MIN = 15
 
 
-def load_cache(path: Path) -> list[tuple[np.ndarray, np.ndarray]]:
+Row = tuple[np.ndarray, np.ndarray, np.ndarray]
+
+
+def load_cache(path: Path) -> list[Row]:
     rows = []
     for name in ("bg_observed", "hour_of_day"):
         npy = path / f"{name}.npy"
@@ -30,33 +35,40 @@ def load_cache(path: Path) -> list[tuple[np.ndarray, np.ndarray]]:
         import blosc2
         rows.append(np.asarray(blosc2.open(str(path / f"{name}.b2nd"), mode="r")[:]))
     bg, hour = rows
-    return [(bg[i].astype(np.float64), hour[i].astype(np.float64)) for i in range(bg.shape[0])]
+    t = np.arange(bg.shape[1], dtype=np.float64) * STEP_MIN   # a cache is gapless by construction
+    return [(bg[i].astype(np.float64), hour[i].astype(np.float64), t) for i in range(bg.shape[0])]
 
 
-def load_csv(path: Path, bg_col: str, time_col: str) -> list[tuple[np.ndarray, np.ndarray]]:
+def load_csv(path: Path, bg_col: str, time_col: str) -> list[Row]:
     with open(path) as f:
         recs = list(csv.DictReader(f))
     bg = np.array([float(r[bg_col]) if r[bg_col] else np.nan for r in recs])
     hour = np.array([int(r[time_col][11:13]) + int(r[time_col][14:16]) / 60.0 for r in recs])
-    return [(bg, hour)]
+    t = np.array([datetime.fromisoformat(r[time_col]).timestamp() / 60.0 for r in recs])
+    return [(bg, hour, t)]
 
 
-def onsets(bg: np.ndarray, hour: np.ndarray) -> list[tuple[float, float, int, float]]:
+def onsets(bg: np.ndarray, hour: np.ndarray, t: np.ndarray) -> list[tuple[float, float, int, float]]:
     out = []
     low = bg < THRESHOLD
     for o in np.where(low[1:] & ~low[:-1])[0] + 1:
         if o < LEAD_STEPS or not np.all(np.isfinite(bg[o - LEAD_STEPS:o + 1])):
             continue
+        # A gap makes the lead sample not two hours old and a resumption look like an onset.
+        if abs(t[o] - t[o - LEAD_STEPS] - LEAD_STEPS * STEP_MIN) > 1e-6:
+            continue
         e = int(o)
         while e < len(bg) and low[e]:
             e += 1
+        if e > o + 1 and np.abs(np.diff(t[o:e]) - STEP_MIN).max() > 1e-6:
+            continue
         out.append((float(bg[o - LEAD_STEPS]), float(hour[o]), 5 * (e - int(o)), float(bg[o:e].min())))
     return out
 
 
-def profile(rows: list[tuple[np.ndarray, np.ndarray]]) -> dict[str, float]:
-    ev = np.array([x for bg, hour in rows for x in onsets(bg, hour)], dtype=np.float64)
-    steps = sum(int(np.isfinite(bg).sum()) for bg, _ in rows)
+def profile(rows: list[Row]) -> dict[str, float]:
+    ev = np.array([x for bg, hour, t in rows for x in onsets(bg, hour, t)], dtype=np.float64)
+    steps = sum(int(np.isfinite(bg).sum()) for bg, _, _ in rows)
     if len(ev) == 0:
         return {"onsets": 0, "steps": steps}
     origin, hour, dur, nadir = ev.T
