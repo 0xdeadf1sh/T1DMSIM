@@ -1,11 +1,5 @@
-"""
-Tests for gamma_curve and basal_curve generation utilities.
-
-Verifies that:
-- gamma_curve produces arrays whose sum equals total_amount
-- basal_curve produces a Bateman PK curve whose sum equals total_amount
-- Both curves have correct shapes and non-negative values
-"""
+"""Tests gamma_curve and basal_curve: sum equals total_amount (basal_curve
+is a Bateman PK curve), correct shapes, non-negative values."""
 
 import numpy as np
 import pytest
@@ -86,8 +80,7 @@ class TestBasalCurve:
         curve = basal_curve(total_amount=20.0, duration_minutes=1560.0)
         peak = int(np.argmax(curve))
         steps_per_hour = 60 // DT_MINUTES
-        # Single broad interior peak near the analytic tmax, not a plateau or a
-        # boundary spike.
+        # Single broad interior peak near the analytic tmax, not a plateau or boundary spike.
         assert 4 * steps_per_hour < peak < 10 * steps_per_hour, (
             f"peak at step {peak} should sit near tmax≈6.3h")
         # Rises from ~0 and the smootherstep tail clips back toward 0.
@@ -98,14 +91,9 @@ class TestBasalCurve:
         assert np.all(np.diff(curve[peak:]) <= 1e-9), "should fall after the peak"
 
     def test_amount_semantics_not_rate(self):
-        """total_amount is an area (an amount), not a rate.
-
-        The curve's sum is invariant to duration, so the per-step mean scales
-        DOWN as duration grows — the opposite of a rate, which would hold the
-        per-step value fixed and inflate the area with duration. This is what
-        actually catches passing a units/hour rate where an amount is expected
-        (that bug would make the longer curve's sum scale with duration).
-        """
+        """total_amount is an area, not a rate: sum is invariant to duration, so
+        per-step mean scales down as duration grows. Catches a units/hour rate
+        passed where an amount is expected (sum would then scale with duration)."""
         short = gamma_curve(40.0, k=2.0, theta=15.0, duration_minutes=120.0)
         long = gamma_curve(40.0, k=2.0, theta=15.0, duration_minutes=600.0)
         assert abs(short.sum() - 40.0) < 1e-6

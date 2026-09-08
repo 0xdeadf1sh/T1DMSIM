@@ -1,30 +1,6 @@
-"""
-T1DM Simulator — Interactive Visualizer (Pygame)
-==================================================
-Controls:
-  SPACE       — Generate next 24 hours
-  R           — Reseed with random seed
-  LEFT/RIGHT  — Scroll timeline
-  HOME        — Jump to start
-  END         — Jump to end
-  +/-         — Zoom in/out on time axis
-  1-9, 0      — Toggle individual curve visibility
-  A           — Toggle all curves on/off
-  F           — Cycle text size (small / medium / large)
-  S           — Screenshot (saves PNG)
-  Q / ESC     — Quit
+"""T1DM Simulator -- Interactive Visualizer (Pygame).
 
-Curves (toggle with number keys):
-  1 — Blood Glucose (observed)
-  2 — Carb intake curve
-  3 — Insulin (total)
-  4 — Basal insulin
-  5 — Bolus insulin
-  6 — Insulin Resistance (multiplier; >1 = resistant, <1 = sensitive)
-  7 — Exercise curve
-  8 — BG Delta
-  9 — Hepatic Glucose Output
-  0 — Glucose In
+Controls and curve toggles are documented in the README's "Visualizer Controls".
 """
 
 import sys
@@ -45,7 +21,7 @@ from simulator import (T1DMSimulator, DT_MINUTES, SIMULATION_START_DAY_OF_WEEK,
                        BG_CLAMP_MIN, BG_CLAMP_MAX, SIMULATOR_WARMUP_HOURS)
 
 DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-WARMUP_HOURS = int(SIMULATOR_WARMUP_HOURS)  # discarded before the displayed window starts; never a local literal, or the GUI shows a settling transient the corpus never contains
+WARMUP_HOURS = int(SIMULATOR_WARMUP_HOURS)  # never a local literal, or the GUI shows a transient
 WARMUP_DAYS = WARMUP_HOURS // 24
 DISPLAY_START_DOW = (SIMULATION_START_DAY_OF_WEEK + WARMUP_DAYS) % 7
 
@@ -60,12 +36,7 @@ DEFAULT_ZOOM_HOURS = 6.0  # Initial visible window width
 SCREENSHOT_TOAST_SECONDS = 3.0
 SCREENSHOT_TOAST_FADE = 0.7
 
-# ============================================================================
-# VISUAL THEME — "Tron Legacy" (lime neon on a black Grid)
-# ============================================================================
-# Deep black backdrop, electric-lime hero accent, cyan/orange/magenta neon
-# secondaries. Curves are drawn with a glow underlay (see draw_glow_lines) so
-# the bright core reads as luminous against the dark field.
+# Theme: lime neon on black. Curves use a glow underlay (see draw_glow_lines).
 
 # Colors
 BG_COLOR        = (3, 6, 5)          # Near-black with a faint green cast
@@ -106,9 +77,7 @@ BASE_FONT_MD = 18
 BASE_FONT_LG = 24
 BASE_FONT_XL = 30
 
-# Text scale presets — cycled at runtime with the F key.
-# small ≈ pre-feature defaults; medium is baseline; large (the default) suits
-# hi-DPI / presentation and the maximized-on-open window.
+# Cycled at runtime with F; large (default) suits hi-DPI and the maximized-on-open window.
 TEXT_SCALES = {
     'small':  0.80,
     'medium': 1.00,
@@ -119,10 +88,6 @@ DEFAULT_TEXT_SCALE = 'large'
 
 STEPS_PER_DAY = 24 * 60 // DT_MINUTES  # 288
 
-
-# ============================================================================
-# CURVE DEFINITIONS
-# ============================================================================
 
 CURVES = [
     {'key': 'bg_observed', 'name': 'Blood Glucose',     'color': COLOR_BG_OBS,  'unit': 'mg/dL', 'y_min': BG_CLAMP_MIN, 'y_max': BG_CLAMP_MAX, 'toggle_key': pygame.K_1},
@@ -138,10 +103,6 @@ CURVES = [
 ]
 
 
-# ============================================================================
-# HELPER: Draw text
-# ============================================================================
-
 def draw_text(surface, font, text, x, y, color=TEXT_COLOR, anchor='topleft'):
     """Draw text with anchor support."""
     rendered = font.render(text, True, color)
@@ -156,12 +117,7 @@ def _dim(color, factor):
 
 
 def draw_glow_lines(surface, color, points, width=2, glow=True):
-    """Tron-style polyline: a bright core wrapped in dimmer, wider halos.
-
-    On a near-black field a halo painted in progressively darker shades of the
-    line's own hue reads as a neon glow — brighter than the void at every ring,
-    brightest at the core. Cheap (no per-pixel alpha) and redraw is event-gated.
-    """
+    """Neon-glow polyline: bright core wrapped in dimmer, wider halos of the same hue."""
     if len(points) < 2:
         return
     if glow:
@@ -194,10 +150,6 @@ def format_day_time(step_idx):
     return f"Day {day + 1}  {hours:02d}:{minutes:02d}"
 
 
-# ============================================================================
-# MAIN VISUALIZER
-# ============================================================================
-
 class Visualizer:
     def __init__(self):
         pygame.init()
@@ -212,10 +164,7 @@ class Visualizer:
         )
         pygame.display.set_caption("T1DM Simulator")
 
-        # Open maximized. The WM-managed maximize (via SDL2) respects panels and
-        # emits a VIDEORESIZE the main loop consumes to resync win_w/win_h/buffer.
-        # Guarded so headless/dummy-driver runs (and any build lacking _sdl2)
-        # silently keep the near-full-screen size above.
+        # Guarded so headless/dummy-driver runs keep the near-full-screen size above.
         try:
             from pygame._sdl2.video import Window
             Window.from_display_module().maximize()
@@ -225,8 +174,7 @@ class Visualizer:
         # Off-screen buffer to eliminate flickering
         self.buffer = pygame.Surface((self.win_w, self.win_h))
 
-        # Fonts + scale-dependent layout (sidebar/header/footer dims live on self
-        # so they can react to text-scale changes; see _apply_text_scale).
+        # Sidebar/header/footer dims live on self so they can react to text-scale changes.
         self.text_scale = DEFAULT_TEXT_SCALE
         self._apply_text_scale()
 
@@ -241,10 +189,7 @@ class Visualizer:
         # Initial zoom: fit DEFAULT_ZOOM_HOURS into the available chart width
         steps_per_hour = 60 // DT_MINUTES
         self.pixels_per_step = self._chart_rect().width / (DEFAULT_ZOOM_HOURS * steps_per_hour)
-        # One visibility flag per entry in CURVES, in the same order. Defaults to
-        # the three channels the model actually consumes — BG (1), carbs (2),
-        # total insulin (3). The rest are hidden but toggleable via the digit keys
-        # bound in each CURVES entry's `toggle_key` field.
+        # Per CURVES entry, same order; defaults to the 3 model channels (BG/carbs/insulin).
         self.curve_visible = [True, True, True, False, False, False, False, False, False, False]
         self.hovered_step = None     # Step under mouse cursor
 
@@ -252,8 +197,7 @@ class Visualizer:
         self.screenshot_msg = None
         self.screenshot_msg_until = 0.0
 
-        # Burn off the first day so display starts after dynamics settle, then
-        # generate the initial 24h of visible data.
+        # Burn off warmup so display starts after dynamics settle.
         self._warmup(WARMUP_HOURS)
         self._generate(24)
 
@@ -270,8 +214,7 @@ class Visualizer:
         self.font_xl = pygame.font.SysFont("DejaVu Sans Mono", max(8, int(BASE_FONT_XL * mult)))
         self.sidebar_width = int(BASE_SIDEBAR_WIDTH * mult)
         self.header_height = int(BASE_HEADER_HEIGHT * mult)
-        # Footer must hold the scrollbar; chart leaves room for X-axis time labels above
-        # the footer and curve-name labels above the chart, so they never collide.
+        # Footer holds the scrollbar; leaves room above for time labels so they never collide.
         self.footer_height = max(int(BASE_FOOTER_HEIGHT * mult), self.font_sm.get_linesize() + int(18 * mult))
         self.time_label_height = self.font_sm.get_linesize() * 2 + 6  # hour row + day row
         self.curve_label_height = self.font_sm.get_linesize() + 4
@@ -434,11 +377,7 @@ class Visualizer:
                 draw_text(self.buffer, self.font_sm, val, stats_col_x, y, color)
                 y += line_sm
 
-        # Curve legend / toggles. Each row shows the actual digit key bound
-        # to that curve via its `toggle_key` field — not its position in the
-        # CURVES list — so the on-screen label matches what the keyboard
-        # handler does (otherwise inserting a curve in the middle of CURVES
-        # would silently drift labels off of the bindings).
+        # Digit label comes from toggle_key, not list position, so inserts never drift labels.
         y += self._s(15)
         draw_text(self.buffer, self.font_md, "— Curves (0-9) —", x, y, TEXT_DIM)
         y += line_md + self._s(4)
@@ -481,17 +420,14 @@ class Visualizer:
         if start >= end:
             return
         steps_per_hour = 60 // DT_MINUTES
-        # Walk forward across the visible range, marking [night_start, night_end) windows.
         # Night windows wrap around midnight, so emit two segments per day.
         first_day = start // STEPS_PER_DAY
         last_day = end // STEPS_PER_DAY
         for day in range(first_day - 1, last_day + 2):
             day_start = day * STEPS_PER_DAY
-            # Two pieces of the night that straddle midnight:
-            # 1) NIGHT_START_HOUR through end of this calendar day
+            # Two pieces straddling midnight: night-start->EOD, then next-day-start->night-end.
             seg1_lo = day_start + NIGHT_START_HOUR * steps_per_hour
             seg1_hi = day_start + STEPS_PER_DAY
-            # 2) Start of NEXT calendar day through NIGHT_END_HOUR
             seg2_lo = day_start + STEPS_PER_DAY
             seg2_hi = seg2_lo + NIGHT_END_HOUR * steps_per_hour
             for lo, hi in ((seg1_lo, seg1_hi), (seg2_lo, seg2_hi)):
@@ -551,11 +487,7 @@ class Visualizer:
             interval_steps = 12 * 6  # 6 hours
             major_interval = STEPS_PER_DAY  # 24 hours
 
-        # Vertical grid lines (time) + a two-row X axis: hour labels on the
-        # first row, the wider "Tue (Day N)" day marker on a second row below it
-        # (in the accent colour), so the day string never collides with the
-        # dense hourly ticks. Hour labels are thinned when the per-tick spacing
-        # is narrower than a label.
+        # Two-row X axis: hour labels then a day marker row below, so they never collide.
         label_y = chart.y + chart.height + 2
         day_y = label_y + self.font_sm.get_linesize()
         hour_label_w = self.font_sm.size("00:00")[0] + self._s(8)
@@ -582,8 +514,7 @@ class Visualizer:
                 draw_text(self.buffer, self.font_sm, f"{DAY_NAMES[dow]} (Day {day_num})",
                           int(px) + 3, day_y, ACCENT)
 
-        # Y axis for visible curves — draw on right side of each curve's area
-        # We'll draw Y labels on the far right
+        # Y axis for visible curves, labels on the far right of each curve's area.
         active_curves = [(i, c) for i, c in enumerate(CURVES) if self.curve_visible[i]]
         if active_curves:
             # Use the first visible curve for Y axis on the left
@@ -646,8 +577,7 @@ class Visualizer:
                 points.append((px, py))
 
             if len(points) >= 2:
-                # The BG trace is the hero — give it the fullest glow; the rest
-                # carry a lighter halo so the chart doesn't smear into mush.
+                # BG is the hero curve: fullest glow, so the rest stay a lighter halo.
                 hero = (key == 'bg_observed')
                 draw_glow_lines(self.buffer, color, points, width=2, glow=hero)
 
@@ -791,12 +721,8 @@ class Visualizer:
         self._draw_screenshot_toast()  # always last — overlays everything
 
     def _draw_screenshot_toast(self):
-        """Centered, self-dismissing 'screenshot saved' modal with a lime frame.
-
-        Kept out of the saved PNG by clearing screenshot_msg before the capture
-        re-render (see the K_s handler). Fades over the final SCREENSHOT_TOAST_FADE
-        seconds; the run loop keeps redrawing while it is live so it animates and
-        then clears without needing user input.
+        """Centered, self-dismissing 'screenshot saved' modal; fades over the final
+        SCREENSHOT_TOAST_FADE seconds. Kept out of the PNG via the K_s handler.
         """
         if self.screenshot_msg is None:
             return
@@ -875,8 +801,7 @@ class Visualizer:
                         self._reseed(np.random.randint(0, 100000))
 
                     elif event.key in range(pygame.K_0, pygame.K_9 + 1):
-                        # Toggle the CURVES entry whose toggle_key matches.
-                        # Keys not bound to any curve fall through (no-op).
+                        # Toggle the CURVES entry whose toggle_key matches; unbound keys no-op.
                         for i, c in enumerate(CURVES):
                             if c.get('toggle_key') == event.key:
                                 self.curve_visible[i] = not self.curve_visible[i]
@@ -904,11 +829,7 @@ class Visualizer:
                     elif event.key == pygame.K_s:
                         fname = f"t1dm_seed{self.seed}_{int(time.time())}.png"
                         path = os.path.abspath(fname)
-                        # Re-render a clean frame with the toast suppressed so the
-                        # confirmation modal never lands in the saved PNG (even if
-                        # a prior toast is still on screen). convert(24) drops any
-                        # per-pixel alpha the buffer picked up from SRCALPHA zone
-                        # blits, so the file is always opaque.
+                        # Suppress toast for this render; convert(24) drops SRCALPHA -> opaque PNG.
                         self.screenshot_msg = None
                         self._render_scene()
                         pygame.image.save(self.buffer.convert(24), fname)
@@ -929,8 +850,7 @@ class Visualizer:
                 self.scroll_x = min(max(0, self.total_steps - 10), self.scroll_x + scroll_speed)
                 needs_redraw = True # Trigger redraw while holding key
 
-            # Keep redrawing while the screenshot modal is live so it fades and
-            # then clears on its own, without waiting for the next user event.
+            # Keep redrawing while the toast is live so it fades and clears on its own.
             if self.screenshot_msg is not None:
                 needs_redraw = True
 
@@ -945,10 +865,6 @@ class Visualizer:
                 needs_redraw = False
 
         pygame.quit()
-
-# ============================================================================
-# ENTRY POINT
-# ============================================================================
 
 if __name__ == '__main__':
     import argparse
@@ -982,10 +898,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     viz = Visualizer()
-    # Re-init with the requested seed/initial-BG so the displayed window starts
-    # in the requested state. We discard the auto-generated default-seed window
-    # and rebuild from scratch: simulator with seed → 24h warmup → optional BG
-    # override → generate the first displayed day.
+    # Discard the default-seed window and rebuild with the requested seed/initial-BG.
     if args.seed != 42 or args.bg is not None:
         viz.seed = args.seed
         viz.sim = T1DMSimulator(seed=args.seed)
@@ -1000,9 +913,7 @@ if __name__ == '__main__':
     if args.hours > 24:
         viz._generate(args.hours - 24)
     elif args.hours < 24:
-        # The constructor always generates a 24h window; for a shorter request,
-        # rebuild from scratch and generate exactly args.hours (a bare
-        # _generate(args.hours - 24) would pass a negative step count).
+        # Constructor always generates 24h; rebuild to avoid a negative step count.
         viz.sim = T1DMSimulator(seed=viz.seed)
         viz.data = None
         viz.total_steps = 0

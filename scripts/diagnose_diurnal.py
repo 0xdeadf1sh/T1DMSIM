@@ -1,9 +1,5 @@
 """
-Phase-1 diagnostic for the dinner-peak / nocturnal-low / late-dawn / hypo-count
-chain. Decomposes 30 seeds × 70 days into per-hour means of BG, insulin, carbs,
-HGO, and glucose_in/out; histograms hypo-episode start times; and partitions
-the dawn curve on overnight BG so we can tell whether the late dawn peak is a
-bounce-from-low artefact or an independent timing problem.
+Diagnostic for the dinner-peak / nocturnal-low / late-dawn / hypo-count chain.
 
 Usage: python scripts/diagnose_diurnal.py [--seeds N] [--days D]
 """

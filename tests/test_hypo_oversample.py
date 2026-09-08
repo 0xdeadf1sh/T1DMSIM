@@ -1,13 +1,7 @@
-"""
-Tests for the DATASET.md distribution comparison and hypo-oversampling shift.
+"""Tests for the DATASET.md distribution comparison and hypo-oversampling shift.
 
-cache_simulator.py folds a "Distribution vs the baseline simulator" comparison
-into DATASET.md: it pools the cache's bg_observed during the transcode pass and
-compares its moments / percentiles / band fractions / LBGI-HBGI against the
-unbiased-simulator baseline stored in diff/stats.json (datasets.Sim). These
-tests verify the streaming stats are exact, the baseline loads, and that
-oversampling shifts the pooled distribution toward hypoglycemia in the expected
-direction (and that an unbiased build sits on the baseline).
+Verifies streaming stats are exact, the diff/stats.json baseline loads, and that
+oversampling shifts the pooled distribution toward hypoglycemia as expected.
 """
 
 import os
@@ -22,10 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cache_simulator as cs  # noqa: E402
 
 
-# ---------------------------------------------------------------------------
 # Pure-function unit tests (fast, no simulation)
-# ---------------------------------------------------------------------------
-
 def test_kovatchev_numerators_match_reference():
     rng = np.random.default_rng(0)
     bg = rng.uniform(40, 400, size=5000)
@@ -78,15 +69,10 @@ def test_load_baseline_missing_returns_none():
     assert cs._load_baseline_stats("/no/such/stats.json") is None
 
 
-# ---------------------------------------------------------------------------
 # End-to-end build tests (small pools; use the real diff/stats.json baseline)
-# ---------------------------------------------------------------------------
-
 def _build(tmp_path, name, **kw):
     defaults = dict(
-        # 24 h, not 6: the Sg time constant is 1/GE_RATE = 333 min, so a 6 h
-        # warmup leaves ~1 time constant of the initial transient in the pool and
-        # the unbiased build no longer sits on the baseline. Production uses 48 h.
+        # 24h warmup: Sg's time constant is 333 min, so 6h leaves a transient in the pool.
         pool_size=36, sim_hours=18.0, warmup_hours=24.0, n_jobs=1,
         dataset_md='', seed_salt=7,
     )
@@ -135,8 +121,7 @@ def test_oversampled_shifts_relative_to_unbiased(reports):
 def test_unbiased_build_sits_near_baseline(reports):
     base, _ = reports
     b = base['baseline']
-    # A small unbiased pool over a short window won't match a 70-day baseline
-    # exactly, but should be in the same neighbourhood.
+    # Small/short pool won't match the 70-day baseline exactly, just the same neighbourhood.
     assert abs(base['distribution']['mean'] - b['mean']) < 12.0
     assert abs(base['glycemia']['frac_below70'] - b['frac_below70']) < 0.05
 

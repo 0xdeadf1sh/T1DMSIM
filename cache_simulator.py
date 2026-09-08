@@ -1,104 +1,7 @@
 """
-cache_simulator.py -- pre-generate a pool of simulator trajectories to disk.
-============================================================================
+Pre-generate a compressed pool of simulator trajectories to disk.
 
-``T1DMSimulator.generate()`` is a stateful Python step loop; running it inside
-every training DataLoader worker starves a fast GPU. This tool generates a pool
-of ``N`` post-warmup trajectories once, compresses them to disk, and emits a
-full statistical summary (``DATASET.md``) describing the corpus. Downstream
-training then memory-maps the cache and never runs the simulator.
-
-The script is deliberately dependency-light: ``numpy`` for numerics and
-``blosc2`` for the compressed on-disk arrays. It never imports or mutates the
-simulator's internals -- it only drives the public ``generate()`` API.
-
-Layout
-------
-The output directory holds one compressed ``.b2nd`` (blosc2 NDArray) file per
-channel, a raw ``icr.npy``, a ``normalization_stats.json``, and a ``meta.json``
-sentinel::
-
-    <out_dir>/
-        bg_observed.b2nd        (N, T) float32   shuffle + zstd
-        total_carb.b2nd         (N, T) float32   shuffle + zstd
-        total_insulin.b2nd      (N, T) float32   shuffle + zstd
-        insulin_resistance.b2nd (N, T) float32   shuffle + zstd
-        hgo.b2nd                (N, T) float32   shuffle + zstd
-        total_exercise.b2nd     (N, T) float32   shuffle + zstd
-        hour_of_day.b2nd        (N, T) float32   shuffle + zstd
-        day.b2nd                (N, T) int32     shuffle + zstd
-        icr.npy                 (N,)   float32   raw (tiny)
-        normalization_stats.json  4-channel {mean, std} the T1DMAI model consumes
-        meta.json               generation params + aggregate statistics
-
-``normalization_stats.json`` is the ``{bg_absolute, carb_intake,
-insulin_combined, exercise_equiv}: {mean, std}`` contract the downstream T1DMAI
-model reads -- all four of ``T1DMAI/normalization.CHANNEL_NAMES``, which pins its
-count at 4 and refuses a stats file missing one: the bg mean/std are fit in
-Kovatchev risk space, carb/insulin/exercise in log1p space (the same forward
-transforms the model applies before its z-score), pooled over all rows x
-timesteps during the transcode pass. It is written durably before the
-meta.json sentinel so a completed cache always carries valid stats.
-
-``DATASET.md`` (path from ``--dataset-md``, default ``./DATASET.md``) is a
-human-readable render of the same statistics.
-
-Performance
------------
-Single-threaded: each patient calls ``generate()`` exactly ``warmup + keep``
-times; the warmup steps are advanced and discarded, and only the eight cached
-channels (plus the basal/bolus split used for statistics) are pulled out of the
-per-step dict straight into pre-allocated arrays -- avoiding the 21-list build
-that ``generate_hours`` performs.
-
-Multi-threaded: the simulator is pure-Python and GIL-bound, so parallelism is
-via processes (``fork`` on Linux -- the already-imported simulator module is
-inherited, so there is no per-worker re-import). Each worker simulates one row
-and writes it *directly* into a shared per-channel ``.npy`` staging memmap at
-its own row offset; only a tiny per-patient statistics dict is returned over the
-IPC boundary, never the (T,)-length channel arrays. Disjoint-row writes into a
-``MAP_SHARED`` file-backed mapping are safe across processes, and the pool join
-happens-before the transcode read.
-
-After the worker fan-out, a single transcode pass converts each staging channel
-to a compressed ``.b2nd`` (byte-shuffle + zstd), deleting the ``.npy`` as soon
-as its channel finishes so peak disk stays near ``max(raw, compressed)`` rather
-than their sum. Every file and the staging directory are fsync'd before
-``meta.json`` (the sentinel) is written and the directory is atomically renamed
-into place, so neither a process crash nor a power loss can surface a
-sentinel-present, data-truncated cache.
-
-blosc2 parallelizes compression across the blocks *within* a chunk, so transcode
-throughput scales with ``--rows-per-chunk`` (a small chunk is one block and
-transcodes single-threaded); that same value is the random-row read granularity,
-so it trades one-time build speed against per-read decompression waste.
-
-Window validity filter
-----------------------
-Any trajectory whose ``bg_observed`` touches the clamp rails -- a reading
-``>= --rail-high`` or ``<= --rail-low``, both derived from BG_CLAMP_MAX/MIN --
-is discarded and a fresh seed is drawn for that row. This keeps rows pinned flat
-against a clamp out of the training pool. The low rail tracks the dynamics floor,
-not the CGM reporting floor: it must never discard a trajectory merely for
-reaching a severe low, which is a population the pool exists to carry.
-
-Hypo oversampling
------------------
-With ``--hypo-oversample P``, a deterministic fraction ``P`` of rows are
-"hypo-designated": for those rows the seed is re-rolled until the trajectory
-spends at least ``--hypo-min-frac`` of its time below 70 mg/dL (or the attempt
-cap is hit, in which case the hypo-richest attempt is kept). Every row -- hypo
-or not -- still respects the rail filter, and each stored row is one whole,
-physiologically-consistent patient. Rejection sampling is per-row and keyed on
-``(seed_salt, cache_idx, attempt)``, so the pool is fully reproducible and the
-work parallelizes without coordination.
-
-Usage
------
-::
-
-    python cache_simulator.py --out-dir simulator_cache --pool-size 50000
-    python cache_simulator.py --pool-size 20000 --hypo-oversample 0.25 --jobs 30
+Usage: python cache_simulator.py --out-dir DIR --pool-size N
 """
 
 from __future__ import annotations
@@ -118,8 +21,7 @@ from typing import Any
 
 import numpy as np
 
-# Run-from-repo-root convenience: make ``import simulator`` resolve regardless
-# of the caller's CWD.
+# Run-from-repo-root convenience: makes ``import simulator`` resolve regardless of CWD.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import blosc2
@@ -127,10 +29,6 @@ import blosc2
 from simulator import (BG_CLAMP_MIN, BG_CLAMP_MAX, DT_MINUTES,
                        SIMULATOR_WARMUP_HOURS, T1DMSimulator)
 
-
-# ============================================================================
-# CHANNELS
-# ============================================================================
 
 CHANNEL_NAMES = (
     'bg_observed',
@@ -153,37 +51,24 @@ CHANNEL_DTYPES: dict[str, Any] = {
     'day': np.int32,
 }
 
-# ============================================================================
-# CACHE / COMPRESSION PARAMETERS
-# ============================================================================
-
 CACHE_FORMAT_VERSION = 'blosc2-ndarray-v1'
 DEFAULT_ROWS_PER_CHUNK = 32
 DEFAULT_ZSTD_CLEVEL = 5
 # blosc2 chunks must fit a signed 32-bit byte count (the C-extension ceiling).
 _BLOSC2_MAX_CHUNK_BYTES = 2**31 - 1
-# Transcode a staging channel in row-blocks of about this many bytes so a
-# 266 GB/channel pool (100M patients) never has to fit a whole channel in RAM,
-# while each block still spans many chunks for blosc2 to compress in parallel.
+# Row-block size bounding peak RAM: a 266 GB channel (100M patients) never loads whole.
 _TRANSCODE_BLOCK_BYTES = 256 * 1024 * 1024
 
-# ============================================================================
-# GENERATION DEFAULTS
-# ============================================================================
-
-DEFAULT_SIM_HOURS = 199.5    # [CF] 103.5→199.5 — room for a 7-day (336-patch) context, at the smallest length that keeps hour-of-day coverage exactly uniform. T1DMAI draws patch-aligned starts in [context, N - forward_room], so the start count is (N - context - forward)/6 + 1 and must be a multiple of 48 (half-hour slots per day) or some slots are oversampled. N = 2394 gives 384 - n_ctx starts, a multiple of 48 at EVERY whole-day context width from 24 h (336 starts) to 7 days (48); 2400 gives 385 - n_ctx and is a multiple of 48 at none of them, tilting every window distribution toward midnight. The congruence is N ≡ 90 (mod 288); 2394 is the smallest such N that leaves a 336-patch context any candidate at all, since it needs (336 + 16) * 6 = 2112 steps and the previous congruent length is 2106. PAIRED CHANGE: T1DMAI/data.py ON_THE_FLY_SIM_HOURS must move with this or its loader rejects the cache outright.
-DEFAULT_WARMUP_HOURS = SIMULATOR_WARMUP_HOURS  # discarded lead-in so the state has forgotten its init
+# N=2394 (N mod 288 = 90) keeps hour-of-day uniform; paired with T1DMAI SIM_HOURS.
+DEFAULT_SIM_HOURS = 199.5    # N=2394 (mod288=90): keeps hour-of-day uniform; see T1DMAI SIM_HOURS
+DEFAULT_WARMUP_HOURS = SIMULATOR_WARMUP_HOURS  # discarded lead-in so state forgets its init
 DEFAULT_MAX_ATTEMPTS = 50    # soft cap: budget for meeting the hypo target per row
-# Extra draws devoted purely to finding a rail-VALID trajectory once the hypo
-# budget is spent, before giving up and raising. Validity is a hard requirement,
-# so this backstops the (essentially unreachable) case of a run of rail-hitters.
+# Extra draws to find a rail-valid trajectory once the (soft) hypo budget is spent.
 _VALIDITY_HARD_EXTRA = 250
 DEFAULT_HYPO_MIN_FRAC = 0.05 # min fraction of time < 70 mg/dL for a hypo-designated row
 DEFAULT_RAIL_HIGH = BG_CLAMP_MAX - 1.0  # discard a window with any bg_observed >= this
-DEFAULT_RAIL_LOW = BG_CLAMP_MIN + 1.0   # [CF] was a hardcoded 41, which discarded every trajectory reaching a severe low — precisely the population this corpus now exists to teach. Both rails are DERIVED so a future clamp change cannot desynchronise them; the filter only ever meant to drop rows pinned flat against a clamp.
+DEFAULT_RAIL_LOW = BG_CLAMP_MIN + 1.0   # derived, so a clamp change cannot desync the rail
 
-# Event-detection thresholds (mirrors the README's meal detector: upward
-# threshold-crossings with a refractory window).
 MEAL_CARB_THRESHOLD_G = 1.0       # a meal step appears > 1 g/step of carb
 BOLUS_EVENT_THRESHOLD_U = 0.02    # a bolus onset crosses this U/step
 EVENT_REFRACTORY_MIN = 30.0       # min gap between counted events
@@ -194,9 +79,7 @@ BG_LOW = 70.0
 BG_HIGH = 180.0
 BG_VERY_HIGH = 250.0
 
-# 1 mg/dL histogram over the CGM clamp span, accumulated during the transcode
-# pass to recover pooled percentiles/median without holding every reading in RAM.
-BG_HIST_EDGES = np.arange(BG_CLAMP_MIN, BG_CLAMP_MAX + 1.0, 1.0)  # derived, never a literal: a hardcoded 40 floor silently drops every sub-40 reading from the pooled percentiles while still counting it in n
+BG_HIST_EDGES = np.arange(BG_CLAMP_MIN, BG_CLAMP_MAX + 1.0, 1.0)  # never hardcode 40; drops sub-40
 
 # Path (relative to this file) to the diff report's machine-readable baseline.
 DEFAULT_BASELINE_STATS = os.path.join(
@@ -205,33 +88,15 @@ DEFAULT_BASELINE_STATS = os.path.join(
 
 
 def _kovatchev_numerators(bg: np.ndarray) -> tuple[float, float]:
-    """Sum of the Kovatchev (1997) LBGI/HBGI per-reading risk terms over ``bg``.
-
-    Matches ``diff/build_report.kovatchev_risk``: f = 1.509*(ln(bg)^1.084 - 5.381),
-    left/hypo risk 10*min(f,0)^2, right/hyper risk 10*max(f,0)^2. Returns the
-    *sums* so the caller divides by the pooled reading count to get LBGI/HBGI.
-    """
-    # Clinical domain floor is 20 mg/dL (SPEC/invariants.md, and T1DMDROID's
-    # CLINICAL_BG_CLAMP_MIN). The old 1.0 guard was merely an ln() safety net and
-    # was unreachable while BG could not fall below 40; it is reachable now.
+    """Sum of Kovatchev (1997) LBGI/HBGI per-reading risk terms; caller divides by n."""
+    # Floor is 20 mg/dL (SPEC/invariants.md); old 1.0 guard was unreachable below 40, now is.
     f = 1.509 * (np.log(np.clip(bg, 20.0, None)) ** 1.084 - 5.381)
     rl = 10.0 * np.minimum(f, 0.0) ** 2
     rh = 10.0 * np.maximum(f, 0.0) ** 2
     return float(rl.sum(dtype=np.float64)), float(rh.sum(dtype=np.float64))
 
 
-# ============================================================================
-# NORMALIZATION STATS (consumed by the T1DMAI model; self-contained -- no T1DMAI
-# import). Emits normalization_stats.json alongside meta.json.
-# ============================================================================
-
-# Kovatchev risk constants anchored so f(40) = -sqrt(10) and f(400) = +sqrt(10);
-# mirror T1DMAI/utils._KOVATCHEV_* -- model risk space, distinct from the clinical
-# LBGI/HBGI constants used by _kovatchev_numerators. The anchor points are a
-# property of these constants and stay fixed; they are NOT tied to
-# BG_CLAMP_MIN/MAX, which now clip to [10, 400] so the transform extends to
-# f(10) = -6.82. Re-anchoring to the new floor would compress the hypoglycemic
-# stretch, which is the whole reason the model forecasts in this space.
+# f(40)=-sqrt(10), f(400)=+sqrt(10); mirrors T1DMAI/utils._KOVATCHEV_*, not tied to the clamp.
 NORM_BG_RISK_SCALE = 2.2211457449985317
 NORM_BG_RISK_POWER = 1.084
 NORM_BG_RISK_OFFSET = 5.540076976170212
@@ -239,14 +104,7 @@ NORM_BG_RISK_OFFSET = 5.540076976170212
 # File name of the emitted 4-channel {mean, std} stats the T1DMAI model reads.
 NORM_STATS_FILE = 'normalization_stats.json'
 
-# Cache channel -> T1DMAI normalization channel name. bg_absolute is fit in
-# Kovatchev risk space, carb_intake / insulin_combined in log1p space (see
-# _norm_forward); the T1DMAI model applies the same forward transform before its
-# z-score, so the fitted mean/std live in those spaces.
-# All four of T1DMAI's normalized SIGNAL channels. Omitting exercise here does
-# not fail loudly: the cache still builds and still loads, and the model simply
-# has no scale for feat 3 until someone notices the key is absent and fits it by
-# hand. Keep this map complete against T1DMAI/normalization.CHANNEL_NAMES.
+# All four T1DMAI channels; an omission builds and loads silently with no scale for that feat.
 NORM_CHANNEL_SOURCES: dict[str, str] = {
     'bg_observed': 'bg_absolute',
     'total_carb': 'carb_intake',
@@ -256,28 +114,17 @@ NORM_CHANNEL_SOURCES: dict[str, str] = {
 
 
 def _norm_bg_risk(bg: np.ndarray) -> np.ndarray:
-    """Kovatchev risk transform (model risk space) of raw mg/dL ``bg``.
+    """Kovatchev risk transform of raw mg/dL ``bg`` (model risk space).
 
-    Clips to ``[BG_CLAMP_MIN, BG_CLAMP_MAX]`` then applies
-    ``f(g) = SCALE * (ln(g)^POWER - OFFSET)`` with the constants above, anchored
-    at ``f(40) = -sqrt(10)`` / ``f(400) = +sqrt(10)`` -- mirroring
-    ``T1DMAI/utils.kovatchev_f_np``, the transform the model applies to the bg
-    input BEFORE the z-score. The clip floor sits below the lower anchor, so the
-    output range is asymmetric: ``[f(10), f(400)] = [-6.82, +3.16]``.
-    Returns float64.
+    Clips to [BG_CLAMP_MIN, BG_CLAMP_MAX]; f(g)=SCALE*(ln(g)^POWER-OFFSET), anchored
+    at f(40)=-sqrt(10)/f(400)=+sqrt(10). Range asymmetric: [f(10),f(400)]=[-6.82,+3.16].
     """
     g = np.clip(np.asarray(bg, dtype=np.float64), BG_CLAMP_MIN, BG_CLAMP_MAX)
     return NORM_BG_RISK_SCALE * (np.log(g) ** NORM_BG_RISK_POWER - NORM_BG_RISK_OFFSET)
 
 
 def _norm_forward(cache_name: str, block: np.ndarray) -> np.ndarray:
-    """Forward transform for the normalization-stats fit of ``cache_name``.
-
-    ``bg_observed`` -> Kovatchev risk space; ``total_carb`` / ``total_insulin`` /
-    ``total_exercise`` -> ``log1p(max(x, 0))``, mirroring
-    ``T1DMAI/normalization.SPARSE_LOG1P_CHANNELS``. Returns the flattened float64
-    transformed values.
-    """
+    """Forward transform for the norm-stats fit: bg -> Kovatchev risk, else log1p(max(x,0))."""
     v = np.asarray(block, dtype=np.float64).reshape(-1)
     if cache_name == 'bg_observed':
         return _norm_bg_risk(v)
@@ -287,25 +134,14 @@ def _norm_forward(cache_name: str, block: np.ndarray) -> np.ndarray:
 def _finalize_norm_stats(
     norm_acc: dict[str, dict[str, float]],
 ) -> dict[str, dict[str, float]]:
-    """Reduce the power-sum accumulators to the T1DMAI ``{name: {mean, std}}`` contract.
-
-    ``std`` is the SAMPLE std ``sqrt(M2 / (n - 1))`` (``M2 = sum_sq - sum^2/n``),
-    matching ``T1DMAI/normalization._finalize_stats``. Returns exactly the four
-    channels bg_absolute / carb_intake / insulin_combined / exercise_equiv.
-    """
+    """Reduce power-sum accumulators to the T1DMAI {name: {mean, std}} contract (sample std)."""
     stats: dict[str, dict[str, float]] = {}
     for name, a in norm_acc.items():
         n = a['n']
         mean = a['sum'] / n if n else 0.0
         m2 = (a['sum_sq'] - (a['sum'] * a['sum']) / n) if n else 0.0
         std = float(np.sqrt(max(m2, 0.0) / max(n - 1, 1)))
-        # A zero std is not a small number, it is an ABSENT channel: the window
-        # held no event at all, which happens to the sparse channels (exercise
-        # above all) when the pool is small or the kept window short.
-        # T1DMAI/normalization.load_normalization_stats REFUSES such a file --
-        # normalize divides by std + 1e-8 and would scale that channel by ~1e8 --
-        # so writing it produces a pool nothing can train on. Fail here, at the
-        # point of cause, rather than at someone's next training run.
+        # Zero std means an ABSENT channel (no events); T1DMAI refuses such a stats file.
         if not (std > 0.0):
             raise ValueError(
                 f"normalization channel {name!r} fitted std={std!r} over n={n} "
@@ -333,22 +169,13 @@ class RowConfig:
     event_refractory_steps: int
 
 
-# ============================================================================
-# STEP-COUNT / SEED HELPERS
-# ============================================================================
-
 def _steps_for_hours(hours: float) -> int:
     """Number of 5-minute steps in ``hours`` (floored, matching the simulator)."""
     return int(hours * 60 / DT_MINUTES)
 
 
 def _row_seed(cache_idx: int, attempt: int, seed_salt: int) -> int:
-    """
-    Deterministic 63-bit simulator seed for ``(cache_idx, attempt)``.
-
-    Keyed on ``seed_salt`` so different salts draw independent corpora, and on
-    ``attempt`` so a rejected trajectory's re-roll is reproducible.
-    """
+    """Deterministic 63-bit seed for (cache_idx, attempt), keyed by seed_salt."""
     digest = hashlib.sha256(f'{seed_salt}:{cache_idx}:{attempt}'.encode()).hexdigest()
     return int(digest, 16) % (2**63 - 1)
 
@@ -363,14 +190,7 @@ def _is_hypo_row(cache_idx: int, prob: float, seed_salt: int) -> bool:
 
 
 def _count_crossings(x: np.ndarray, thresh: float, refractory_steps: int) -> int:
-    """
-    Count upward threshold-crossings of ``x`` above ``thresh`` with a refractory.
-
-    A crossing is a step where ``x`` rises from ``<= thresh`` to ``> thresh``;
-    crossings closer than ``refractory_steps`` to the previous counted one are
-    merged. A signal already above ``thresh`` at index 0 is not counted (no
-    upward crossing is observed), matching the README's meal detector.
-    """
+    """Count upward crossings of ``x`` above ``thresh``, merging ones within refractory_steps."""
     above = x > thresh
     if above.size < 2:
         return int(above.any())
@@ -387,20 +207,10 @@ def _count_crossings(x: np.ndarray, thresh: float, refractory_steps: int) -> int
     return count
 
 
-# ============================================================================
-# SINGLE-PATIENT SIMULATION + STATISTICS
-# ============================================================================
-
 def _simulate_patient(
     seed: int, cfg: RowConfig
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    """
-    Simulate one patient and return its cached channels plus a statistics dict.
-
-    Advances ``cfg.warmup_steps`` steps unstored, then pulls the eight cached
-    channels (and the basal/bolus split, used only for statistics) out of the
-    per-step ``generate()`` dict into pre-allocated arrays.
-    """
+    """Simulate one patient; return its cached channels plus a statistics dict."""
     sim = T1DMSimulator(seed=int(seed))
     gen = sim.generate
 
@@ -468,8 +278,7 @@ def _simulate_patient(
         'n_boluses': _count_crossings(bolus, BOLUS_EVENT_THRESHOLD_U, ref),
         'n_ex_sessions': _count_crossings(exer, 0.0, ref),
         'ex_active_steps': int((exer > 0.0).sum()),
-        # Fraction of time below the configurable hypo cutoff, used only for the
-        # oversampling criterion (the class ratios below always use the fixed 70).
+        # Below the configurable cutoff, for oversampling only; class ratios always use 70.
         'frac_below_hypo': float((bg_obs < cfg.hypo_threshold).mean()),
     }
     return channels, stats
@@ -487,19 +296,10 @@ def _finish(
 
 
 def _resolve_row(cache_idx: int, cfg: RowConfig) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    """
-    Rejection-sample the trajectory stored at ``cache_idx``.
+    """Rejection-sample the trajectory at ``cache_idx``.
 
-    Rail-validity (no bg_observed touching the clamp rails) is a HARD gate: an
-    invalid trajectory is never a stored candidate. Seeds are redrawn until a
-    valid one is found, and -- for a hypo-designated row -- a valid trajectory
-    that also spends at least ``hypo_min_frac`` of its time below
-    ``hypo_threshold`` is preferred. The hypo target is the only *soft* one: if
-    it cannot be met within ``max_attempts``, the hypo-richest *valid* trajectory
-    is kept (``accepted=False``). Validity is pursued for up to
-    ``max_attempts + _VALIDITY_HARD_EXTRA`` draws before giving up; exhausting
-    that without a single valid trajectory raises rather than store a rail-hitter
-    (only reachable with a degenerate rail band).
+    Rail-validity is a hard gate. A hypo-designated row prefers hypo_min_frac time-below,
+    else falls back (accepted=False) to the richest valid attempt within the attempt budget.
     """
     is_hypo = _is_hypo_row(cache_idx, cfg.hypo_prob, cfg.seed_salt)
     hard_cap = cfg.max_attempts + _VALIDITY_HARD_EXTRA
@@ -520,8 +320,7 @@ def _resolve_row(cache_idx: int, cfg: RowConfig) -> tuple[dict[str, np.ndarray],
         if stats['frac_below_hypo'] >= cfg.hypo_min_frac:
             return _finish(channels, stats, cache_idx, n_sims, is_hypo, accepted=True)
 
-        # Valid but hypo target unmet: remember the hypo-richest valid attempt and
-        # keep spending the (soft) hypo budget; once it is exhausted, keep the best.
+        # Valid but hypo target unmet: track the hypo-richest valid attempt as fallback.
         if stats['frac_below_hypo'] > best_hypo:
             best_hypo = stats['frac_below_hypo']
             best_valid = (channels, stats)
@@ -538,10 +337,6 @@ def _resolve_row(cache_idx: int, cfg: RowConfig) -> tuple[dict[str, np.ndarray],
         f'check --rail-low / --rail-high.'
     )
 
-
-# ============================================================================
-# WORKER MACHINERY
-# ============================================================================
 
 _WORKER: dict[str, Any] = {}
 
@@ -565,16 +360,10 @@ def _worker(cache_idx: int) -> dict[str, Any]:
     return stats
 
 
-# ============================================================================
-# STREAMING STATISTICS ACCUMULATOR
-# ============================================================================
-
 class StatAccumulator:
     """Folds per-patient statistics into running aggregates (O(1) memory)."""
 
-    # Folded in worker-completion order, so the float sums (sum_carb/…/sum_bg)
-    # may differ by trailing ULPs run-to-run; the cached channels and icr are
-    # bit-identical, and DATASET.md rounds these, so this is cosmetic only.
+    # Float sums may differ by trailing ULPs run-to-run (worker completion order); cosmetic only.
     _SUM_KEYS = (
         'sum_carb', 'sum_insulin', 'sum_basal', 'sum_bolus', 'sum_bg',
         'below54', 'below70', 'in_range', 'above180', 'above250',
@@ -612,10 +401,6 @@ class StatAccumulator:
             if stats['accepted']:
                 self.n_hypo_qualified += 1
 
-
-# ============================================================================
-# TRANSCODE: staging .npy -> compressed .b2nd
-# ============================================================================
 
 def _resolve_rows_per_chunk(rows_per_chunk: int, pool_size: int, n_timesteps: int) -> int:
     """Clamp ``rows_per_chunk`` so a chunk fits blosc2's 2^31-1 byte ceiling and <= pool_size."""
@@ -660,19 +445,10 @@ def _transcode_to_blosc2(
     partial_dir: str, pool_size: int, n_timesteps: int,
     rows_per_chunk: int, clevel: int, nthreads: int,
 ) -> tuple[dict[str, dict[str, int]], dict[str, Any], dict[str, dict[str, float]]]:
-    """
-    Convert each staging ``.npy`` to a compressed ``.b2nd`` and delete the source.
+    """Convert each staging ``.npy`` to a compressed ``.b2nd``, deleting the source.
 
-    Returns ``(inventory, bg_dist, norm_acc)``: a per-channel
-    ``{raw_bytes, compressed_bytes}`` inventory; the pooled ``bg_observed``
-    distribution aggregates (histogram, power sums, Kovatchev numerators); and the
-    per-channel ``{sum, sum_sq, n}`` power sums of the T1DMAI forward-transformed
-    bg/carb/insulin/exercise channels (risk space for bg, log1p for the rest) for the
-    ``normalization_stats.json`` fit. All are accumulated block-by-block as each
-    channel is read for compression -- so pooled percentiles / std / skew / LBGI /
-    HBGI and the normalization stats cost no extra I/O and never materialise a
-    whole channel in RAM. Round-trips the first and last row of each channel to
-    catch chunk-edge corruption.
+    Returns (inventory, bg_dist, norm_acc), accumulated block-by-block with no extra
+    I/O and no whole channel in RAM. Round-trips row 0 and -1 to catch chunk-edge corruption.
     """
     bg_hist = np.zeros(len(BG_HIST_EDGES) - 1, dtype=np.float64)
     bg_dist = {'sum': 0.0, 'sum_sq': 0.0, 'sum_cube': 0.0,
@@ -688,8 +464,7 @@ def _transcode_to_blosc2(
         nthreads=max(1, nthreads),
     )
     max_itemsize = max(np.dtype(d).itemsize for d in CHANNEL_DTYPES.values())
-    # Round the RAM-bounded block down to a whole number of chunks (>= 1 chunk)
-    # so block edges land on chunk boundaries and blosc2 recompresses nothing.
+    # Round down to a whole number of chunks so block edges land on chunk boundaries.
     rows_per_block = max(
         rows_per_chunk,
         (_TRANSCODE_BLOCK_BYTES // (n_timesteps * max_itemsize) // rows_per_chunk) * rows_per_chunk,
@@ -717,11 +492,7 @@ def _transcode_to_blosc2(
                 mode='w',
                 cparams=cparams,
             )
-            # Block-wise assignment bounds peak RAM at one block rather than a
-            # whole channel. blosc2 parallelizes compression across the *blocks
-            # within a chunk*, so throughput scales with rows_per_chunk (a small
-            # chunk is a single block and transcodes single-threaded regardless
-            # of nthreads) -- see the rows_per_chunk help for the read tradeoff.
+            # Block-wise assignment bounds peak RAM at one block; blosc2 parallelizes per chunk.
             for r0 in range(0, pool_size, rows_per_block):
                 r1 = min(r0 + rows_per_block, pool_size)
                 block = np.asarray(src[r0:r1])
@@ -770,10 +541,6 @@ def _transcode_to_blosc2(
     bg_dist['hist'] = bg_hist.tolist()
     return inventory, bg_dist, norm_acc
 
-
-# ============================================================================
-# REPORT ASSEMBLY + RENDERING
-# ============================================================================
 
 def _hist_percentile(hist: np.ndarray, edges: np.ndarray, q: float) -> float:
     """Linear-interpolated q-th percentile (0-100) from a histogram."""
@@ -868,18 +635,13 @@ def _finalize_report(
 
     compressed_total = sum(c['compressed_bytes'] for c in inventory.values())
     raw_total = sum(c['raw_bytes'] for c in inventory.values())
-    # meta.json is a few KB (negligible vs the channels) and its size is
-    # self-referential to record, so it is excluded from the footprint total.
+    # meta.json is negligible and self-referential to record; excluded from the footprint.
     disk_total = compressed_total + icr_bytes
 
     return {
         'schema': 'dataset-report-v1',
         'params': params,
-        # Flat top-level keys the T1DMAI T1DMDataset loader (data.py
-        # _load_cache) hard-requires. They mirror values already nested under
-        # 'params'; kept flat here because that loader reads them off the root
-        # of meta.json. patient_uniform_sample_prob is hardcoded 0.0 because
-        # this generator never mixes uniform-skill patients.
+        # Flat keys T1DMAI's loader hard-requires off meta.json's root, mirroring 'params'.
         'pool_size': params['pool_size'],
         'n_timesteps': params['n_timesteps'],
         'sim_hours': params['sim_hours'],
@@ -995,13 +757,7 @@ def _fmt_years(years: float) -> str:
 
 
 def _render_comparison(report: dict[str, Any]) -> list[str]:
-    """
-    Render the 'Distribution vs the baseline simulator' section.
-
-    Compares the pooled distribution of this cache against the unbiased simulator
-    baseline loaded from the diff report (``datasets.Sim`` in stats.json). Empty
-    if no baseline was available.
-    """
+    """Render 'Distribution vs the baseline simulator'; empty if no baseline was available."""
     dist = report.get('distribution') or {}
     base = report.get('baseline')
     gly = report['glycemia']
@@ -1128,10 +884,6 @@ def _render_dataset_md(report: dict[str, Any]) -> str:
     return '\n'.join(lines)
 
 
-# ============================================================================
-# BUILD
-# ============================================================================
-
 def build_cache(
     out_dir: str,
     pool_size: int,
@@ -1209,9 +961,7 @@ def build_cache(
     t0 = time.time()
 
     try:
-        # Create the staging memmaps (writes .npy headers, sparse-allocates the
-        # body), then drop the parent handles before forking workers so the huge
-        # mappings are not inherited -- each worker opens its own r+ handle.
+        # Drop the parent memmap handles before forking: each worker opens its own r+ handle.
         for name in CHANNEL_NAMES:
             np.lib.format.open_memmap(
                 os.path.join(partial_dir, f'{name}.npy'),
@@ -1254,10 +1004,7 @@ def build_cache(
         print(f'All {pool_size:,} rows generated in {gen_secs:.1f}s '
               f'({pool_size / max(gen_secs, 1e-9):.1f} patients/s).')
 
-        # Drop any staging memmap handles the single-threaded path left open in
-        # this process (the MP path's handles die with the workers). A live mmap
-        # pins the inode after os.remove, so peak disk would otherwise be
-        # raw + compressed instead of ~max(raw, compressed).
+        # A live mmap pins the inode after os.remove, inflating peak disk to raw+compressed.
         _WORKER.clear()
         gc.collect()
 
@@ -1299,18 +1046,13 @@ def build_cache(
             'baseline_stats': baseline['source'] if baseline else None,
         }
         report = _finalize_report(acc, params, inventory, icr_bytes, bg_dist, baseline)
-        # normalization_stats.json (the 4-channel {mean, std} the T1DMAI model
-        # consumes) is written BEFORE the meta.json sentinel and fsync'd inside
-        # the same atomic flow, so the sentinel never surfaces a cache missing
-        # valid stats.
+        # Written before the meta.json sentinel so it never surfaces a cache missing stats.
         norm_stats = _finalize_norm_stats(norm_acc)
         norm_stats_path = os.path.join(partial_dir, NORM_STATS_FILE)
         with open(norm_stats_path, 'w') as f:
             json.dump(norm_stats, f, indent=2)
         _fsync_file(norm_stats_path)
-        # meta.json is the last file written -- its presence marks a complete
-        # cache. fsync every file and the staging dir before the atomic rename so
-        # a power loss cannot surface a sentinel-present, data-truncated cache.
+        # meta.json's presence marks a complete cache; fsync'd before the atomic rename.
         meta_path = os.path.join(partial_dir, 'meta.json')
         with open(meta_path, 'w') as f:
             json.dump(report, f, indent=2)
@@ -1326,9 +1068,7 @@ def build_cache(
         raise
 
     if dataset_md:
-        # Relative to the cache, not the caller's cwd — matching --rerender-report,
-        # which already joins onto the cache dir. Building from the repo root
-        # otherwise drops the report into the repo and leaves the cache without one.
+        # Relative to the cache, not the caller's cwd -- matches --rerender-report.
         md_path = (dataset_md if os.path.isabs(dataset_md)
                    else os.path.join(out_dir, dataset_md))
         with open(md_path, 'w') as f:

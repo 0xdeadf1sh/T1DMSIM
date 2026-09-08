@@ -1,11 +1,6 @@
-"""
-Tests for patient generation.
-
-Verifies that:
-- Skills are within expected [SKILL_MIN, SKILL_MAX] range
-- Derived parameters are physiologically plausible
-- Basal dose is tied to HGO and ICR (not independently sampled)
-"""
+"""Tests patient generation: skills stay within [SKILL_MIN, SKILL_MAX],
+derived parameters are physiologically plausible, and basal dose is tied
+to HGO and ICR rather than independently sampled."""
 
 import numpy as np
 import pytest
@@ -70,12 +65,9 @@ class TestPhysiologicalParameters:
 
     def test_basal_dose_tied_to_hgo_icr(self):
         """Basal dose should be near ideal = HGO * 24 * weight_factor * IS_base / ICR.
-
         The ideal dose balances 24h of HGO at the patient's own insulin
-        sensitivity (glucose_out = insulin * ICR / IS at steady state) AND the
-        patient's body weight (HGO scales with liver mass). Patients should be
-        within a few sigma of that ideal.
-        """
+        sensitivity and body weight (HGO scales with liver mass); patients
+        should be within a few sigma of it."""
         for seed in range(50):
             p = make_patient(seed)
             weight_factor = p.body_weight_kg / 75.0
@@ -86,12 +78,9 @@ class TestPhysiologicalParameters:
                 f"ideal={ideal:.1f} (tolerance={tolerance:.1f})")
 
     def test_basal_dose_clamped(self):
-        """Basal dose is always within clinically plausible range [5, 80] U.
-
-        Upper bound raised from 40 → 80 to accommodate heavy insulin-resistant
-        patients (e.g., 110 kg with IR=1.8) whose ideal_basal legitimately
-        exceeds 40 U/day. Real T1D pump users occasionally exceed this too.
-        """
+        """Basal dose stays within [5, 80] U. Upper bound raised 40->80 for
+        heavy insulin-resistant patients (e.g. 110 kg, IR=1.8) whose
+        ideal_basal legitimately exceeds 40 U/day."""
         for seed in range(100):
             p = make_patient(seed)
             assert 5.0 <= p.basal_dose <= 80.0, (

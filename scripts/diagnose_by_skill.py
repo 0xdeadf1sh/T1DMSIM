@@ -1,19 +1,8 @@
-"""
-Phase-1.5 diagnostic: skill × IR decomposition of the diurnal BG profile.
-
-Confirms (or refutes) the two-mode hypothesis from diagnose_diurnal.py:
-  mode 1 — low-IR / well-bolused patients crash overnight from a dinner-bolus
-           tail (the "low-start" 67% of day-records)
-  mode 2 — high-IR / under-bolused patients stay stuck high overnight
-           (the "high-start" 33%)
-
-Splits the 30 seeds into a 2×2 by s3 (dosing competence) × IR factor, then
-prints per-bucket hour-of-day BG means, hypo episodes/day, BG at 21:00 and
-03:00, and a basal-titration ratio (basal_dose / ideal_basal). If mode 2
-maps cleanly to one bucket (expected: high-IR + low-s3), under-bolus bias /
-basal-titration are the right Phase-2 levers for that cohort; if it spans
-buckets, mode 2 is a global problem and behavioral code shouldn't be touched.
-"""
+"""Phase-1.5 diagnostic: skill × IR decomposition of the diurnal BG profile.
+Splits 30 seeds into a 2×2 by s3 (dosing competence) × IR factor; prints
+per-bucket hour-of-day BG means, hypo episodes/day, BG at 21:00/03:00, and
+a basal-titration ratio (basal_dose / ideal_basal), to confirm/refute the
+two-mode hypothesis from diagnose_diurnal.py."""
 
 import sys
 import os

@@ -1,29 +1,8 @@
-"""Meal-excursion comparison: T1DMSIM vs. a UVA/Padova patient dosed for its
-own physiology.
-
-The companion `compare_uva_padova.py` replays T1DMSIM's insulin *verbatim* into
-UVA/Padova; because T1DMSIM's boluses are sized by its own aggressive
-insulin-to-carb ratio, that over-covers the UVA virtual patients' gentler carb
-ratios and crushes them into sustained hypoglycaemia — a gross level mismatch
-that swamps any finer comparison.
-
-Here the inputs are recalibrated for UVA/Padova: the two engines share only the
-**meal schedule** (time + grams that T1DMSIM generates per seed); each then
-doses insulin for its own physiology — T1DMSIM as it normally would, and the
-UVA/Padova patient on its steady-state basal plus a `grams / CR` meal bolus
-(its own Quest-table carb ratio) and a bounded correction. With both engines in
-a normal operating range, we isolate and compare the **post-meal excursions**
-themselves: amplitude, time-to-peak, area, recovery, and — peak-normalised, so
-amplitude no longer confounds it — excursion *shape*.
-
-Writes `uva_padova/excursions.json`, excursion + gallery figures under
-`uva_padova/figures/`, and a regenerated `uva_padova/EXCURSIONS.md`.
-
-Run (reference engine installed without its RL extras):
-    pip install --no-deps simglucose>=0.2.11
-    venv/bin/python uva_padova/compare_excursions.py            # full run
-    venv/bin/python uva_padova/compare_excursions.py --quick    # fast smoke run
-"""
+"""Meal-excursion comparison: T1DMSIM vs. UVA/Padova, each dosed for its own
+physiology (shared meal schedule only, unlike the sibling script's verbatim
+insulin replay). Compares post-meal amplitude/time-to-peak/area/recovery/shape.
+Writes excursions.json, figures/, EXCURSIONS.md.
+Run: venv/bin/python uva_padova/compare_excursions.py [--quick]"""
 from __future__ import annotations
 
 import argparse
@@ -70,9 +49,6 @@ C_UVA = "#d62728"
 C_MEAL = "#2ca02c"
 
 
-# ---------------------------------------------------------------------------
-# One paired sample: our behavioural trace + UVA self-dosed on shared meals
-# ---------------------------------------------------------------------------
 def capture_ours(seed: int, days: int, initial_bg: float):
     """Run T1DMSIM; return (sim, true-BG per step, food-meal grams per step)."""
     sim = S.T1DMSimulator(seed=seed, initial_bg=initial_bg)
@@ -111,9 +87,6 @@ def _worker(args):
     return run_pair(*args)
 
 
-# ---------------------------------------------------------------------------
-# Excursion extraction
-# ---------------------------------------------------------------------------
 def detect_meals(meal_steps, meal_g_list, n_steps):
     """Isolated, large-enough meals with a full window ahead. Returns [(step, g)]."""
     g_by = dict(zip(meal_steps, meal_g_list))
@@ -152,9 +125,6 @@ def size_bin(g):
     return len(SIZE_BINS) - 1
 
 
-# ---------------------------------------------------------------------------
-# Figures
-# ---------------------------------------------------------------------------
 def _save(fig, name):
     fig.tight_layout()
     fig.savefig(os.path.join(FIGS, name), dpi=130)
@@ -281,9 +251,6 @@ def fig_gallery(pairs_for_gallery, fname):
     _save(fig, fname)
 
 
-# ---------------------------------------------------------------------------
-# Orchestration
-# ---------------------------------------------------------------------------
 def med_iqr(v):
     v = np.asarray(v, dtype=float)
     if len(v) == 0:

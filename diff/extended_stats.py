@@ -1,43 +1,19 @@
 """Extended statistical metrics for the T1DMSIM-vs-real comparison.
 
-Self-contained, pure functions layered on top of the core metrics in
-build_report.py. Four families, all added to give the sim-vs-real comparison
-more resolution and to make its strengths/weaknesses objective:
-
-  1. Extra two-sample distances (energy, Cramer-von Mises, Anderson-Darling,
-     total variation, Hellinger, histogram overlap) so no single distance
-     drives the verdict.
-  2. Cadence-fair recompute: cadence-sensitive metrics (MAGE, delta-SD, CONGA,
-     short-lag ACF, episodes) evaluated for EVERY cohort on one common 15-min
-     grid, so the 15-min Shanghai cohort is finally apples-to-apples with the
-     5-min cohorts and the simulator.
-  3. Temporal structure: spectral entropy (Welch PSD), Poincare SD1/SD2, DFA
-     scaling exponent (Hurst), ACF e-folding time, and a glycemic-band Markov
-     transition matrix with per-band mean dwell time.
-  4. Cross-seed bootstrap confidence intervals (operationalising "many seeds to
-     minimise noise") and a standardised per-metric gap score
-     z = (sim - mean_real) / sd_between_real_cohorts that ranks where the
-     simulator sits inside vs outside the real cohorts' own spread.
-
-Every function ignores NaN, treats a bridged sensor gap as a true
-discontinuity (never joining samples across it), and is deterministic given a
-fixed rng_seed. mg/dL throughout.
-"""
+Pure functions layered on build_report.py: extra distance metrics, a
+cadence-fair 15-min recompute, temporal-structure metrics, and bootstrap
+CIs / gap scores. NaN-safe, gap-aware, deterministic given rng_seed. mg/dL."""
 from __future__ import annotations
 
 import numpy as np
 from scipy import stats as sps
 from scipy import signal as spsig
 
-# Glycemic bands, low->high. Edges match time_in_ranges(): [<54, 54-70, 70-180,
-# 180-250, >250]. A value lands in the first band whose upper edge it is below.
+# Glycemic bands low->high, edges match time_in_ranges(): <54, 54-70, 70-180, 180-250, >250.
 BAND_EDGES = (54.0, 70.0, 180.0, 250.0)
 BAND_LABELS = ("TBR2", "TBR1", "TIR", "TAR1", "TAR2")
 
-# Slack on each endpoint of the real cohorts' [min,max] envelope, as a fraction
-# of the envelope's own span. The endpoints are order statistics of three
-# cohorts, not exact bounds, so a sim value overshooting one of them by a
-# thousandth of the inter-cohort spread is a tie, not an exceedance.
+# Slack on real cohorts' [min,max] envelope (fraction of span); overshoot by a thousandth is a tie.
 ENVELOPE_REL_TOL = 0.01
 
 
@@ -47,13 +23,9 @@ def _clean(x):
 
 
 def to_common_grid(bg, step_min, target_min=15):
-    """Decimate a series to a `target_min`-minute effective interval.
-
-    5-min cohorts (Ohio/AZT1D/Sim) get stride 3 -> 15 min; a natively-15-min
-    Shanghai record (step_min=15) is returned unchanged. NaN gap cells are
-    preserved on the decimated grid so downstream code can still see the
-    discontinuities. Never up-samples (if step_min >= target_min, pass through).
-    """
+    """Decimates a series to a `target_min`-minute effective interval.
+    5-min cohorts get stride 3 -> 15 min; a native-15-min Shanghai record
+    passes through unchanged. NaN gaps are preserved. Never up-samples."""
     bg = np.asarray(bg, dtype=float)
     stride = max(1, int(round(target_min / step_min)))
     return bg[::stride], step_min * stride
@@ -79,9 +51,6 @@ def _longest_contiguous(bg):
     return bg[best_lo:best_hi]
 
 
-# ============================================================================
-# Family 1 — extra two-sample distances
-# ============================================================================
 def _subsample(x, max_n, rng):
     if len(x) <= max_n:
         return x
@@ -91,25 +60,11 @@ def _subsample(x, max_n, rng):
 
 
 def extra_distances(a, b, bins=None, common_n=None, max_n=60000, rng_seed=0):
-    """Distances between two pooled BG vectors, complementing KS/Wasserstein/JS.
-
-    - energy_distance: sqrt of the energy statistic (a proper metric on
-      distributions), in mg/dL-like units. Computed on the FULL vectors (it is
-      sample-size-stable).
-    - cramer_von_mises: the 2-sample CvM omega^2 statistic (whole-CDF L2, more
-      tail-sensitive than KS which is a sup norm).
-    - anderson_darling: the k-sample AD statistic (extra weight in the tails).
-    - total_variation / hellinger / overlap: from 5-mg/dL histograms over the
-      full support so no tail is dropped (TV in [0,1], Hellinger in [0,1],
-      overlap = 1 - TV). Full vectors, sample-size-stable.
-
-    The rank-based CvM/AD STATISTICS grow ~linearly with n under H1, so to be
-    comparable ACROSS cohort pairs they must be evaluated at one common n. Pass
-    `common_n` (the smallest pooled cohort size, capped at `max_n`) so EVERY
-    pair subsamples both arms to exactly that n; otherwise pairs with a smaller
-    arm would read a spuriously smaller statistic. KS/Wasserstein (computed
-    elsewhere) stay on the full vectors.
-    """
+    """Distances between two pooled BG vectors, complementing KS/Wasserstein/JS:
+    energy_distance, cramer_von_mises (2-sample omega^2), anderson_darling
+    (k-sample), and total_variation/hellinger/overlap from 5-mg/dL histograms.
+    CvM/AD grow ~linearly with n, so pass `common_n` (smallest cohort size,
+    capped at max_n) to subsample both arms to one n; others use full vectors."""
     a = _clean(a)
     b = _clean(b)
     out = {"energy": float("nan"), "cramer_von_mises": float("nan"),
@@ -148,22 +103,12 @@ def extra_distances(a, b, bins=None, common_n=None, max_n=60000, rng_seed=0):
     return out
 
 
-# ============================================================================
-# Family 2 — cadence-fair recompute (common 15-min grid)
-# ============================================================================
 def cadence_fair(bg, step_min, mage_fn, conga_fn, acf_fn, episode_fn,
                  target_min=15):
-    """Recompute cadence-sensitive metrics on a common `target_min` grid.
-
-    `bg` is a record's regularised series at its native `step_min` (may hold
-    NaN gaps). It is decimated to `target_min` (Shanghai already there) and the
-    supplied primitives — the SAME audited implementations used elsewhere — are
-    run on the decimated series so Shanghai (15 min) and the 5-min cohorts are
-    finally compared at one cadence.
-
-    Returns per-record scalars: MAGE, Delta-SD (one-step at target cadence),
-    CONGA-1h, ACF at 30/60/120 min, and hypo/hyper episodes per observed day.
-    """
+    """Recomputes cadence-sensitive metrics on a common `target_min` grid so
+    Shanghai (15 min) and the 5-min cohorts compare at one cadence, using the
+    same audited primitives used elsewhere. Returns per-record MAGE, delta-SD,
+    CONGA-1h, ACF at 30/60/120 min, and hypo/hyper episodes per observed day."""
     grid, eff = to_common_grid(bg, step_min, target_min)
     n_obs = int(np.sum(~np.isnan(grid)))
     days = (n_obs * eff) / (60.0 * 24.0)
@@ -185,18 +130,11 @@ def cadence_fair(bg, step_min, mage_fn, conga_fn, acf_fn, episode_fn,
     }
 
 
-# ============================================================================
-# Family 3 — temporal structure
-# ============================================================================
 def poincare_sd(bg, step_min):
-    """Poincare (lag-1 return-map) descriptors.
-
-    SD1 = short-term variability = sqrt(0.5 * Var(dBG)); SD2 = long-term
-    variability = sqrt(2*Var(BG) - 0.5*Var(dBG)); ratio SD1/SD2. dBG is taken
-    within contiguous segments (diff, then drop gap-touching pairs) so a bridged
-    gap never contributes a spurious jump. Cadence-dependent, so callers should
-    pass a common-grid series for cross-cohort comparison.
-    """
+    """Poincare (lag-1 return-map) descriptors: SD1 = sqrt(0.5*Var(dBG))
+    (short-term), SD2 = sqrt(2*Var(BG)-0.5*Var(dBG)) (long-term), ratio
+    SD1/SD2. dBG skips gap-touching pairs. Cadence-dependent: pass a
+    common-grid series for cross-cohort comparison."""
     bg = np.asarray(bg, dtype=float)
     d = np.diff(bg)
     d = d[~np.isnan(d)]
@@ -213,14 +151,9 @@ def poincare_sd(bg, step_min):
 
 
 def spectral_entropy(bg, step_min, nperseg=256):
-    """Normalised spectral entropy of the Welch PSD (0 = single tone, 1 = white).
-
-    Computed on the longest contiguous segment (Welch needs a gap-free window).
-    The PSD is normalised to a probability distribution over frequency and the
-    Shannon entropy is divided by log(#bins) so the value is in [0,1] and
-    comparable across records. Also returns the spectral centroid (mean
-    frequency, cycles/hour) as a coarse "where is the power" summary.
-    """
+    """Normalised spectral entropy of the Welch PSD (0=tone, 1=white), on the
+    longest contiguous segment (Welch needs a gap-free window). Also returns
+    the spectral centroid (cycles/hour) as a coarse power-location summary."""
     seg = _longest_contiguous(bg)
     nan = {"spectral_entropy": float("nan"), "spectral_centroid_cph": float("nan")}
     if len(seg) < 32:
@@ -266,24 +199,11 @@ def _dfa_one(seg, min_scale, max_scale, n_scales):
 
 
 def dfa_alpha(bg, step_min, chunk_len=256, min_scale=4, n_scales=10):
-    """Detrended fluctuation analysis scaling exponent alpha (Hurst-like).
-
-    alpha ~0.5 white noise, ~1.0 pink/1-f, ~1.5 brownian. Integrate the
-    mean-removed series, split into non-overlapping windows of size s, linearly
-    detrend each, take the RMS residual F(s), fit log F(s) vs log s.
-
-    DFA's finite-size bias depends on record length, so the long gapless sim
-    (one 6720-pt segment) and the short gappy real segments (~300-1300 pts)
-    would read different alpha for identical dynamics purely from length. To
-    remove that confound, alpha is measured on FIXED-LENGTH non-overlapping
-    chunks (`chunk_len`) of the longest contiguous segment, over the fixed scale
-    window [min_scale, chunk_len//4], and averaged. Every chunk — sim or real —
-    uses the same n and the same scales, so the finite-size bias is identical
-    and the alphas are directly comparable; the long sim simply averages over
-    more chunks (lower variance, same mean). A record whose longest contiguous
-    segment is shorter than one chunk returns NaN. chunk_len=256 ≈ 2.7 days on
-    the 15-min grid, short enough to fit the shortest usable real segment.
-    """
+    """DFA scaling exponent alpha (Hurst-like): ~0.5 white noise, ~1.0 pink/1-f,
+    ~1.5 brownian. Integrates, splits into windows, detrends, fits log F(s) vs
+    log s. Measured on fixed-length `chunk_len` chunks of the longest contiguous
+    segment (fixed scales) so record length doesn't bias alpha; NaN if the
+    longest segment is under one chunk. chunk_len=256 ~= 2.7 days at 15 min."""
     seg = _longest_contiguous(bg)
     if len(seg) < chunk_len:
         return float("nan")
@@ -329,10 +249,7 @@ def acf_efold_min(acf_dict, target=1.0 / np.e):
 
 
 def _band_of(v):
-    # Match the canonical time_in_ranges() convention in build_report.py:
-    # TBR2 <54, TBR1 [54,70), TIR [70,180], TAR1 (180,250], TAR2 >250. The upper
-    # edges (180, 250) belong to the LOWER band, so a value of exactly 180 is TIR
-    # and exactly 250 is TAR1 (a plain `v < edge` on every edge misfiled both).
+    # Matches time_in_ranges(): TBR2<54, TBR1[54,70), TIR[70,180], TAR1(180,250], low-inclusive.
     if v < BAND_EDGES[0]:       # <54
         return 0
     if v < BAND_EDGES[1]:       # 54-70
@@ -346,13 +263,8 @@ def _band_of(v):
 
 def band_transition(bg, step_min, coarse_min=15):
     """5x5 row-stochastic transition matrix over glycemic bands + dwell times.
-
-    Bands: TBR2<54, TBR1 54-70, TIR 70-180, TAR1 180-250, TAR2>250. The series
-    is decimated to `coarse_min` and only consecutive, both-valid, adjacent-in-
-    time sample pairs contribute a transition (a gap breaks the chain). Dwell
-    time per band = coarse_min / (1 - P[i,i]) (mean geometric sojourn), in
-    minutes. Returns the matrix, per-band occupancy, and dwell dict.
-    """
+    Series is decimated to `coarse_min`; only consecutive, both-valid, adjacent
+    pairs count (a gap breaks the chain). Dwell = coarse_min / (1 - P[i,i])."""
     grid, eff = to_common_grid(bg, step_min, coarse_min)
     counts = np.zeros((5, 5), dtype=float)
     for i in range(len(grid) - 1):
@@ -375,12 +287,9 @@ def band_transition(bg, step_min, coarse_min=15):
 
 
 def pool_transition_counts(count_matrices, coarse_min=15):
-    """Sum per-record 5x5 count matrices into one pooled, row-stochastic matrix.
-
-    Pooling COUNTS (not averaging normalised matrices) weights each record by
-    its transition volume, the statistically correct pooled estimator. Dwell
-    time per band = coarse_min / (1 - P[i,i]).
-    """
+    """Sums per-record 5x5 count matrices into one pooled, row-stochastic matrix.
+    Pools COUNTS (not averaged normalised matrices) so each record is weighted
+    by its transition volume. Dwell = coarse_min / (1 - P[i,i])."""
     total = np.zeros((5, 5), dtype=float)
     for c in count_matrices:
         total += np.asarray(c, dtype=float)
@@ -405,22 +314,12 @@ def transition_matrix_distance(mat_a, mat_b):
     return float(np.sqrt(np.sum((a - b) ** 2)))
 
 
-# ============================================================================
-# Family 4 — cross-seed bootstrap + standardised gap score
-# ============================================================================
 def bootstrap_pooled(record_arrays, stat_fn, n_boot=400, rng_seed=0,
                      ci=(2.5, 97.5)):
-    """Bootstrap a pooled statistic by resampling whole RECORDS with replacement.
-
-    `record_arrays` is a list of per-record 1-D arrays (NaN already dropped).
-    Each bootstrap replicate resamples the records (not individual samples, so
-    the CI reflects between-record/between-seed uncertainty — the noise the user
-    wants many seeds to suppress), concatenates them, and applies stat_fn to the
-    pooled vector. Returns point estimate + percentile CI + replicate SD.
-
-    With many sim seeds the CI is tight; with a handful of real patients it is
-    honestly wide — the two are directly comparable.
-    """
+    """Bootstraps a pooled statistic by resampling whole records with replacement,
+    so the CI reflects between-record/between-seed noise. `record_arrays` is a
+    list of per-record 1-D arrays (NaN dropped); concatenates each replicate and
+    applies stat_fn. Returns point estimate + percentile CI + replicate SD."""
     arrays = [np.asarray(a, dtype=float) for a in record_arrays if len(a) > 0]
     if not arrays:
         return {"point": float("nan"), "lo": float("nan"), "hi": float("nan"),
@@ -439,19 +338,10 @@ def bootstrap_pooled(record_arrays, stat_fn, n_boot=400, rng_seed=0,
 
 
 def gap_score(sim_val, real_vals):
-    """Standardised gap of the sim from the real cohorts' own spread.
-
-    z = (sim - mean(real_vals)) / sd(real_vals) with the sample SD (ddof=1)
-    across the real cohorts. |z|<1 => the sim sits inside the band the real
-    cohorts span among themselves (a strength); |z|>2 => it sits outside all of
-    them (a weakness). With only three real cohorts the SD is coarse, so also
-    returns whether the sim is within the [min,max] real envelope, which needs
-    no distributional assumption. That envelope is tested with a margin of
-    ENVELOPE_REL_TOL of its own span on each endpoint, so a sim value that ties
-    an endpoint to within a fraction of a percent of the inter-cohort spread —
-    a difference below both the report's printed precision and the sampling
-    noise of either arm — still counts as inside.
-    """
+    """Standardised gap of sim from the real cohorts' own spread: z = (sim -
+    mean(real_vals)) / sd(real_vals), sample SD (ddof=1). |z|<1 = inside the
+    real spread, |z|>2 = outside. Also returns within [min,max] real envelope
+    (no distributional assumption), tolerant to ENVELOPE_REL_TOL of its span."""
     reals = [v for v in real_vals if v is not None and np.isfinite(v)]
     if len(reals) < 2 or sim_val is None or not np.isfinite(sim_val):
         return {"z": float("nan"), "mean_real": float("nan"),

@@ -1,38 +1,8 @@
-"""Compare T1DMSIM against the UVA/Padova 2008 in-silico model (simglucose).
-
-Unlike the real-CGM comparisons under ``scripts/`` and ``diff/``, this harness
-pits our behaviour-driven engine against the field's reference *physiological*
-simulator, and does so under **identical inputs**: the meal times + grams,
-bolus times + units, and basal that T1DMSIM generates for a given seed are
-captured verbatim and replayed into a paired UVA/Padova virtual patient. We
-then compare the resulting BG curves, their distributions, and — an axis the
-other tooling ignores — raw generation speed.
-
-Identical-input protocol
--------------------------
-* Every patient input in T1DMSIM flows through ``T1DMSimulator.inject_curve``
-  (scheduled meals/boluses/basal plus reactive corrections and rescues). HGO is
-  endogenous and added per-step, never as a curve, so a monkeypatch on
-  ``inject_curve`` captures exactly the patient's behavioural inputs and nothing
-  hepatic — which is correct, since UVA/Padova models its own EGP.
-* Captured curve totals are aggregated onto the 1-minute grid: carbs
-  (``carb`` + ``correction_carb``) as gram impulses, boluses (``bolus``) as unit
-  impulses, and long-acting basal smeared to the equivalent continuous pump
-  rate (U/min) over each dose's nominal duration. Exercise, alcohol and stress
-  have no analogue in the base UVA/Padova model and are not replayed.
-* Both engines start from the paired patient's initial Gsub; the first
-  ``WARMUP_HOURS`` are discarded from every metric. Curves are compared
-  noise-free (our true ``bg`` vs UVA/Padova ``Gsub``) to isolate the metabolic
-  models from CGM-noise modelling.
-
-Writes ``uva_padova/stats.json``, ``uva_padova/figures/*.png`` and a
-regenerated ``uva_padova/README.md``.
-
-Run (after installing the reference engine without its RL extras):
-    pip install --no-deps simglucose>=0.2.11
-    venv/bin/python uva_padova/compare_uva_padova.py            # full run
-    venv/bin/python uva_padova/compare_uva_padova.py --quick    # fast smoke run
-"""
+"""Compares T1DMSIM against UVA/Padova 2008 (simglucose) under identical
+inputs: T1DMSIM meals/boluses/basal are captured verbatim via inject_curve
+and replayed into a paired virtual patient; compares BG, distributions, and
+generation speed. Writes stats.json, figures/, README.md.
+Run: venv/bin/python uva_padova/compare_uva_padova.py [--quick]"""
 from __future__ import annotations
 
 import argparse
@@ -79,9 +49,6 @@ C_OURS = "#1f77b4"
 C_UVA = "#d62728"
 
 
-# ---------------------------------------------------------------------------
-# Input capture + replay (one seed)
-# ---------------------------------------------------------------------------
 def capture_run(seed: int, days: int, initial_bg: float):
     """Run T1DMSIM, returning (patient, true-BG per 5-min step, input events).
 
@@ -119,8 +86,7 @@ def build_inputs(events: list, n_steps: int, basal_duration_hours: float):
         elif ctype in ("bolus", "insulin"):
             bolus[m] += total
         elif ctype == "basal":
-            # MDI long-acting dose -> equivalent continuous pump rate (U/min),
-            # smeared over its nominal duration; overlapping doses sum.
+            # MDI dose -> equivalent continuous pump rate (U/min), smeared over its duration.
             dur_min = max(1, int(basal_duration_hours * 60))
             rate = total / dur_min
             end = min(n_min, m + dur_min)
@@ -194,9 +160,6 @@ def _worker(args):
     return r
 
 
-# ---------------------------------------------------------------------------
-# Metrics
-# ---------------------------------------------------------------------------
 def kovatchev_risk(bg: np.ndarray):
     """Kovatchev Low/High Blood Glucose Indices (LBGI, HBGI)."""
     bg = bg[~np.isnan(bg)]
@@ -267,13 +230,9 @@ def pool_blocks(blocks: list) -> dict:
 
 
 def median_iqr(vals: list) -> dict:
-    """Summarise across seeds, skipping seeds whose metric is undefined.
-
-    A UVA/Padova patient driven to the BG floor by a replayed dose stream is a
-    constant trace, so its Pearson r is NaN. Plain np.median propagates that
-    single NaN into the median and both quartiles, nulling the row for every
-    other seed. `n_nan` keeps the drop visible instead of silent.
-    """
+    """Summarises across seeds, skipping seeds whose metric is undefined. A
+    UVA/Padova patient driven to the BG floor is a constant trace (Pearson r
+    is NaN); `n_nan` keeps that drop visible instead of nulling the median."""
     v = np.array(vals, dtype=float)
     n_nan = int(np.isnan(v).sum())
     if n_nan == len(v):
@@ -288,9 +247,6 @@ def median_iqr(vals: list) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Speed benchmark
-# ---------------------------------------------------------------------------
 def bench_ours(days: int) -> float:
     sim = S.T1DMSimulator(seed=1, initial_bg=150.0)
     n = days * 24 * 60 // DT
@@ -310,8 +266,7 @@ def bench_uva(days: int, carb, bolus, basal) -> float:
 
 def run_speed(sweep_days: list) -> dict:
     """Single-threaded wall-clock for each engine across a horizon sweep."""
-    # A fixed real input stream for the UVA timing (so we time the ODE, not
-    # input synthesis). Capture the longest horizon once and slice it.
+    # Fixed real input stream for UVA timing (times the ODE, not input synthesis).
     longest = max(sweep_days)
     pad0 = PadovaPatient(patient_names(GROUP)[0])
     sim, bg, events = capture_run(1, longest, pad0.init_gsub)
@@ -339,9 +294,6 @@ def run_speed(sweep_days: list) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Figures
-# ---------------------------------------------------------------------------
 def _save(fig, name):
     path = os.path.join(FIGS, name)
     fig.tight_layout()
@@ -533,9 +485,6 @@ def fig_per_seed(per_seed, fname):
     _save(fig, fname)
 
 
-# ---------------------------------------------------------------------------
-# Orchestration
-# ---------------------------------------------------------------------------
 def tir(bg):
     return float(100 * np.mean((bg >= 70) & (bg <= 180)))
 
@@ -598,11 +547,7 @@ def main():
 
     # ---- figures ----
     print("  rendering figures...")
-    # Representative trace: the seed whose mean-BG pair (ours, UVA) sits closest
-    # to the pooled means, so the showcased curve embodies the population's
-    # typical level relationship. A median-RMSE pick is direction-blind (RMSE
-    # measures disagreement magnitude, not sign) and can land on a minority seed
-    # where UVA runs higher, contradicting the pooled table.
+    # Picks the seed whose mean-BG pair sits nearest pooled means (RMSE alone is direction-blind).
     _po, _pu = pooled_o["mean"], pooled_u["mean"]
     rep = min(range(len(per_seed)),
               key=lambda i: (per_seed[i]["mean_ours"] - _po) ** 2
@@ -649,9 +594,6 @@ def main():
     print(f"done in {time.perf_counter() - t_start:.1f}s")
 
 
-# ---------------------------------------------------------------------------
-# README generation (neutral, observed-gap language only)
-# ---------------------------------------------------------------------------
 def write_readme(stats: dict):
     o, u = stats["pooled_ours"], stats["pooled_uva"]
     pr = stats["paired"]

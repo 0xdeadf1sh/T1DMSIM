@@ -1,14 +1,7 @@
 """Compare simulator output against the OhioT1DM real-world CGM dataset.
 
-Prints a pooled per-metric comparison plus a top-gaps ranking. Useful for
-checking how close the synthetic data is to a real T1D cohort after a
-tuning change.
-
-Run from the repo root with the project venv:
-
-    venv/bin/python scripts/compare_to_ohio.py
-
-Reads OhioT1DM data from ./datasets/ohiot1dm/*.xml (gitignored, non-redistributable).
+Prints a pooled per-metric comparison plus a top-gaps ranking.
+Usage: venv/bin/python scripts/compare_to_ohio.py
 """
 import os
 import sys

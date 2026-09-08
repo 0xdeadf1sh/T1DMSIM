@@ -1,31 +1,7 @@
-"""Comprehensive statistical comparison of T1DMSIM vs three real CGM corpora.
+"""Statistical comparison of T1DMSIM vs OhioT1DM, ShanghaiT1DM, and AZT1D.
 
-Compares the simulator output against OhioT1DM, ShanghaiT1DM, and AZT1D.
-
-Produces:
-  diff/stats.json        — all computed numbers
-  diff/figures/*.png     — figure set referenced from README.md
-  diff/README.md         — templated markdown report (regenerated from stats)
-
-The analysis intentionally goes beyond scripts/compare_all_datasets.py and the
-existing README comparison block:
-
-  - full percentile table + central moments (skew, excess kurtosis)
-  - Kolmogorov-Smirnov, Wasserstein-1, Jensen-Shannon distances between BG
-    distributions
-  - LBGI / HBGI (Kovatchev risk indices), J-index, M-value, MAGE, CONGA-1h,
-    CONGA-4h, MODD
-  - autocorrelation across lags 5 min → 24 h
-  - Δ-BG distribution (rate of change) moments and percentiles
-  - hour-of-day mean ± 1σ envelopes
-  - episode-level metrics: count/day, full duration percentiles, time-to-recover
-  - per-patient TIR/TBR scatter (heterogeneity inside each cohort)
-  - AZT1D-only insulin / carb behaviour panel (basal-rate distribution, bolus
-    type breakdown, correction-vs-meal split, carbs / boluses per day)
-  - cohort summary tables in JSON keyed by metric
-
-The four datasets are read with the loaders in scripts/compare_all_datasets.py;
-the simulator is exercised with the same warm-up convention as that script.
+python diff/build_report.py [--n-seeds N --days D --warmup-h H]
+Writes diff/stats.json, diff/figures/*.png, diff/README.md.
 """
 from __future__ import annotations
 
@@ -60,25 +36,18 @@ from simulator import T1DMSimulator  # noqa: E402
 import extended_stats as es  # noqa: E402
 
 
-# ----- palette -----
-# Four cohorts: three real (Ohio, Shanghai, AZT1D) plus the simulator.
 COL = {"Ohio": "#1f77b4", "Shanghai": "#ff7f0e",
        "AZT1D": "#2ca02c", "Sim": "#d62728"}
 ORDER = ["Ohio", "Shanghai", "AZT1D", "Sim"]
 REAL_ORDER = ["Ohio", "Shanghai", "AZT1D"]
 
 
-# ============================================================================
-# Glycemic metrics
-# ============================================================================
 def kovatchev_risk(bg):
     """LBGI / HBGI per Kovatchev (1997). Operates on mg/dL, ignores NaN."""
     bg = bg[~np.isnan(bg)]
     if len(bg) == 0:
         return float("nan"), float("nan")
-    # Clinical domain floor is 20 mg/dL (SPEC/invariants.md; T1DMDROID's
-    # CLINICAL_BG_CLAMP_MIN). The old 1.0 was an ln() safety net, unreachable
-    # while BG could not fall below 40 and reachable now.
+    # Clinical domain floor 20 mg/dL (SPEC/invariants.md; CLINICAL_BG_CLAMP_MIN), now reachable.
     f = 1.509 * (np.log(np.clip(bg, 20.0, None)) ** 1.084 - 5.381)
     rl = 10 * np.minimum(f, 0.0) ** 2  # left (hypo) risk
     rh = 10 * np.maximum(f, 0.0) ** 2  # right (hyper) risk
@@ -143,32 +112,14 @@ def modd(times, bg, step_min):
 
 
 def sample_entropy(x, m=2, r_frac=0.2, step_min=5, interval_min=15, max_pts=4000):
-    """Sample entropy SampEn(m, r), r = r_frac * std(x), measured at a FIXED
-    effective sampling interval (`interval_min`) so it is comparable across records
-    of different length and native cadence.
-
-    The previous version random-subsampled to a fixed COUNT, which made the effective
-    spacing scale with record length: for one and the same process a 60-day trace
-    read a far higher SampEn than a 14-day one (the sim's SampEn rose monotonically
-    0.34 -> 1.11 as the run grew from 10 to 70 days). Striding on the grid to a fixed
-    interval removes that confound; SampEn is then N-stable, so a generous `max_pts`
-    cap only bounds cost. Stride BEFORE dropping gap NaNs so the true interval is
-    preserved across dropouts.
-
-    Template matches are accumulated WITHIN contiguous (gap-free) segments only.
-    Simply dropping NaNs would concatenate the samples on either side of every
-    dropout, so a template window could straddle a bridged gap — joining points
-    hours-to-days apart as if `interval_min` apart. Those false adjacencies inject
-    near-random jumps that inflate SampEn for the gappy real cohorts while leaving
-    the gapless simulator untouched, spuriously collapsing the real-vs-sim
-    complexity gap. Splitting at NaNs removes that artefact; a common `r` from the
-    pooled valid samples keeps every segment on one scale."""
+    """SampEn(m, r), r = r_frac * std(x), at a fixed sampling interval
+    (`interval_min`) so it is comparable across record lengths/cadences.
+    Strides before dropping gap NaNs; template matches stay within
+    contiguous gap-free segments so a window never crosses a bridged gap."""
     x = np.asarray(x, dtype=float)
     stride = max(1, int(round(interval_min / step_min)))
     x = x[::stride]
-    # Cap to the first max_pts VALID samples (preserving gap structure) so both
-    # gapless (sim) and gappy (real) records use the same point budget and cost
-    # — a gapless record must not silently run the full uncapped series.
+    # Caps to the first max_pts valid samples so gapless and gappy records share a point budget.
     valid_mask = ~np.isnan(x)
     if int(valid_mask.sum()) > max_pts:
         cum = np.cumsum(valid_mask)
@@ -197,8 +148,7 @@ def sample_entropy(x, m=2, r_frac=0.2, step_min=5, interval_min=15, max_pts=4000
         return float("nan")
 
     def phi(mm):
-        # max-norm template matching within each segment, exclude self-match;
-        # a window is never allowed to cross a former gap.
+        # Max-norm template matching within each segment, excludes self-match.
         cnt = 0
         for seg in segments:
             if len(seg) < mm + 1:
@@ -307,15 +257,10 @@ def episode_durations(bg, threshold, below=True, step_min=5, min_minutes=15):
 
 def episode_recovery_time(bg, low_thresh=70, normal_thresh=80, step_min=5,
                           min_minutes=15):
-    """For each hypo episode, time from first sample <70 to first subsequent
-    sample ≥80. Bridges NaN gaps as in-range.
-
-    To keep the recovery-time population consistent with `episode_durations`
-    (which drops <15-min crossings), a dip must stay below `low_thresh` for at
-    least `min_minutes` before it is treated as an episode worth timing. An
-    episode that never re-crosses `normal_thresh` before the record ends is
-    excluded rather than recorded as an (uncapped) end-of-record 'recovery',
-    which would conflate 'never recovered' with 'slow recovery'."""
+    """Hypo-episode recovery time: first sample <70 to first subsequent sample
+    ≥80, bridging NaN gaps as in-range. Requires ≥min_minutes below low_thresh
+    to match episode_durations; an episode that never re-crosses normal_thresh
+    is excluded, not recorded as an uncapped end-of-record recovery."""
     bg = bg.copy()
     bg[np.isnan(bg)] = 120.0
     out = []
@@ -350,9 +295,6 @@ def jensen_shannon(p, q):
     return float(0.5 * (np.sum(p * np.log(p / m)) + np.sum(q * np.log(q / m))))
 
 
-# ============================================================================
-# Dataset assembly
-# ============================================================================
 def assemble_cohort(name, items, regularize_fn, step_min):
     """Per-record dict + pooled arrays."""
     per = []
@@ -391,10 +333,7 @@ def assemble_cohort(name, items, regularize_fn, step_min):
         rec["conga_1h"] = conga(bg, 1, step_min)
         rec["conga_4h"] = conga(bg, 4, step_min)
         rec["modd"] = modd(t, bg, step_min)
-        # Observed (non-NaN) coverage, NOT calendar span: NaN-bridged gap cells
-        # carry no episodes (the numerator only accrues in real time), so
-        # counting them as exposure deflates every per-day rate for the gappy
-        # real cohorts (~8% Ohio, ~1.5% AZT1D) while the gapless sim stays exact.
+        # Non-NaN coverage, not calendar span, else gap cells deflate rates (~8% Ohio, ~1.5% AZT1D).
         days = (int(np.sum(~np.isnan(bg))) * step_min) / (60 * 24)
         h = episode_durations(bg, 70, True, step_min)
         H = episode_durations(bg, 180, False, step_min)
@@ -478,15 +417,10 @@ def assemble_cohort(name, items, regularize_fn, step_min):
 
 
 def assemble_sim(n_seeds=30, days=70, warmup_h=24):
-    """Run the simulator once per seed and capture every output channel.
-
-    Returns a tuple `(items, raw_runs)` where:
-      - `items` is the list of (seed_id, [(ts, bg_observed), ...]) tuples used
-        by `assemble_cohort` to produce all CGM-only statistics.
-      - `raw_runs` is the per-seed dict of `generate_hours()` output arrays
-        (`bg_observed`, `total_carb`, `basal_insulin`, `bolus_insulin`, ...),
-        used by `sim_event_summary` so the simulator is only exercised once.
-    """
+    """Runs the simulator once per seed. Returns (items, raw_runs): items is
+    [(seed_id, [(ts, bg_observed), ...])] for assemble_cohort; raw_runs is the
+    per-seed generate_hours() output dict, reused by sim_event_summary so the
+    sim runs only once."""
     print(f"Running T1DMSIM: {n_seeds} seeds × {days}d ({warmup_h}h warmup)…")
     items = []
     raw_runs = []
@@ -495,12 +429,7 @@ def assemble_sim(n_seeds=30, days=70, warmup_h=24):
         s.generate_hours(warmup_h)
         d = s.generate_hours(days * 24)
         bg = np.asarray(d["bg_observed"], dtype=float)
-        # Advance the calendar origin by the warm-up so the harness weekday
-        # matches the simulator's internal day-of-week. The sim starts on a
-        # Monday (SIMULATION_START_DAY_OF_WEEK=0) and 2024-01-01 is a Monday;
-        # the discarded warm-up advances the internal clock, so without this
-        # shift the whole weekday×hour grid is rotated one day relative to the
-        # real (true-calendar) cohorts.
+        # Advances origin by warmup so weekday matches the sim internal clock (starts Monday).
         t0 = datetime(2024, 1, 1) + timedelta(hours=warmup_h)
         rows = [(t0 + timedelta(minutes=5 * i), float(bg[i])) for i in range(len(bg))]
         items.append((str(seed), rows))
@@ -515,18 +444,10 @@ def trivial_regularize_5min(rows):
     return times, vals
 
 
-# ============================================================================
-# AZT1D-only event panel (basal rates, bolus type breakdown, carbs)
-# ============================================================================
 def azt1d_event_summary(events_by_subject):
-    """Aggregate per-subject insulin / carb / device-mode statistics.
-
-    Returns a dict suitable for both the markdown table and the bar chart:
-        {
-            "per_subject": [...],
-            "pooled": {basal stats, bolus split, carb stats, device-mode %},
-        }
-    """
+    """Aggregates per-subject insulin/carb/device-mode stats. Returns
+    {"per_subject": [...], "pooled": {basal stats, bolus split, carb stats,
+    device-mode %}} for the markdown table and bar chart."""
     import numpy as _np
     per = []
     all_basal = []
@@ -541,11 +462,7 @@ def azt1d_event_summary(events_by_subject):
     device_mode_minutes = defaultdict(int)
     total_minutes = 0
     total_days = 0.0
-    # Several AZT1D subjects have a small fraction of clearly bogus basal-rate
-    # entries (e.g. 1000+ U/hr — likely an OCR or unit-encoding artefact in the
-    # original PDF-to-CSV extraction described in the manuscript). Cap at a
-    # physiologically plausible upper bound before any aggregation; the
-    # discarded fraction is recorded below.
+    # Some AZT1D basal-rate entries are bogus (OCR/unit artefact, e.g. 1000+ U/hr); capped below.
     BASAL_CAP_U_PER_HR = 10.0
     discarded_basal = 0
     total_basal = 0
@@ -562,29 +479,20 @@ def azt1d_event_summary(events_by_subject):
         discarded_basal += int((basal > BASAL_CAP_U_PER_HR).sum())
         basal = basal[(basal >= 0) & (basal <= BASAL_CAP_U_PER_HR)]
         all_basal.extend(basal.tolist())
-        # Bolus rows: any non-null BolusType. The pump exposes several
-        # categories — split user-driven boluses (Standard, Standard/Correction
-        # and the BLE variants) from AID-driven `Automatic Bolus/Correction`,
-        # because the simulator models MDI long-acting basal + per-meal user
-        # boluses with no AID counterpart, so mixing both would skew the
-        # bolus-events-per-day comparison by an order of magnitude.
+        # Splits user boluses from AID Automatic Bolus/Correction; sim models MDI only, avoids skew.
         bdf = df.dropna(subset=["BolusType"])
         bt_str = bdf["BolusType"].astype(str)
         is_automatic = bt_str.str.contains("Automatic", case=False, regex=False)
-        # Drop pump-internal "0" placeholder rows and explicit AID auto-boluses
-        # from the user-bolus count, but still log their existence.
+        # Drops "0" placeholder/AID auto-bolus rows from user-bolus count; still logged below.
         is_zero_row = bt_str.str.strip().isin(["0", "0.0"])
         user_mask = ~(is_automatic | is_zero_row)
-        # Skip the literal "0" placeholder (Subject 8 reports ~7800 rows with
-        # BolusType == "0", a known extraction artefact in the published
-        # CSV — meaningless category, not a real bolus).
+        # Skips literal "0" BolusType (Subject 8: ~7800 rows), a CSV artefact, not a real bolus.
         for bt, cnt in bt_str.value_counts().items():
             label = str(bt).strip()
             if label in ("0", "0.0", "nan", ""):
                 continue
             bolus_type_counts[label] += int(cnt)
-        # Restrict the per-day / per-meal / unit-share computations to
-        # user-initiated boluses for the simulator-comparable view.
+        # Restricts per-day/per-meal/unit-share computations to user-initiated boluses.
         ubdf = bdf[user_mask]
         n_bolus_events += len(ubdf)
         tot = ubdf["TotalBolusInsulinDelivered"].fillna(0.0).to_numpy()
@@ -599,9 +507,7 @@ def azt1d_event_summary(events_by_subject):
         n_correction_events += int(is_corr_only.sum())
         carbs = ubdf.loc[is_meal, "CarbSize"].dropna().to_numpy()
         all_carbs.extend(carbs.tolist())
-        # Device mode minutes (each row covers 5 minutes). Several subjects'
-        # CSVs contain typos ("sleepsleep") or numeric-coerced placeholders
-        # ("0"); fold those into the canonical sleep/exercise/regular buckets.
+        # Device mode minutes (5 min/row); folds CSV typos ("sleepsleep", "0") into canonical modes.
         dm = df["DeviceMode"].fillna("regular").astype(str).str.strip().str.lower()
         dm = dm.replace({"": "regular", "nan": "regular", "0": "regular",
                          "sleepsleep": "sleep", "exerciseexercise": "exercise"})
@@ -614,9 +520,7 @@ def azt1d_event_summary(events_by_subject):
             elif key not in ("regular",):
                 key = "regular"
             device_mode_minutes[key] += int(cnt) * 5
-        # Per-subject summary — basal arr was already capped above; bolus
-        # counts here are the *user-initiated* subset (AID auto-boluses
-        # excluded so the per-day counts are comparable to the simulator).
+        # Per-subject summary: basal capped above; bolus counts are the user-initiated subset only.
         per.append({
             "sub": str(sub),
             "days": float(days),
@@ -632,10 +536,7 @@ def azt1d_event_summary(events_by_subject):
             "mean_carb_per_meal_g": float(_np.mean(carbs)) if len(carbs) else float("nan"),
             "correction_unit_share_pct": float(100 * corr.sum() / tot.sum())
                                           if tot.sum() > 0 else float("nan"),
-            # Total daily insulin: basal U/hr × 24h + total bolus units. We
-            # estimate basal contribution from the *mean* sampled rate × 24h
-            # (basal samples are uniform 5-min snapshots, so mean × 24 is a
-            # well-defined daily-equivalent).
+            # Total daily insulin: basal U/hr x 24h + bolus units (mean rate x 24h is well-defined).
             "total_insulin_U_per_day": float(
                 (_np.mean(basal) * 24 if len(basal) else 0.0) + tot.sum() / days)
                 if days else 0.0,
@@ -673,20 +574,11 @@ def azt1d_event_summary(events_by_subject):
 
 
 def sim_event_summary(raw_runs):
-    """Per-seed insulin / carb stats from already-generated sim runs.
-
-    Consumes the `raw_runs` second tuple element returned by `assemble_sim`
-    so the simulator is only invoked once per seed.
-
-    We deliberately report only **integrated daily totals** (carbs/day,
-    insulin/day) and **basal-rate distributions** — quantities that are
-    directly comparable to AZT1D. Per-meal carb size and per-bolus event
-    counts are NOT computed for the simulator because its
-    `bolus_insulin` / `total_carb` channels expose active-PK / active-
-    absorption levels rather than discrete injection events, and any
-    threshold-based clustering merges events whose curves overlap. The
-    AZT1D-side per-meal / per-event numbers stay AZT1D-only in the report.
-    """
+    """Per-seed insulin/carb stats from raw_runs (assemble_sim's 2nd tuple
+    element) so the sim runs once per seed. Reports only daily totals and
+    basal-rate distributions, comparable to AZT1D; per-meal/per-event counts
+    stay AZT1D-only since bolus_insulin/total_carb are active-PK/absorption
+    levels, not discrete injection events."""
     import numpy as _np
     per = []
     all_basal = []
@@ -694,12 +586,7 @@ def sim_event_summary(raw_runs):
         carbs_arr = _np.asarray(d.get("total_carb", []), dtype=float)
         basal_arr = _np.asarray(d.get("basal_insulin", []), dtype=float)
         bolus_arr = _np.asarray(d.get("bolus_insulin", []), dtype=float)
-        # basal_insulin / bolus_insulin are per-step (5 min) PK-curve samples,
-        # i.e. units of insulin reaching circulation in this step. Their sum
-        # over a full DIA equals the original injection size, so integrating
-        # over the whole run gives total delivered units. To project the
-        # per-step amount into a U/hr "rate" comparable to AZT1D's hourly
-        # basal column, multiply by 12 (12 × 5min = 60min).
+        # basal/bolus_insulin are per-step PK samples summing to dose over a DIA; x12 -> U/hr.
         basal_rate = basal_arr * 12.0
         n_steps = len(carbs_arr)
         d_days = n_steps * 5 / (60 * 24)
@@ -750,8 +637,7 @@ def fig_azt1d_events(az_stats, sim_stats, path):
     ax.legend()
     ax.grid(alpha=0.3)
 
-    # (2) Per-subject daily insulin / carb totals — integrated quantities,
-    # comparable across data sources.
+    # (2) Per-subject daily insulin/carb totals — integrated, comparable across sources.
     ax = axes[0, 1]
     az_pool = az_stats["pooled"]
     sim_pool = sim_stats["pooled"]
@@ -776,10 +662,7 @@ def fig_azt1d_events(az_stats, sim_stats, path):
     ax.legend()
     ax.grid(alpha=0.3, axis="y")
 
-    # (3) AZT1D-only — per-meal carb-size distribution. The simulator's
-    # `total_carb` channel cannot be cleanly split into discrete meal events
-    # (overlapping gamma absorption tails), so this is reported as an AZT1D
-    # reference distribution rather than a head-to-head comparison.
+    # (3) AZT1D-only: total_carb can't split into discrete meals (overlapping gamma tails).
     ax = axes[1, 0]
     bins = np.linspace(0, 120, 31)
     az_carbs = np.asarray(az_stats.get("carb_values", []))
@@ -828,16 +711,7 @@ def fig_azt1d_events(az_stats, sim_stats, path):
     plt.close(fig)
 
 
-# ============================================================================
-# Unexplained-excursion analysis (§6.3)
-# ============================================================================
-# An excursion is a >= EXC_AMP mg/dL monotone swing (MAGE-style turning-point
-# detection on lightly smoothed CGM). It is "explained" if a logged meal
-# precedes a rise / a logged bolus or exercise precedes a fall; otherwise
-# "unexplained" — an unlogged event or a genuinely endogenous movement (dawn
-# phenomenon, post-hypo rebound, stress, illness, sensor artefact). The
-# simulator is held to the identical test, its meal / bolus / exercise events
-# taken as the rising edges of the corresponding factor channels.
+# Excursion: >=EXC_AMP mg/dL swing; explained if a meal precedes rise or bolus/exercise a fall.
 EXC_AMP = 40.0          # mg/dL minimum excursion amplitude
 EXC_REVERSAL = 15.0     # mg/dL turning-point confirmation threshold
 EXC_CARB_MIN = 10.0     # g minimum logged carbs to count as a meal cause
@@ -1233,9 +1107,6 @@ def fig_unexplained_gallery(real_cohorts, path):
     plt.close(fig)
 
 
-# ============================================================================
-# Distribution distance metrics
-# ============================================================================
 def distribution_distances(a, b, bins=None):
     a = a[~np.isnan(a)]
     b = b[~np.isnan(b)]
@@ -1245,11 +1116,7 @@ def distribution_distances(a, b, bins=None):
     ks_stat, ks_p = sps.ks_2samp(a, b)
     w = float(sps.wasserstein_distance(a, b))
     if bins is None:
-        # Cover the full plausible support, not just [40,400]. Ohio/AZT1D and
-        # the simulator are hard-clamped to [40,400], but Shanghai is
-        # uncensored (39.6-475.2); a [40,400] window silently drops ~1.3% of
-        # Shanghai's mass — precisely the extreme tail the clamped sim cannot
-        # reproduce — flattering every Shanghai JS pair. Wide bins count it.
+        # Full support, not [40,400]: Shanghai is uncensored (39.6-475.2), drops ~1.3% of its mass.
         bins = np.arange(0, 601, 5)
     ha, _ = np.histogram(a, bins=bins, density=True)
     hb, _ = np.histogram(b, bins=bins, density=True)
@@ -1258,9 +1125,6 @@ def distribution_distances(a, b, bins=None):
             "wasserstein": w, "js_div": js}
 
 
-# ============================================================================
-# Aux summaries (per-record deltas, recovery times)
-# ============================================================================
 def recovery_summary(times):
     """Median / p75 / p90 / p99 / max / n for a recovery-time array (minutes)."""
     if not times:
@@ -1279,9 +1143,6 @@ def recovery_summary(times):
 
 
 
-# ============================================================================
-# Cohort summary (pop mean/std + IQR across per-record stats)
-# ============================================================================
 def cohort_summary(per):
     if not per:
         return {}
@@ -1310,9 +1171,6 @@ def cohort_summary(per):
     return out
 
 
-# ============================================================================
-# Figures
-# ============================================================================
 def fig_pdf_pooled(cohorts, path):
     bins = np.arange(30, 401, 5)
     fig, ax = plt.subplots(figsize=(11, 5.5))
@@ -1645,12 +1503,8 @@ def fig_recovery(cohorts, path):
 
 
 def fig_diurnal_lines(cohorts, path):
-    """Clean line-overlay of hour-of-day mean BG across cohorts.
-
-    The envelope plot (`diurnal_envelope.png`) shows ±1σ bands that visually
-    overlap and obscure direct shape comparison. This figure plots only the
-    three mean curves so the diurnal shape is the focus.
-    """
+    """Line-overlay of hour-of-day mean BG per cohort — a companion to
+    diurnal_envelope.png without ±1σ bands so shape is the focus."""
     fig, ax = plt.subplots(figsize=(11, 5.5))
     ax.axhspan(70, 180, color="lightgreen", alpha=0.18, label="TIR (70-180)")
     h = np.arange(24)
@@ -1670,12 +1524,8 @@ def fig_diurnal_lines(cohorts, path):
 
 
 def fig_class_balance(cohorts, path):
-    """Stacked bar of TBR2/TBR1/TIR/TAR1/TAR2 % per cohort.
-
-    Per-record mean across each cohort. Companion to the
-    `clinical_ranges.png` README chart, but built from the same data as the
-    rest of the report and labelled with absolute percentages on each segment.
-    """
+    """Stacked bar of TBR2/TBR1/TIR/TAR1/TAR2 % per cohort (per-record mean).
+    Companion to clinical_ranges.png, built from this report's own data."""
     band_keys = ["TBR2_pct", "TBR1_pct", "TIR_pct", "TAR1_pct", "TAR2_pct"]
     band_labels = ["TBR2 <54", "TBR1 54-70", "TIR 70-180",
                    "TAR1 180-250", "TAR2 >250"]
@@ -1713,9 +1563,6 @@ def fig_class_balance(cohorts, path):
     plt.close(fig)
 
 
-# ============================================================================
-# Markdown report writer
-# ============================================================================
 def _sci(p, sig=1):
     """Format a (small) p-value like '3.5 × 10⁻⁴⁶' or '< 10⁻³⁰⁰'."""
     if not np.isfinite(p) or p <= 0:
@@ -1745,12 +1592,9 @@ def _delta(a, b, fmt="+.1f"):
 
 
 def _acf_threshold_lag(acf_dict, threshold):
-    """Lag (in minutes) where ACF first drops below threshold (linear interp).
-
-    `acf_dict` is the per-cohort `pooled_acf` (int-lag → mean ACF). Returns
-    +inf if the curve never crosses, or the smallest sampled lag if already
-    below at the first sample.
-    """
+    """Lag (minutes) where ACF first drops below threshold (linear interp).
+    acf_dict is pooled_acf (int-lag → mean ACF). Returns +inf if it never
+    crosses, or the smallest sampled lag if already below at the first."""
     pairs = sorted((int(k), v) for k, v in acf_dict.items()
                    if v is not None and not (isinstance(v, float) and np.isnan(v)))
     if not pairs:
@@ -1904,13 +1748,9 @@ def _build_ml_section(cohorts, distances, pooled_moments, pooled_percentiles,
 def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
                     pooled_risk, cohort_summaries, recov_summaries,
                     az_event_stats, sim_event_stats, unexpl_stats, ext, path):
-    """Template the full markdown report from computed stats.
-
-    Tables are filled programmatically from the same numbers that go into
-    stats.json. Prose is kept neutral and observational (raw deltas, no
-    "matches"/"diverges" verdicts) so re-runs after simulator changes do not
-    require hand-editing the report.
-    """
+    """Templates the full markdown report from computed stats. Tables come
+    from the same numbers as stats.json; prose stays neutral/observational
+    so re-runs after simulator changes need no hand-editing."""
     n = {x: cohorts[x] for x in ORDER}
     pm = pooled_moments
     pp = pooled_percentiles
@@ -1933,8 +1773,7 @@ def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
     tir_hi = {x: float(np.max(_per_records_field(x, "TIR_pct"))) for x in ORDER}
     mean_bg_std = {x: float(np.std(_per_records_field(x, "mean"))) for x in ORDER}
 
-    # ACF lag rows that exist at 5-min cadence (Ohio, AZT1D, Sim) and at
-    # 15-min cadence (Shanghai). The 5-min row is absent for Shanghai.
+    # ACF lag rows: 5-min cadence (Ohio, AZT1D, Sim); Shanghai only has 15-min.
     acf = {x: cohorts[x]["pooled_acf"] for x in ORDER}
 
     def _acf_cell(name, lag_min):
@@ -2273,11 +2112,7 @@ def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
 
 {ext_section_md}
 """
-    # Column-alignment padding inside f-string bold markers (e.g. `**{x:>5.2f}**`)
-    # leaks spaces between the asterisks and the value, which GitHub's renderer
-    # then refuses to bold. Trim whitespace flush against the markers — but only
-    # *inside* a bold pair, so adjacent `**bold** *italic*` constructs aren't
-    # smashed together into `**bold***italic*`.
+    # Trims whitespace inside **bold** markers (else GitHub refuses to bold padded values).
     md = re.sub(r"\*\*[ \t]*([^*\n]+?)[ \t]*\*\*", r"**\1**", md)
     with open(path, "w") as f:
         f.write(md)
@@ -2337,24 +2172,16 @@ def fig_band_transitions(ext, path):
     plt.close(fig)
 
 
-# ============================================================================
-# Extended statistics (Section 10) — see diff/extended_stats.py
-# ============================================================================
-# Curated metrics for the standardised strength/weakness gap score. Each entry
-# extracts a single scalar per cohort. "hib" = higher-is-*neither*; the score is
-# direction-agnostic (|z| measures distance into/out of the real spread).
+# "hib" = higher-is-neither; the gap score is direction-agnostic (|z| = distance from real spread).
 def _pooled_tir(cohorts, n, key):
     d = cohorts[n]["pooled_bg"]
     return time_in_ranges(d).get(key, float("nan"))
 
 
 def compute_extended(cohorts, pooled_moments, pooled_risk):
-    """All Section-12 extended statistics.
-
-    Reuses the audited core primitives (mage/conga/autocorr_lags/
-    episode_durations) through extended_stats.cadence_fair, so the cadence-fair
-    block introduces no new metric math — only a common-grid decimation.
-    """
+    """All Section-12 extended statistics. Reuses the audited core primitives
+    (mage/conga/autocorr_lags/episode_durations) through
+    extended_stats.cadence_fair — only a common-grid decimation, no new math."""
     ext = {}
 
     # --- 12.1 Cadence-fair variability (common 15-min grid) ---
@@ -2369,9 +2196,7 @@ def compute_extended(cohorts, pooled_moments, pooled_risk):
                  else float("nan") for k in cf_keys}
     ext["cadence_fair"] = cf
 
-    # --- 12.2 Extra two-sample distances ---
-    # CvM/AD statistics scale with n, so every pair is evaluated at one common
-    # arm size (the smallest pooled cohort, capped) to be cross-comparable.
+    # CvM/AD scale with n; every pair uses one common arm size (smallest pooled cohort, capped).
     pairs = [("Sim", "Ohio"), ("Sim", "Shanghai"), ("Sim", "AZT1D"),
              ("Ohio", "Shanghai"), ("Ohio", "AZT1D"), ("Shanghai", "AZT1D")]
     common_n = int(min(min(int(np.sum(~np.isnan(cohorts[n]["pooled_bg"])))
@@ -2427,7 +2252,6 @@ def compute_extended(cohorts, pooled_moments, pooled_risk):
                    for name, fn in boot_stats.items()}
     ext["bootstrap"] = boot
 
-    # --- 12.5 Standardised strength/weakness gap score ---
     # metric label -> {cohort: scalar}
     metric_vals = {}
     for mk in ("mean", "std", "cv_pct", "skew", "excess_kurt"):
@@ -2495,8 +2319,7 @@ def _build_extended_section(ext, cohorts):
             return f"{r(b['point'], f)} [{r(b['lo'], f)}, {r(b['hi'], f)}]"
         return f"| {label} | {cell(O)} | {cell(S)} | {cell(A)} | **{cell(M)}** |"
 
-    # gap-score table — ALL metrics (never silently drop a non-finite z, which
-    # would hide a degenerate-SD or never-e-folding outside-envelope weakness).
+    # Gap-score table keeps ALL metrics; a dropped non-finite z would hide a real weakness.
     def _znum(v):
         z = v.get("z")
         return z if (z is not None and np.isfinite(z)) else None
@@ -2591,9 +2414,6 @@ def _build_extended_section(ext, cohorts):
 """
 
 
-# ============================================================================
-# Main
-# ============================================================================
 def main():
     import argparse
     ap = argparse.ArgumentParser(description=__doc__)
@@ -2629,15 +2449,13 @@ def main():
 
     cohorts = {"Ohio": ohio, "Shanghai": shang, "AZT1D": azt1d, "Sim": sim}
 
-    # AZT1D event log: insulin / carb / device-mode columns that the other two
-    # real corpora do not expose at this granularity.
+    # AZT1D event log: insulin/carb/device-mode columns the other two corpora lack.
     print("Loading AZT1D event log…")
     az_events = load_azt1d_events()
     az_event_stats = azt1d_event_summary(az_events)
     sim_event_stats = sim_event_summary(sim_raw)
 
-    # Unexplained-excursion analysis (§6.3) — reuse the already-loaded CGM and
-    # event logs plus the sim raw runs (the simulator is not exercised again).
+    # Unexplained-excursion analysis (§6.3): reuses loaded CGM/event logs and sim raw runs.
     print("Unexplained-excursion analysis…")
     ohio_ev = load_ohio_events()
     az_lists = {k: azt1d_event_lists(v) for k, v in az_events.items()}
@@ -2686,8 +2504,7 @@ def main():
     # Per-record cohort summaries
     cohort_summaries = {n: cohort_summary(cohorts[n]["per"]) for n in ORDER}
 
-    # Extended statistics (§10): cadence-fair, extra distances, temporal
-    # structure, bootstrap CIs, gap score.
+    # Extended stats (§10): cadence-fair, extra distances, temporal structure, bootstrap CI, gap.
     print("Computing extended statistics…")
     ext = compute_extended(cohorts, pooled_moments, pooled_risk)
 
@@ -2748,10 +2565,7 @@ def main():
             "recovery": recov_summaries[n],
         } for n in ORDER},
         "distances": distances,
-        # Strip the raw per-sample value arrays (used only for the histogram
-        # figures, already rendered above) before serialization — they are
-        # ~0.6M floats/seed and bloated stats.json to 64 MB, scaling linearly
-        # with the seed count.
+        # Strips per-sample arrays before serializing: ~0.6M floats/seed, bloats stats.json 64 MB.
         "azt1d_events": {k: v for k, v in az_event_stats.items()
                          if k not in ("basal_values", "carb_values")},
         "sim_events": {k: v for k, v in sim_event_stats.items()

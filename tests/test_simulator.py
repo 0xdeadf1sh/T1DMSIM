@@ -1,14 +1,7 @@
-"""
-Tests for T1DMSimulator core behavior.
-
-Verifies:
-- Reproducibility: same seed → identical output
-- BG stays within clamped bounds
-- Meals produce BG rises; insulin produces BG drops
-- generate_hours returns consistent shapes
-- Weekday/weekend/holiday tracking works
-- Alcohol and stress effects are applied
-"""
+"""Tests T1DMSimulator core behavior: reproducibility (same seed -> same
+output), BG stays within clamped bounds, meals raise/insulin lowers BG,
+generate_hours shapes, weekday/weekend/holiday tracking, alcohol/stress
+effects."""
 
 import numpy as np
 import pytest
@@ -48,13 +41,9 @@ class TestReproducibility:
         assert not np.array_equal(data1['bg'], data2['bg'])
 
     def test_reseed_matches_fresh_instance(self):
-        """reseed() produces the same output as a fresh instance.
-
-        Compares the full output dict — bg alone is not sufficient because
-        per-step IS drift can diverge by ~1.8% from a leaked prior-patient
-        state and still produce near-identical BG due to small basal
-        contributions per step.
-        """
+        """reseed() should match a fresh instance. Compares the full output
+        dict; bg alone isn't enough since per-step IS drift can diverge
+        ~1.8% from a leaked prior-patient state yet still yield near-identical BG."""
         seed = 17
         sim_fresh = T1DMSimulator(seed=seed)
         data_fresh = sim_fresh.generate_hours(48)
@@ -277,12 +266,8 @@ class TestGlycogenReservoir:
 
 class TestSevereHypoRefractory:
     """The 10-min severe-hypo refractory keeps rescue carbs from stacking.
-
-    This is a CLAUDE.md-documented critical clinical invariant: a full
-    bypass produces a sawtooth where the patient rage-eats 3-5 times in
-    10-15 min and overshoots to 140-180, while removing the bypass
-    re-opens 6+ hour dangerous hypos. The 10-min gate is the compromise.
-    """
+    Bypassing it makes the patient rage-eat 3-5x in 10-15 min, overshooting
+    to 140-180; removing the bypass re-opens 6+ hour dangerous hypos."""
 
     def _setup_severe_hypo(self, sim, idx):
         """Force the simulator into a severe-hypo state the patient will act on."""
@@ -294,9 +279,7 @@ class TestSevereHypoRefractory:
         # Ensure awake — wake at start, sleep far in the future
         sim._today_wake_idx = 0
         sim._today_sleep_idx = idx + STEPS_PER_DAY
-        # Clear carbs-on-board so these tests exercise the refractory TIMER
-        # alone. Otherwise the rule-of-15 recheck blocks the follow-up rescue
-        # for its own (correct) reason and the timer is never reached.
+        # Clears carbs-on-board so this exercises the refractory timer, not the rule-of-15 recheck.
         sim._rescue_totals[:] = 0.0
 
     def test_severe_hypo_refractory_blocks_back_to_back(self):
@@ -340,10 +323,7 @@ class TestSevereHypoRefractory:
         assert first_idx == idx, (
             f"moderate-hypo correction failed to fire (last_hypo_correction_idx={first_idx})")
 
-        # 15 min later — within 20-min moderate refractory, must block.
-        # (15 not 11: int(11/5)=2 steps=10 min, which is *outside* the 10-min
-        # severe gate too — the test would pass regardless of which refractory
-        # is selected. 15 min is inside 20-min but outside 10-min.)
+        # 15 not 11: int(11/5)=2 steps=10 min, outside the 10-min severe gate too; use 15 min.
         idx2 = idx + int(15 / DT_MINUTES)
         sim.state.bg = sim.state.bg_observed = 62.0
         sim.state.last_cgm_check_idx = -9999
@@ -364,11 +344,8 @@ class TestSevereHypoRefractory:
 
 class TestRuleOfFifteenRecheck:
     """Carbs-on-board gating of repeat rescues — the recheck half of rule-of-15.
-
-    The refractory timer supplies the waiting; this supplies the "and only
-    re-dose if still low". Without it a deep low cascades into a dose every
-    10 minutes, blind to the glucose already absorbing.
-    """
+    The refractory timer supplies the waiting; this supplies "re-dose only
+    if still low". Without it a deep low cascades into a dose every 10 min."""
 
     def _low_patient(self, competence):
         sim = T1DMSimulator(seed=0)
@@ -387,8 +364,7 @@ class TestRuleOfFifteenRecheck:
         """A competent patient with enough glucose already absorbing does not re-dose."""
         sim, idx = self._low_patient(competence=0.95)
         sim._rescue_totals[:] = 0.0
-        # 20 g still to absorb: at BG_SCALE_FACTOR that is far more than the
-        # ~30 mg/dL needed to clear the threshold from 50.
+        # 20 g still absorbing: at BG_SCALE_FACTOR, far more than the ~30 mg/dL needed from 50.
         sim._rescue_totals[idx:idx + 12] = 20.0 / 12.0
         sim._check_and_correct(idx)
         assert sim.state.last_hypo_correction_idx == -9999, (
@@ -482,9 +458,7 @@ class TestHypoFollowupSnack:
         import simulator as _sim
 
         def run(seed: int, with_followup: bool) -> np.ndarray:
-            # Toggle ONLY the follow-up snack (via its carb fraction), holding
-            # the patient and skill fixed — comparing high- vs low-skill patients
-            # confounds the snack with every other skill-dependent behaviour.
+            # Toggles only the follow-up snack, holding patient/skill fixed to avoid confounding.
             _saved = _sim.HYPO_FOLLOWUP_FRACTION
             _sim.HYPO_FOLLOWUP_FRACTION = _saved if with_followup else 0.0
             try:
@@ -492,8 +466,7 @@ class TestHypoFollowupSnack:
                 p = sim.patient
                 p.attentiveness = 0.9  # above HYPO_FOLLOWUP_SKILL_THRESHOLD so the snack is eaten
                 p.dosing_competence = 0.9
-                # Isolate the snack's effect from the always-on glucose-
-                # effectiveness mean-reversion, which would clear the lift.
+                # Isolates the snack from the always-on glucose-effectiveness mean-reversion.
                 p.glucose_effectiveness = 0.0
                 return _run_body(sim)
             finally:
@@ -520,9 +493,7 @@ class TestHypoFollowupSnack:
                 bgs.append(float(step['bg']))
             return np.array(bgs)
 
-        # Average the effect over several seeds — the lift is a population
-        # tendency, not a single-realization guarantee, so a per-seed threshold
-        # is fragile to any RNG-stream change.
+        # Averages over several seeds: the lift is a population tendency, fragile per-seed.
         seeds = [3, 5, 11, 17, 23, 29]
         lifts, min_gains = [], []
         for sd in seeds:
@@ -531,8 +502,7 @@ class TestHypoFollowupSnack:
             lifts.append(bgs_with.mean() - bgs_without.mean())
             min_gains.append(bgs_with.min() - bgs_without.min())
 
-        # With-followup trace should be higher on average over the 2h window:
-        # the followup tail keeps glucose flowing while the rescue burst fades.
+        # With-followup should be higher on average: the tail keeps glucose flowing as it fades.
         assert np.mean(lifts) > 3.0, (
             f"followup did not lift the post-correction trace meaningfully: "
             f"mean lift over seeds = {np.mean(lifts):.1f} mg/dL (per-seed {[round(x,1) for x in lifts]})")
@@ -584,8 +554,7 @@ class TestSevereHypoRescueAmount:
         sim_deep = T1DMSimulator(seed=4)
         g_shallow = self._force_correction_and_get_grams(sim_shallow, 50.0)
         g_deep = self._force_correction_and_get_grams(sim_deep, 30.0)
-        # Difference attributable to deficit term:
-        # delta_deficit = (54-30) - (54-50) = 20, so delta_g should be ~= 0.35 * 20 = 7g
+        # delta_deficit = (54-30)-(54-50) = 20, so delta_g should be ~= 0.35*20 = 7g.
         assert g_deep > g_shallow + 3.0, (
             f"BG=30 rescue ({g_deep:.2f}g) should clearly exceed BG=50 "
             f"rescue ({g_shallow:.2f}g) per the 14 + 0.35*deficit formula")
@@ -600,8 +569,7 @@ class TestHypoCorrectionSkillScaling:
         p = sim.patient
         p.attentiveness = attentiveness
         p.dosing_competence = dosing
-        # Cancel the rage-eat random branch by raising BG above
-        # RAGE_EAT_BG_THRESHOLD but keeping it below eff_low_thresh.
+        # Cancels the rage-eat random branch: BG above RAGE_EAT_BG_THRESHOLD, below eff_low_thresh.
         sim.generate()
         idx = sim.state.current_idx
         s = sim.state
@@ -631,9 +599,7 @@ class TestHypoCorrectionSkillScaling:
         assert g_high > g_low, (
             f"high-skill correction ({g_high:.2f}g) should exceed low-skill "
             f"({g_low:.2f}g) per the (1 + 1.5*skill_avg) multiplier")
-        # Expected: low ~ HYPO_CORRECTION_BASE_GRAMS * 1.45,
-        # high ~ HYPO_CORRECTION_BASE_GRAMS * 2.35 — ratio ~= 1.6.
-        # Allow slack for the panic-factor severity term.
+        # Expected low ~= BASE*1.45, high ~= BASE*2.35 (ratio ~1.6); slack for panic-factor.
         assert g_high / g_low > 1.25, (
             f"ratio {g_high/g_low:.2f} too small — skill multiplier may be flat")
 
@@ -665,10 +631,7 @@ class TestBolusPKForDoseIntegration:
             f"only {len(calls)} bolus_pk_for_dose calls in 48h — "
             "simulator may be bypassing the dose-dependent PK helper")
 
-        # If the run produced clearly different doses, the helper must have
-        # responded with non-decreasing duration. (The unit-level monotonicity
-        # is already pinned by TestBolusPKForDose; this catches the case where
-        # the simulator stops calling the helper and falls back to a constant.)
+        # If doses differ clearly, duration must be non-decreasing (unit test covers monotonicity).
         by_dose = sorted(calls)
         if by_dose[-1][0] / max(by_dose[0][0], 1e-9) > 2.0:
             small_dur = by_dose[0][1][2]
@@ -681,12 +644,8 @@ class TestBolusPKForDoseIntegration:
 
 class TestBasalInjectionCadence:
     """Basal injection cadence must equal patient.basal_dose_interval_hours.
-
-    Real glargine and degludec are dosed once daily, so the cadence is 24h
-    regardless of the analogue's PK action duration (glargine 26h, degludec
-    42h). Each once-daily dose delivers the full 24h basal_dose, keeping the
-    24h-average insulin delivery aligned with `basal_dose`.
-    """
+    Glargine/degludec are dosed once daily (24h) regardless of PK action
+    duration (26h/42h); each dose delivers the full 24h basal_dose."""
 
     def test_basal_cadence_matches_patient_duration(self):
         for seed in [0, 5, 13, 27]:
@@ -702,8 +661,7 @@ class TestBasalInjectionCadence:
 
             sim.inject_curve = capturing_inject
 
-            # 14 days covers ~14 injections for an 18h patient, ~11 for a 30h
-            # patient — plenty of samples for a robust median.
+            # 14 days: ~14 injections for an 18h patient, ~11 for a 30h, enough for a median.
             sim.generate_hours(14 * 24)
 
             assert len(basal_indices) >= 8, (
@@ -712,8 +670,7 @@ class TestBasalInjectionCadence:
 
             spacings_steps = np.diff(sorted(basal_indices))
             median_spacing_h = float(np.median(spacings_steps)) * DT_MINUTES / 60.0
-            # Per-dose ±30 min jitter + max(current_idx, ...) clamp can drift
-            # individual spacings; the median should still land within 1.5h.
+            # Per-dose jitter (±30 min) and idx clamp drift spacings; median should be within 1.5h.
             assert abs(median_spacing_h - sim.patient.basal_dose_interval_hours) < 1.5, (
                 f"seed={seed}: median basal spacing {median_spacing_h:.2f}h "
                 f"!= patient.basal_dose_interval_hours "
@@ -756,9 +713,7 @@ class TestInjectCurveUpdatesTotals:
             sim_b.generate()
         delta_b = sim_b.state.bg - bg_before_b
 
-        # Path A should produce a real BG rise; path B should not (because the
-        # carb contribution is read from _carb_totals, which raw append doesn't
-        # update). This is the bug-class the CLAUDE.md warning prevents.
+        # Path A rises; path B should not, since carb reads from _carb_totals (raw append skips it).
         assert delta_a > delta_b + 10.0, (
             f"inject_curve effect (Δ={delta_a:+.1f}) should clearly exceed "
             f"raw-append effect (Δ={delta_b:+.1f}). Either the totals arrays "

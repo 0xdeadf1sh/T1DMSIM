@@ -1,35 +1,7 @@
 """Which simulator is the better real-world proxy: T1DMSIM or UVA/Padova?
 
-Framed as the user's question — if two ML models were trained on the synthetic
-output of each simulator, which would transfer better to real CGM? — but
-answered *without training anything*. The proxy is distributional: a model
-trained on synthetic data and deployed on real data pays a penalty that grows
-with the distance between the two distributions (covariate / label shift). So
-we measure how far each simulator's output sits from real CGM, across a battery
-of marginal and dynamic statistics, with the **real-vs-real** distance between
-cohorts as the yardstick for "indistinguishable from real".
-
-Cohorts compared (all reduced to 5-min CGM, the battery in `diff/build_report.py`):
-  * Real: OhioT1DM, ShanghaiT1DM, AZT1D — and their pool.
-  * T1DMSIM: native free-living traces (per seed).
-  * UVA/Padova: native simglucose data-generation — `T1DPatient` physiology +
-    `RandomScenario` meals + `BBController` basal-bolus dosing + Dexcom
-    `CGMSensor` noise. This is the canonical way UVA/Padova synthetic CGM is
-    produced; using it (rather than T1DMSIM's behavioural schedule) keeps each
-    simulator a self-contained data source.
-
-IMPORTANT context, stated in the report: T1DMSIM was *calibrated against*
-OhioT1DM. Closeness on level metrics is
-therefore partly by construction. The report separates level metrics (where
-that advantage lives) from dynamic metrics (a fairer test of the generative
-process, and what a next-value BG predictor actually learns).
-
-Writes `uva_padova/realism.json`, figures under `uva_padova/figures/`, and
-`uva_padova/REALISM.md`.
-
-Run (datasets present under ./datasets, reference engine installed --no-deps):
-    venv/bin/python uva_padova/compare_realism.py
-    venv/bin/python uva_padova/compare_realism.py --quick
+Measures distributional distance from real CGM vs. the real-vs-real yardstick.
+Usage: venv/bin/python uva_padova/compare_realism.py [--quick]
 """
 from __future__ import annotations
 
@@ -77,12 +49,7 @@ MAX_WORKERS = max(1, (os.cpu_count() or 4) // 2)
 C = {"Real": "#000000", "T1DMSIM": "#1f77b4", "UVA/Padova": "#d62728",
      "Ohio": "#555555", "Shanghai": "#888888", "AZT1D": "#bbbbbb"}
 
-# Metric battery, split by SAMPLING-INVARIANCE (not an informal level/dynamics
-# label). Marginal & risk metrics are pointwise functions of BG averaged over
-# samples, so they are cadence-invariant and are referenced to ALL three real
-# cohorts. LBGI/HBGI belong here (they are means of a per-sample risk transform),
-# NOT with the rate-of-change metrics. GMI is dropped: it is affine in the mean
-# and would double-count it. Keys index per-record `summary`.
+# Split by sampling-invariance: level metrics are cadence-invariant, referenced to all 3 cohorts.
 LEVEL_METRICS = [
     ("mean", "Mean BG", "mg/dL"),
     ("cv_pct", "CV", "%"), ("TIR_pct", "TIR 70-180", "%"),
@@ -90,8 +57,7 @@ LEVEL_METRICS = [
     ("p10", "10th pct", "mg/dL"), ("p90", "90th pct", "mg/dL"),
     ("LBGI", "LBGI", ""), ("HBGI", "HBGI", ""),
 ]
-# Rate-of-change metrics depend on sampling cadence, so they are referenced only
-# to the natively-5-min real cohorts (Ohio, AZT1D); Shanghai (15-min) is excluded.
+# Cadence-dependent, so referenced only to the natively-5-min cohorts (Ohio, AZT1D).
 DYN_METRICS = [
     ("delta_std", "5-min ΔBG SD", "mg/dL"), ("mage", "MAGE", "mg/dL"),
     ("conga_1h", "CONGA-1h", "mg/dL"), ("modd", "MODD", "mg/dL"),
@@ -99,9 +65,7 @@ DYN_METRICS = [
 ]
 
 
-# ---------------------------------------------------------------------------
 # UVA/Padova native data generation
-# ---------------------------------------------------------------------------
 def _uva_worker(args):
     """Run one native simglucose simulation; return (id, 3-min CGM array)."""
     name, seed, days, warmup_h = args
@@ -138,9 +102,7 @@ def uva_items(n_replicates, days, warmup_h):
     return items
 
 
-# ---------------------------------------------------------------------------
 # Distances and metric errors
-# ---------------------------------------------------------------------------
 def real_vs_real_floor(cohorts):
     """Noise floor: BG distance among all three real cohorts (sampling-invariant)
     and ΔBG distance between the two natively-5-min cohorts (Ohio, AZT1D)."""
@@ -175,9 +137,7 @@ def metric_errors(sim, real, metrics):
     return rows
 
 
-# ---------------------------------------------------------------------------
 # Figures
-# ---------------------------------------------------------------------------
 def _save(fig, name):
     fig.tight_layout()
     fig.savefig(os.path.join(FIGS, name), dpi=130)
@@ -301,9 +261,7 @@ def fig_metric_error(err_ours, err_uva, fname):
     _save(fig, fname)
 
 
-# ---------------------------------------------------------------------------
 # Orchestration
-# ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true")
@@ -337,9 +295,7 @@ def main():
     for co in cohorts.values():
         co["summary"] = cohort_summary(co["per"])
 
-    # Real references. BG level/marginal is sampling-invariant -> pool all three.
-    # Dynamics (ΔBG, ACF) are sampling-dependent -> use only the natively-5-min
-    # cohorts (Ohio, AZT1D); Shanghai is 15-min and is excluded there.
+    # BG level pools all three (sampling-invariant); dynamics use only the 5-min cohorts.
     ALL = ["Ohio", "Shanghai", "AZT1D"]
     FIVE = ["Ohio", "AZT1D"]
     pool_bg = lambda ns: np.concatenate([cohorts[n]["pooled_bg"] for n in ns])    # noqa: E731
@@ -352,8 +308,7 @@ def main():
         "pooled_acf": {L: float(np.nanmean([cohorts[n]["pooled_acf"].get(L, np.nan) for n in FIVE]))
                        for L in cohorts["Ohio"]["pooled_acf"]},
     }
-    # Synthetic "Real" cohort for the figures: BG from the full pool, dynamics
-    # from the 5-min pool, summary merged (delta_std from the 5-min pool).
+    # Synthetic "Real" cohort for figures: full-pool BG, 5-min-pool dynamics.
     cohorts["Real"] = {
         "pooled_bg": real_level["pooled_bg"], "pooled_delta": real_dyn["pooled_delta"],
         "pooled_acf": real_dyn["pooled_acf"],

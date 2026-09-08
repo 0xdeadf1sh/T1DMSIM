@@ -1,13 +1,7 @@
-"""
-Tests for the normalization_stats.json the cache builder emits for T1DMAI.
-
-cache_simulator.py writes, alongside the .b2nd channels + meta.json + DATASET.md,
-a normalization_stats.json holding the 4-channel {mean, std} the downstream
-T1DMAI model consumes: bg_absolute fit in Kovatchev risk space, carb_intake /
-insulin_combined fit in log1p space, pooled over all rows x timesteps during the
-transcode pass. These tests verify the file's schema and that its streaming
-power-sum stats match a direct recompute from the stored .b2nd arrays.
-"""
+"""Tests normalization_stats.json, the cache builder's per-channel {mean, std}
+for T1DMAI: bg_absolute in Kovatchev risk space, carb_intake/insulin_combined
+in log1p space, pooled over rows x timesteps. Checks schema and that the
+streaming power-sum stats match a direct recompute from the .b2nd arrays."""
 
 import json
 import os
@@ -23,16 +17,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cache_simulator as cs  # noqa: E402
 
 
-# Every normalized SIGNAL channel T1DMAI reads — its ``normalization.CHANNEL_NAMES``,
-# whose count is pinned at 4 there. Emitting a subset does not fail loudly at either
-# end: the cache builds, the loader accepts it, and the missing channel simply has no
-# scale until someone notices. That is what this set exists to stop.
+# T1DMAI normalization.CHANNEL_NAMES (pinned to 4); a missing channel silently has no scale.
 NORM_KEYS = ("bg_absolute", "carb_intake", "insulin_combined", "exercise_equiv")
 
-
-# ---------------------------------------------------------------------------
-# Pure-function unit tests (fast, no simulation)
-# ---------------------------------------------------------------------------
 
 def test_norm_bg_risk_matches_reference():
     from simulator import BG_CLAMP_MIN, BG_CLAMP_MAX
@@ -42,8 +29,7 @@ def test_norm_bg_risk_matches_reference():
     g = np.clip(bg.astype(np.float64), BG_CLAMP_MIN, BG_CLAMP_MAX)
     ref = cs.NORM_BG_RISK_SCALE * (np.log(g) ** cs.NORM_BG_RISK_POWER - cs.NORM_BG_RISK_OFFSET)
     assert np.allclose(got, ref, atol=1e-12)
-    # Anchor points are a property of the constants, NOT of the clamp rails:
-    # f(40) = -sqrt(10), f(400) = +sqrt(10) hold whatever BG_CLAMP_MIN is.
+    # Anchor points are fixed by the constants, not clamp rails: f(40)=-sqrt(10), f(400)=+sqrt(10).
     assert cs._norm_bg_risk(np.array([40.0]))[0] == pytest.approx(-np.sqrt(10.0), abs=1e-6)
     assert cs._norm_bg_risk(np.array([400.0]))[0] == pytest.approx(+np.sqrt(10.0), abs=1e-6)
     # The floor sits below the lower anchor, so risk space is asymmetric.
@@ -52,8 +38,7 @@ def test_norm_bg_risk_matches_reference():
 
 
 def test_norm_bg_risk_is_not_clinical_kovatchev():
-    # The clinical LBGI/HBGI constants (1.509 / 5.381) must stay untouched and
-    # are distinct from the re-anchored model risk-space constants.
+    # Clinical LBGI/HBGI constants (1.509/5.381) stay untouched, distinct from model risk constants.
     assert cs.NORM_BG_RISK_SCALE != 1.509
     assert cs.NORM_BG_RISK_OFFSET != 5.381
     f = 1.509 * (np.log(120.0) ** 1.084 - 5.381)
@@ -69,17 +54,10 @@ def test_finalize_norm_stats_sample_std():
     assert d["bg_absolute"]["std"] == pytest.approx(np.std(x, ddof=1))  # sample std
 
 
-# ---------------------------------------------------------------------------
-# End-to-end build test (tiny pool)
-# ---------------------------------------------------------------------------
-
 @pytest.fixture(scope="module")
 def built_cache(tmp_path_factory):
     out = tmp_path_factory.mktemp("caches") / "normcache"
-    # 48 h, not 10: exercise is sparse enough that an 8x10 h window holds no
-    # session at all, and a channel with no events fits std = 0 -- which the
-    # builder now refuses to write and T1DMAI refuses to load. The fixture has to
-    # be big enough to exercise the channel it asserts on.
+    # 48h not 10h: exercise sparse, an 8x10h window can miss sessions; std=0 channels refused.
     cs.build_cache(
         out_dir=str(out), pool_size=8, sim_hours=48.0, warmup_hours=5.0,
         n_jobs=1, dataset_md="", baseline_stats=None, seed_salt=13,

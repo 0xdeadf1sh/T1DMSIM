@@ -1,18 +1,7 @@
-"""Adapter that drives the authoritative UVA/Padova 2008 ODE model from a
-discrete carb/insulin event stream.
+"""Adapter driving the UVA/Padova 2008 ODE model (via simglucose's T1DPatient
+ODE core, RL extras stubbed out) from a discrete carb/insulin event stream.
 
-The reference engine is the FDA-accepted UVA/Padova 2008 in-silico model as
-implemented by ``simglucose`` (Jinyu Xie). We use only its ODE core
-(``T1DPatient``) and the 30 bundled virtual-patient parameter sets — not its
-reinforcement-learning environment.
-
-``simglucose``'s package ``__init__`` and ``t1dpatient.py`` import ``gym`` and
-``pkg_resources`` at load time. ``gym`` is needed solely by the RL wrapper, and
-``pkg_resources`` was dropped by ``setuptools>=81``. Both are stubbed into
-``sys.modules`` below so the pure ODE engine loads with numpy/scipy/pandas
-only. Install the reference engine without its RL extras:
-
-    pip install --no-deps simglucose>=0.2.11
+Install: pip install --no-deps simglucose>=0.2.11
 """
 from __future__ import annotations
 
@@ -40,9 +29,7 @@ def _install_shims() -> None:
         assert spec is not None and spec.origin is not None
         return os.path.join(os.path.dirname(spec.origin), resource)
 
-    # setuptools>=81 dropped pkg_resources; some builds still ship a partial
-    # stub without resource_filename. Handle both: absent -> full stub;
-    # present-but-incomplete -> patch in the one function simglucose needs.
+    # Handles both: pkg_resources absent (full stub) or partial (patch in the one fn).
     try:
         import pkg_resources as _pr  # type: ignore
         if not hasattr(_pr, "resource_filename"):
@@ -112,17 +99,9 @@ class PadovaPatient:
 
     def replay_self_dosed(self, meals, n_minutes: int,
                           target_bg: float = 130.0, max_correction_u: float = 6.0):
-        """Integrate the ODE driven only by a shared MEAL schedule, with insulin
-        dosed for *this* patient's own physiology.
-
-        ``meals`` is a list of ``(minute, grams)``. Each meal is covered by a
-        bolus of ``grams / CR`` plus a bounded correction ``(Gsub - target)/CF``
-        (only when above target), and the patient runs on its steady-state
-        (u2ss) basal throughout. This is the textbook basal-bolus dosing the
-        UVA/Padova virtual patients are constructed around, so it keeps them in
-        range and makes their meal excursions comparable in amplitude.
-
-        Returns subcutaneous glucose ``Gsub`` (mg/dL) at every minute.
+        """Integrate the ODE on a shared meal schedule, insulin dosed for this patient's
+        own physiology: bolus grams/CR plus a bounded above-target correction, basal at
+        steady-state (u2ss). Returns Gsub (mg/dL) at every minute.
         """
         p = self._patient
         p.reset()
@@ -145,15 +124,8 @@ class PadovaPatient:
         return gsub
 
     def replay(self, carb_g_per_min: np.ndarray, insulin_u_per_min: np.ndarray) -> np.ndarray:
-        """Integrate the ODE minute-by-minute under the supplied inputs.
-
-        Parameters are aligned 1-minute arrays of identical length:
-          * ``carb_g_per_min[t]``    -- grams of CHO ingested at minute ``t`` as an
-            impulse; the model self-paces digestion at ``EAT_RATE`` (5 g/min).
-          * ``insulin_u_per_min[t]`` -- total insulin delivered at minute ``t`` in
-            U/min: the continuous basal rate plus any bolus impulse for that minute.
-
-        Returns subcutaneous glucose ``Gsub`` (mg/dL) sampled at every minute.
+        """Integrate the ODE minute-by-minute under the aligned carb_g_per_min /
+        insulin_u_per_min arrays. Returns Gsub (mg/dL) sampled at every minute.
         """
         p = self._patient
         p.reset()

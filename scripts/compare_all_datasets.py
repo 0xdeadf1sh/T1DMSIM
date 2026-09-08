@@ -1,16 +1,7 @@
 """Three-way comparison pipeline: OhioT1DM, ShanghaiT1DM, T1DMSIM.
 
-Exports loaders, regularisers, per-patient stat blocks, and the run_pipeline
-aggregator consumed by scripts/generate_comparison_figures.py. Also runnable
-directly to print pooled aggregate stats.
-
-Reads from:
-    ./datasets/ohiot1dm/*.xml                      (5-min Dexcom CGM, US adults)
-    ./datasets/ShanghaiT1DM/Shanghai_T1DM/*.xls(x) (15-min, CN adults)
-    ./datasets/AZT1D/CGM Records/Subject N/*.csv   (5-min Dexcom + AID pump,
-                                                    Mayo Clinic Arizona)
-
-Datasets live under datasets/ and are gitignored (non-redistributable).
+Exports loaders, regularisers, stat blocks, and run_pipeline. Reads gitignored
+data from ./datasets/{ohiot1dm,ShanghaiT1DM,AZT1D}/.
 """
 from __future__ import annotations
 
@@ -112,10 +103,7 @@ def load_azt1d_patients() -> dict:
             header = pd.read_csv(path, nrows=0).columns
         except Exception:
             continue
-        # Most subjects expose a bare 'CGM' column; Subject 14 alone names it
-        # 'Readings (CGM / BGM)'. Match any header containing 'CGM' so a renamed
-        # column cannot silently drop a subject (was excluding Subject 14, a
-        # low-mean outlier, biasing the AZT1D reference up ~1.7 mg/dL).
+        # Match any 'CGM'-containing header: Subject 14 names it 'Readings (CGM / BGM)'.
         cgm_col = 'CGM' if 'CGM' in header else next(
             (c for c in header if 'CGM' in c), None)
         if cgm_col is None or 'EventDateTime' not in header:
@@ -138,12 +126,7 @@ def load_azt1d_patients() -> dict:
 
 
 def load_azt1d_events() -> dict:
-    """Return {subject_id: DataFrame} with the full AZT1D event log.
-
-    Columns kept: EventDateTime, DeviceMode, BolusType, Basal,
-    CorrectionDelivered, TotalBolusInsulinDelivered, FoodDelivered, CarbSize.
-    Numeric columns are coerced; missing event fields stay NaN.
-    """
+    """Return {subject_id: DataFrame} with the full AZT1D event log; numeric cols coerced."""
     out: dict = {}
     if not os.path.isdir(AZT1D_DIR):
         return {}
@@ -193,13 +176,7 @@ def _regularize_rows(rows, step_min: int, gap_min: int):
             elif dt1 == 0:
                 v = vals[i]
             else:
-                # Snap to the nearer real sample rather than linearly
-                # interpolating. Linear interpolation is a low-pass that shaves
-                # ~5-7% off the real cohorts' short-scale variability (their
-                # Dexcom timestamps drift off the grid), while the on-grid
-                # simulator is passed through untouched — biasing every
-                # high-frequency comparison (Δ-BG SD, short-lag ACF). Nearest
-                # keeps both arms on the same footing.
+                # Nearest-sample, not linear interpolation, which low-passes real variability.
                 v = vals[i] if 2 * dt0 <= dt1 else vals[i + 1]
         else:
             v = vals[i]
@@ -219,8 +196,7 @@ def regularize_bg_15min(rows):
     return _regularize_rows(rows, step_min=15, gap_min=60)
 
 
-# ---------- Event rates (stubs — figure script does not display these but
-# run_pipeline accepts a callback so we keep the signature). ----------
+# Stubs: unused by the figure script, kept only so run_pipeline's callback signature holds.
 def ohio_event_rates(_pid: str) -> dict:
     return {}
 
@@ -258,8 +234,7 @@ def clinical_ranges(bg) -> dict:
 
 
 def variability_metrics(bg, step_min: int = 5) -> dict:
-    # Diff first, then drop NaN-touching pairs. Filtering NaN first would
-    # create artificial jumps across former gaps and inflate the std.
+    # Diff first, then drop NaN pairs: filtering NaN first creates artificial gap-jumps.
     if len(bg) < 2:
         return {f'd{step_min}min_std': 0.0, f'd{step_min}min_p90_abs': 0.0}
     d = np.diff(bg)
@@ -343,9 +318,7 @@ def run_pipeline(name: str, items, regularize_fn, event_rates_fn,
             **variability_metrics(bg, step_min=step_min),
             **event_rates_fn(rid),
         }
-        # Observed (non-NaN) coverage, NOT calendar span: NaN-bridged gap cells
-        # carry no episodes, so counting them as exposure deflates per-day rates
-        # for gappy real cohorts (~8% on Ohio) while the gapless sim is exact.
+        # Observed coverage, not calendar span: gap cells as exposure deflates gappy cohorts.
         days = (int(np.sum(~np.isnan(bg))) * step_min) / (60 * 24)
         h_d = episodes(bg, 70, below=True, step_min=step_min)
         H_d = episodes(bg, 180, below=False, step_min=step_min)

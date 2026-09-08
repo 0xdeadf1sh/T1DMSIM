@@ -1,14 +1,7 @@
-"""
-Compatibility test for the flat top-level meta.json keys the T1DMAI loader
-requires.
-
-T1DMAI's T1DMDataset._load_cache (data.py) reads a set of FLAT top-level keys
-off meta.json and validates each. cache_simulator.py stores the same values
-nested under report['params'] for DATASET.md, but _finalize_report also mirrors
-them flat at the root so the ML-side loader can consume this cache unchanged.
-This test builds a tiny cache and asserts the on-disk meta.json carries those
-flat keys with the exact values the loader checks for.
-"""
+"""Tests the flat top-level meta.json keys T1DMAI's T1DMDataset._load_cache
+(data.py) requires. cache_simulator.py nests the same values under
+report['params'] for DATASET.md but mirrors them flat at the root too.
+Builds a tiny cache and checks meta.json carries those flat keys."""
 
 import json
 import os

@@ -1,11 +1,7 @@
 """Generate the inline SVG visuals embedded in the project page (index.html).
 
-Runs the simulator, renders a wide hero trace (glucose plus a carbohydrate /
-insulin event strip) and a small-multiple wall of independent seeds, then
-splices both into index.html in place. Idempotent: re-running replaces the
-previously injected markup.
-
-    python scripts/make_site_figures.py
+Idempotent: re-running replaces the previously injected markup.
+Usage: python scripts/make_site_figures.py
 """
 from __future__ import annotations
 
@@ -32,8 +28,7 @@ H = STRIP_TOP + STRIP_H
 BG_LO, BG_HI = 40.0, 330.0
 HYPO, HYPER = 70.0, 180.0
 
-# Glycemic zone shading, mirroring the visualizer's chart backdrop
-# (visualizer.py, _draw_zones): same boundaries, same ordering.
+# Mirrors visualizer.py's _draw_zones chart backdrop: same boundaries, same ordering.
 ZONES = [(30.0, 54.0, "vlo"), (54.0, 70.0, "lo"), (70.0, 180.0, "ir"),
          (180.0, 250.0, "hi"), (250.0, 400.0, "vhi")]
 
