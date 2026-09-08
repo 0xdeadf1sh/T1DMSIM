@@ -76,7 +76,7 @@ The three real datasets must live under `datasets/` (gitignored). `diff/stats.js
 and `diff/README.md` are regenerated artefacts; the report prose is templated and
 kept neutral/observational, so a re-run after simulator changes needs no hand-editing.
 
-Visualizer key bindings are documented in the module docstring at the top of `visualizer.py` (and in the README's "Visualizer Controls" section).
+Visualizer key bindings are documented in the README's "Visualizer Controls" section.
 
 ## Code Style
 
