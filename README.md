@@ -251,7 +251,6 @@ The in-silico comparison in [`uva_padova/README.md`](uva_padova/README.md) bench
 
 - **[T1DMAI](https://github.com/0xdeadf1sh/T1DMAI)** — the transformer that consumes this simulator's output: training, evaluation, and the ExecuTorch exporter that produces the on-device artifact.
 - **[T1DMDROID](https://github.com/0xdeadf1sh/T1DMDROID)** — the Android app that runs that exported model on-device against a live CGM feed.
-- **[T1DMSERVER](https://github.com/0xdeadf1sh/T1DMSERVER)** — the optional self-hosted sync backend and terminal dashboard for that app.
 
 
 ## License
