@@ -72,15 +72,17 @@ delta_BG    = alpha * (glucose_in - glucose_out) + S_g * (E(t) - BG)
 
 `alpha` is `BG_SCALE_FACTOR`, the master constant converting abstract units to mg/dL. Insulin sensitivity divides the clearance term: resistant patients (IS > 1) clear less glucose per unit insulin, sensitive patients (IS < 1) clear more. HGO suppression by insulin is handled separately by the Hill function, so IS modulates only peripheral insulin action.
 
-`S_g * (E(t) - BG)` is glucose effectiveness — the Bergman-minimal-model insulin-independent pull toward a stochastic equilibrium `E(t)`, without which within-band BG would drift as an undamped integrator of net flux.
+`S_g * (E(t) - BG)` is glucose effectiveness — the Bergman-minimal-model insulin-independent pull toward a stochastic equilibrium `E(t)`, without which within-band BG would drift as an undamped integrator of net flux. It is set to zero: below 180 mg/dL only insulin brings blood sugar down.
+
+Absorption noise perturbs the carbs and insulin that reach the blood; the recorded carb and insulin channels are the declared curves.
 
 Three physiological guardrails are then applied to the delta:
 
-- Renal clearance: above 180 mg/dL, the kidneys excrete glucose proportionally to the excess.
-- Counter-regulatory response: below 70 mg/dL, glucagon and cortisol force the liver to dump extra sugar.
-- Severe-hypo glucagon dump: below `SEVERE_HYPO_THRESHOLD`, an additional emergency release adds glucose proportionally to severity.
+- Renal clearance: above 180 mg/dL, the kidneys excrete glucose proportionally to the excess, at the rate the UVA/Padova simulator uses.
+- Counter-regulatory response: below 70 mg/dL, glucagon and cortisol add glucose in proportion to the deficit.
+- Severe-hypo glucagon term: below `SEVERE_HYPO_THRESHOLD`, a further release proportional to severity.
 
-Soft delta-damping near the floor and ceiling shapes the tails; a hard clamp at 10-400 mg/dL acts as a backstop. The floor is deliberately below the CGM reporting floor of 40 mg/dL: a sensor that stops reporting does not stop the patient falling, and clamping the dynamics at the reporting floor makes every descent taper out there. The full algebra for every curve, envelope, and guardrail is in [`docs/math.md`](docs/math.md).
+Both low-side terms are weak, so a unit of insulin lowers BG by about the same amount from 105 as from 190 mg/dL. True BG has no floor; a soft ceiling and a hard clamp at 400 mg/dL bound it above. The CGM reading is clipped to 10-400 mg/dL. The full algebra for every curve, envelope, and guardrail is in [`docs/math.md`](docs/math.md).
 
 
 ## Patient Model
@@ -90,24 +92,24 @@ Each virtual patient is defined by four skill dimensions sampled from a multivar
 | Skill | Governs |
 |---|---|
 | Dietary discipline (s1) | Carb amount per meal, number of meals/snacks, fast-vs-slow carb mixture, meal-timing regularity. Low s1 patients eat more fast carbs, more erratically. |
-| Attentiveness (s2) | CGM check frequency, response speed to highs and lows, whether overnight alarms are noticed, trend-based anticipatory corrections. |
-| Dosing competence (s3) | Carb-counting accuracy, bolus timing (pre- vs post-meal), IOB awareness before correcting, correction-dose appropriateness, probability of rage bolusing. |
-| Lifestyle consistency (s4) | Regularity of wake/sleep times, exercise frequency, meal-schedule stability, alcohol frequency, overall routine predictability. |
+| Attentiveness (s2) | CGM check frequency, the hypo threshold, trend-based preemptive rescue carbs. |
+| Dosing competence (s3) | The hypo threshold, how much absorbing rescue carbohydrate is counted before eating again, rage-eating, basal-dose noise. |
+| Lifestyle consistency (s4) | Regularity of wake/sleep times, exercise frequency, meal-schedule stability, alcohol frequency, injection-site rotation. |
 
-Skills are mapped through a sigmoid and clipped to a configurable range (default 0.15-0.98); every behavioral parameter — meal sizes, timing jitter, bolus accuracy, correction behavior, exercise habits — is derived from them.
+Skills are mapped through a sigmoid and clipped to a configurable range (default 0.15-0.98). Meals, CGM checks, rescue behavior and exercise habits derive from them; bolus dosing does not.
 
 | Trait | Sampled | Governs |
 |---|---|---|
 | `body_weight_kg` | Normal, clipped | HGO scale and the basal-dose anchor |
-| `insulin_resistance_factor` | Lognormal, clipped | `is_base`, `icr`, `correction_factor`, and the equilibrium anchor |
-| `glucose_effectiveness` | Lognormal around `GE_RATE` | Strength of the insulin-independent restoring pull |
-| `ge_anchor` | Normal about `GE_EQ_ANCHOR_MEAN`, lifted by resistance | The patient's own mean glucose level |
-| `ge_sigma_mult` | Lognormal, clipped | Within-patient glycemic variability |
+| `insulin_resistance_factor` | Lognormal, clipped | `is_base`, `icr`, and the equilibrium anchor |
+| `glucose_effectiveness` | Lognormal around `GE_RATE` | Insulin-independent pull, zero by default |
+| `ge_anchor` | Normal about `GE_EQ_ANCHOR_MEAN`, lifted by resistance | Target of that pull |
+| `ge_sigma_mult` | Lognormal, clipped | Wander of that target |
 | `meal_appetite` | Lognormal, clipped | Per-meal carb amount |
 | `basal_type` | Uniform over `BASAL_VARIANTS` | Glargine (26h) or degludec (42h) basal PK |
 | `cgm_lag_minutes` | Normal, clipped | Interstitial lag of this patient's sensor behind plasma glucose (0-20 min) |
 
-These traits are sampled independently of skill and give the population its between-patient spread in mean glucose, variability, and sensor timing.
+These traits are sampled independently of skill and give the population its between-patient spread. Each patient's `correction_factor` is derived, not sampled: the true-BG drop 4 hours after one unit, from the patient's insulin action, HGO suppression and glucose effectiveness.
 
 
 ## Insulin Sensitivity Model
@@ -119,18 +121,18 @@ Modifiers applied on top of the diurnal pattern:
 - **Post-exercise sensitivity boost**: IS is reduced by `EXERCISE_IS_REDUCTION` (10%) for `EXERCISE_IS_DURATION_HOURS` (6h) after aerobic exercise — the effect behind nocturnal hypos in active patients.
 - **Glucotoxicity**: a slow 3h EMA of true BG drives transient insulin resistance when chronically elevated, closing a positive feedback loop on hyperglycemia (high BG → more IR → harder to bring down).
 - **Postprandial insulin resistance**: while carbs are absorbing, the insulin-resistance factor is multiplied by `(1 + penalty)`, where `penalty` saturates with active carb load. In T1DM the incretin / GLP-1 sensitivity boost non-diabetics get with a meal is blunted or absent, so the absorbing-carb state is if anything mildly insulin-*resistant*.
-- **Injection site quality (lipohypertrophy)**: every dose (basal, meal bolus, corrections) is multiplied by a per-dose `site_quality` factor from `N(1.0, σ)` with σ scaling as `1/s4` — poor lifestyle consistency means poor site rotation and higher dose-to-dose variance.
+- **Injection site quality (lipohypertrophy)**: every dose (basal and bolus) is multiplied by a per-dose `site_quality` factor from `N(1.0, σ)` with σ scaling as `1/s4` — poor lifestyle consistency means poor site rotation and higher dose-to-dose variance.
 
 
 ## Behavioral Events
 
-- **Meals**: number, timing, and carb amount are all skill-dependent, and each meal decomposes into 2-5 overlapping gamma absorption components classified fast / medium / slow by the patient's `slow_carb_preference`, plus a protein/fat tail.
+- **Meals**: number, timing, and carb amount are all skill-dependent, and each meal decomposes into 2-5 overlapping gamma absorption components classified fast / medium / slow by the patient's `slow_carb_preference`. The components sum to the meal's logged grams. Meal times stay close to the daily schedule, so the small hours are meal-free.
 
-- **Basal insulin**: one long-acting injection per day, anchored to `HGO_base × 24h × (body_weight_kg / BODY_WEIGHT_MEAN_KG) × is_base / ICR` and absorbed through a Bateman one-compartment PK curve `f(t) = exp(-ke·t) − exp(-ka·t)` whose duration is the patient's assigned analogue, glargine (26h) or degludec (42h).
+- **Basal insulin**: one long-acting injection per day, anchored to `HGO_base × 24h × (body_weight_kg / BODY_WEIGHT_MEAN_KG) × is_base / ICR` and absorbed through a Bateman one-compartment PK curve `f(t) = exp(-ke·t) − exp(-ka·t)` whose duration is the patient's assigned analogue, glargine (26h) or degludec (42h). The basal dose is not titrated to BG.
 
-- **Bolus insulin**: dosed per meal from a carb count carrying skill-dependent error, with competent patients pre-bolusing and duration of action scaling as `√dose` about a 5U reference, so larger doses act longer and peak slightly later. Almost every dose is preceded by a glance at the CGM: below the patient's own hypo threshold the bolus is skipped and the meal carbs go untreated, and within 30 mg/dL above it the dose is cut.
+- **Bolus insulin**: count, clock time and dose are drawn independently of meals, carbs and BG — a deliberate departure from how patients dose, so the insulin channel carries its own effect rather than a meal's shadow. Each day has a night window of boluses in the meal-free small hours and a separate daytime stream; each day's units cover that day's planned meals and the liver output the basal leaves uncovered. Duration of action scales as `√dose` about a 5U reference. Almost every dose is preceded by a glance at the CGM: below the patient's own hypo threshold the bolus is skipped, and within 30 mg/dL above it the dose is cut. There are no correction boluses.
 
-- **Corrections**: the CGM is checked at skill-dependent intervals, high-competence patients subtracting insulin-on-board before correcting and attentive ones acting on BG *trends* preemptively, while extremes above 300 mg/dL or below the 55 mg/dL severe-hypo threshold can trigger rage bolusing or reflexive rescue eating. What counts as low is one number per patient — a `hypo_threshold` spanning 70-90 mg/dL across the skill range, higher for the attentive and competent — and that single value fires the rescue, gates every bolus, and sets the bar for exercise. Before eating again the patient nets off the rescue carbohydrate still absorbing, in a competence-scaled fraction, so one low is treated once rather than every few minutes; a rage-eat roll, likelier the less competent the patient, drops that arithmetic and treats on the reading alone.
+- **Hypo rescue**: the CGM is checked at skill-dependent intervals while awake; asleep, only a reading below the 55 mg/dL severe threshold wakes the patient. What counts as low is one number per patient — a `hypo_threshold` spanning 70-90 mg/dL across the skill range — and that single value fires the rescue, gates every bolus, and sets the bar for exercise. A rescue is sized to lift the projected BG to 20 mg/dL above that threshold; the projection nets off rescue carbohydrate still absorbing, in a competence-scaled fraction, and a rage-eat roll drops that arithmetic. Attentive patients also eat small preemptive amounts when BG falls fast below 110 mg/dL.
 
 - **Exercise**: skill-dependent probability, reduced on weekends, modelled as a negative carb-equivalent gamma curve plus the post-exercise IS boost above. A planned session starts only if BG sits at least 20 mg/dL above the patient's hypo threshold — exercise is negative food, so setting out already low drives BG straight down — and a session that never starts leaves no sensitivity tail behind it.
 
