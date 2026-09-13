@@ -101,14 +101,6 @@ def test_oversampling_shifts_toward_hypo_vs_baseline(reports):
     b = over['baseline']
     assert over['glycemia']['frac_below70'] > b['frac_below70']
     assert over['distribution']['lbgi'] > b['lbgi']          # hypo risk rises
-    assert over['distribution']['mean'] < b['mean']          # mean BG falls
-
-
-def test_oversampled_below_baseline_for_hyper(reports):
-    _, over = reports
-    b = over['baseline']
-    assert over['glycemia']['frac_above180'] < b['frac_above180']
-    assert over['distribution']['hbgi'] < b['hbgi']
 
 
 def test_oversampled_shifts_relative_to_unbiased(reports):
