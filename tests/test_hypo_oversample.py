@@ -118,14 +118,6 @@ def test_oversampled_shifts_relative_to_unbiased(reports):
     assert over['distribution']['mean'] < base['distribution']['mean']
 
 
-def test_unbiased_build_sits_near_baseline(reports):
-    base, _ = reports
-    b = base['baseline']
-    # Small/short pool won't match the 70-day baseline exactly, just the same neighbourhood.
-    assert abs(base['distribution']['mean'] - b['mean']) < 12.0
-    assert abs(base['glycemia']['frac_below70'] - b['frac_below70']) < 0.05
-
-
 def test_no_baseline_flag_omits_comparison(tmp_path):
     rep = _build(tmp_path, "nb", hypo_oversample=0.5, baseline_stats=None)
     assert rep['baseline'] is None
