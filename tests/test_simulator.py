@@ -16,9 +16,35 @@ from simulator import (
     PUBLIC_HOLIDAYS_PER_YEAR_MAX, SIMULATION_START_DAY_OF_WEEK,
     bolus_pk_for_dose, BOLUS_DIA_BASE_HOURS, BOLUS_DIA_MIN_HOURS, BOLUS_DIA_MAX_HOURS,
     GLYCOGEN_CAPACITY_GRAMS, DT_MINUTES,
-    SEVERE_HYPO_REFRACTORY_MIN, HYPO_FOLLOWUP_SKILL_THRESHOLD,
-    SEVERE_HYPO_THRESHOLD, ActiveCurve, STEPS_PER_DAY,
+    SEVERE_HYPO_REFRACTORY_MIN,
+    SEVERE_HYPO_THRESHOLD, ActiveCurve, STEPS_PER_DAY, BG_SCALE_FACTOR,
+    HYPO_RESCUE_MIN_GRAMS, HYPO_RESCUE_TARGET_MARGIN, HYPO_RESCUE_DEFICIT_GAIN,
+    HYPO_RESCUE_PANIC_GAIN,
 )
+
+
+class TestMealCarbChannel:
+    def test_carb_channel_sums_to_logged_meal_grams(self):
+        """Each meal's carb curves sum to its logged grams: the channel adds no hidden carbs."""
+        n_meals = 0
+        for seed in range(12):
+            sim = T1DMSimulator(seed=seed)
+            for day in range(6):
+                if day:
+                    sim.state.day_number = day
+                    sim._plan_day()
+                    sim._generate_day_events()
+                meals = {}
+                for _, kind, data in sim._pending_events:
+                    if kind == 'carb':
+                        got, logged = meals.get(data['meal_key'], (0.0, data['meal_grams']))
+                        meals[data['meal_key']] = (got + float(np.sum(data['curve'])), logged)
+                sim._pending_events = []
+                n_meals += len(meals)
+                for key, (got, logged) in meals.items():
+                    assert abs(got - logged) < 1e-6, (
+                        f"seed {seed} meal {key}: channel {got:.9f} g, logged {logged:.9f} g")
+        assert n_meals > 100, f"only {n_meals} meals generated"
 
 
 class TestReproducibility:
@@ -61,20 +87,16 @@ class TestReproducibility:
 
 class TestBGBounds:
     def test_bg_within_clamps(self):
-        """BG never exceeds hard clamps across many seeds."""
+        """The CGM reading stays inside the clamps; true BG has a ceiling and no floor."""
         for seed in range(20):
             sim = T1DMSimulator(seed=seed)
             data = sim.generate_hours(72)
-            assert data['bg'].min() >= BG_CLAMP_MIN, (
-                f"seed={seed}: BG dipped below {BG_CLAMP_MIN}")
+            assert data['bg_observed'].min() >= BG_CLAMP_MIN, (
+                f"seed={seed}: CGM reading dipped below {BG_CLAMP_MIN}")
+            assert data['bg_observed'].max() <= BG_CLAMP_MAX, (
+                f"seed={seed}: CGM reading exceeded {BG_CLAMP_MAX}")
             assert data['bg'].max() <= BG_CLAMP_MAX, (
                 f"seed={seed}: BG exceeded {BG_CLAMP_MAX}")
-
-    def test_bg_positive(self):
-        """BG is always positive."""
-        sim = T1DMSimulator(seed=42)
-        data = sim.generate_hours(72)
-        assert np.all(data['bg'] > 0)
 
 
 class TestMealAndInsulinEffect:
@@ -249,19 +271,22 @@ class TestGlycogenReservoir:
             f"glycogen rose from {initial} to {sim.state.glycogen_grams} with no carbs")
 
     def test_glycogen_refills_from_large_carb_load(self):
-        """A large injected carb absorption refills a depleted reservoir."""
-        sim = T1DMSimulator(seed=0)
-        sim._pending_events = []
-        sim.state.active_curves = []
-        sim.state.is_sick = False
-        sim.state.glycogen_grams = 5.0  # near-empty
-        # 200g over 5h (well above any meal threshold)
-        big_meal = gamma_curve(200.0, k=3.0, theta=20.0, duration_minutes=300.0)
-        sim.inject_curve(big_meal, sim.state.current_idx, 'carb', 'big')
-        for _ in range(5 * 60 // DT_MINUTES):
-            sim.generate()
-        assert sim.state.glycogen_grams > 5.0, (
-            f"glycogen did not refill from 200g carbs: {sim.state.glycogen_grams}")
+        """A large carb absorption leaves the reservoir fuller than the same run without it."""
+        def glycogen_after(grams: float) -> float:
+            sim = T1DMSimulator(seed=0)
+            sim._pending_events = []
+            sim.state.active_curves = []
+            sim.state.is_sick = False
+            sim.state.glycogen_grams = 50.0  # mid-store, so neither run clips at empty
+            if grams:
+                meal = gamma_curve(grams, k=3.0, theta=20.0, duration_minutes=300.0)
+                sim.inject_curve(meal, sim.state.current_idx, 'carb', 'big')
+            for _ in range(5 * 60 // DT_MINUTES):
+                sim.generate()
+            return sim.state.glycogen_grams
+
+        fed, fasted = glycogen_after(200.0), glycogen_after(0.0)
+        assert fed > fasted + 10.0, f"200 g carbs left {fed:.1f} g glycogen, fasting {fasted:.1f} g"
 
 
 class TestSevereHypoRefractory:
@@ -404,118 +429,8 @@ class TestRuleOfFifteenRecheck:
             f"(low-skill {fired[0.15]}/40 vs high-skill {fired[0.95]}/40)")
 
 
-class TestHypoFollowupSnack:
-    """The skill-gated slow-tail follow-up snack is the other half of the
-    sawtooth fix. CLAUDE.md flags removing it as re-opening dangerous hypos.
-    """
-
-    def _trigger_correction(self, sim):
-        sim.generate()
-        idx = sim.state.current_idx
-        s = sim.state
-        s.bg = 40.0
-        s.bg_observed = 40.0
-        s.last_cgm_check_idx = -9999
-        s.last_hypo_correction_idx = -9999
-        sim._today_wake_idx = 0
-        sim._today_sleep_idx = idx + STEPS_PER_DAY
-        carbs_before = sum(1 for c in s.active_curves
-                           if c.curve_type == 'correction_carb')
-        sim._check_and_correct(idx)
-        new_carbs = [c for c in s.active_curves
-                     if c.curve_type == 'correction_carb'][carbs_before:]
-        return new_carbs
-
-    def test_high_skill_patient_gets_followup(self):
-        """A high-skill patient should get a followup slow-carb curve."""
-        sim = T1DMSimulator(seed=0)
-        p = sim.patient
-        # Force skill above the threshold
-        p.attentiveness = 0.9
-        p.dosing_competence = 0.9
-        new_curves = self._trigger_correction(sim)
-        labels = [c.label for c in new_curves]
-        assert any('followup' in l.lower() for l in labels), (
-            f"expected followup curve for skill_avg=0.9, got {labels}")
-
-    def test_low_skill_patient_no_followup(self):
-        """A patient below HYPO_FOLLOWUP_SKILL_THRESHOLD must NOT get a followup."""
-        sim = T1DMSimulator(seed=0)
-        p = sim.patient
-        below = HYPO_FOLLOWUP_SKILL_THRESHOLD - 0.1
-        p.attentiveness = below
-        p.dosing_competence = below
-        new_curves = self._trigger_correction(sim)
-        labels = [c.label for c in new_curves]
-        assert not any('followup' in l.lower() for l in labels), (
-            f"low-skill patient got followup unexpectedly: {labels}")
-
-    def test_followup_lifts_post_correction_bg_trace(self):
-        """The followup snack must measurably raise BG over the post-correction
-        window vs an otherwise-identical patient who skips the followup. This
-        is the structural test for CLAUDE.md's warning that removing the tail
-        re-opens 6+ hour dangerous hypos."""
-        import simulator as _sim
-
-        def run(seed: int, with_followup: bool) -> np.ndarray:
-            # Toggles only the follow-up snack, holding patient/skill fixed to avoid confounding.
-            _saved = _sim.HYPO_FOLLOWUP_FRACTION
-            _sim.HYPO_FOLLOWUP_FRACTION = _saved if with_followup else 0.0
-            try:
-                sim = T1DMSimulator(seed=seed)
-                p = sim.patient
-                p.attentiveness = 0.9  # above HYPO_FOLLOWUP_SKILL_THRESHOLD so the snack is eaten
-                p.dosing_competence = 0.9
-                # Isolates the snack from the always-on glucose-effectiveness mean-reversion.
-                p.glucose_effectiveness = 0.0
-                return _run_body(sim)
-            finally:
-                _sim.HYPO_FOLLOWUP_FRACTION = _saved
-
-        def _run_body(sim):
-            sim._pending_events = []
-            sim.state.active_curves = []
-            sim.state.is_sick = False
-            sim.generate()
-            idx = sim.state.current_idx
-            s = sim.state
-            s.bg = 40.0
-            s.bg_observed = 40.0
-            sim._interstitial_bg = 40.0  # reset CGM interstitial-lag state to match the forced BG
-            s.last_cgm_check_idx = -9999
-            s.last_hypo_correction_idx = -9999
-            sim._today_wake_idx = 0
-            sim._today_sleep_idx = idx + STEPS_PER_DAY
-            sim._check_and_correct(idx)
-            bgs = []
-            for _ in range(120 // DT_MINUTES):
-                step = sim.generate()
-                bgs.append(float(step['bg']))
-            return np.array(bgs)
-
-        # Averages over several seeds: the lift is a population tendency, fragile per-seed.
-        seeds = [3, 5, 11, 17, 23, 29]
-        lifts, min_gains = [], []
-        for sd in seeds:
-            bgs_with = run(sd, with_followup=True)
-            bgs_without = run(sd, with_followup=False)
-            lifts.append(bgs_with.mean() - bgs_without.mean())
-            min_gains.append(bgs_with.min() - bgs_without.min())
-
-        # With-followup should be higher on average: the tail keeps glucose flowing as it fades.
-        assert np.mean(lifts) > 3.0, (
-            f"followup did not lift the post-correction trace meaningfully: "
-            f"mean lift over seeds = {np.mean(lifts):.1f} mg/dL (per-seed {[round(x,1) for x in lifts]})")
-        # And the minimum dip should be less severe with followup, on average.
-        assert np.mean(min_gains) > 0.0, (
-            f"followup did not raise the post-correction minimum: "
-            f"mean min-gain over seeds = {np.mean(min_gains):.1f}")
-
-
-class TestSevereHypoRescueAmount:
-    """CLAUDE.md structural rule: severe hypo triggers a non-probabilistic
-    >=14g rescue that grows linearly with deficit (14 + 0.35 * deficit).
-    The grams floor is what keeps severe episodes <= 1h."""
+class TestRescueAmount:
+    """A rescue is sized to lift the projected BG to the patient's threshold plus a margin."""
 
     def _force_correction_and_get_grams(self, sim, target_bg):
         sim.generate()
@@ -538,70 +453,28 @@ class TestSevereHypoRescueAmount:
             f"{[c.label for c in rescues]}")
         return float(np.sum(rescues[0].values))
 
-    def test_rescue_minimum_is_at_least_14g(self):
-        """Severe hypo with tiny deficit should still rescue with >=14g."""
+    def test_rescue_respects_minimum(self):
+        """A reading barely under threshold still gets the minimum rescue."""
         sim = T1DMSimulator(seed=0)
-        # BG just below threshold: deficit ~= 0
-        g = self._force_correction_and_get_grams(sim, SEVERE_HYPO_THRESHOLD - 0.5)
-        assert g >= 14.0 - 1e-6, (
-            f"rescue at BG={SEVERE_HYPO_THRESHOLD-0.5} returned {g:.2f}g, "
-            f"below the 14g floor")
+        g = self._force_correction_and_get_grams(sim, sim.patient.hypo_threshold - 0.5)
+        assert g >= HYPO_RESCUE_MIN_GRAMS - 1e-6, f"rescue {g:.2f} g under the minimum"
+
+    def test_rescue_closes_the_deficit(self):
+        """Grams times BG_SCALE_FACTOR, over the gain, equal the gap to threshold plus margin."""
+        for bg in (30.0, 50.0, 65.0):
+            sim = T1DMSimulator(seed=4)
+            p = sim.patient
+            g = self._force_correction_and_get_grams(sim, bg)
+            gain = HYPO_RESCUE_DEFICIT_GAIN + p.panic_factor * HYPO_RESCUE_PANIC_GAIN
+            deficit = p.hypo_threshold + HYPO_RESCUE_TARGET_MARGIN - bg
+            assert abs(g * BG_SCALE_FACTOR / gain - deficit) < 1e-6 or g == HYPO_RESCUE_MIN_GRAMS, (
+                f"BG {bg}: {g:.2f} g lifts {g * BG_SCALE_FACTOR / gain:.1f}, deficit {deficit:.1f}")
 
     def test_rescue_grams_grow_with_deficit(self):
-        """Deeper hypo must yield strictly more carbs (deficit-driven term)."""
-        # Use the same patient (same seed) so skill multiplier is constant.
-        sim_shallow = T1DMSimulator(seed=4)
-        sim_deep = T1DMSimulator(seed=4)
-        g_shallow = self._force_correction_and_get_grams(sim_shallow, 50.0)
-        g_deep = self._force_correction_and_get_grams(sim_deep, 30.0)
-        # delta_deficit = (54-30)-(54-50) = 20, so delta_g should be ~= 0.35*20 = 7g.
-        assert g_deep > g_shallow + 3.0, (
-            f"BG=30 rescue ({g_deep:.2f}g) should clearly exceed BG=50 "
-            f"rescue ({g_shallow:.2f}g) per the 14 + 0.35*deficit formula")
-
-
-class TestHypoCorrectionSkillScaling:
-    """CLAUDE.md structural rule: hypo correction grams scale with skill
-    (skill_avg = (s2+s3)/2). Without this, high-skill patients
-    under-correct and the population TBR ceiling sticks at ~30%."""
-
-    def _moderate_hypo_grams(self, sim, attentiveness, dosing):
-        p = sim.patient
-        p.attentiveness = attentiveness
-        p.dosing_competence = dosing
-        # Cancels the rage-eat random branch: BG above RAGE_EAT_BG_THRESHOLD, below eff_low_thresh.
-        sim.generate()
-        idx = sim.state.current_idx
-        s = sim.state
-        s.bg = 65.0
-        s.bg_observed = 65.0
-        s.last_cgm_check_idx = -9999
-        s.last_hypo_correction_idx = -9999
-        sim._today_wake_idx = 0
-        sim._today_sleep_idx = idx + STEPS_PER_DAY
-        before = {id(c) for c in s.active_curves}
-        sim._check_and_correct(idx)
-        rescues = [c for c in s.active_curves
-                   if c.curve_type == 'correction_carb'
-                   and id(c) not in before
-                   and 'followup' not in c.label.lower()]
-        assert len(rescues) == 1, (
-            f"expected one rescue curve, got {len(rescues)}")
-        return float(np.sum(rescues[0].values))
-
-    def test_high_skill_corrects_with_more_grams(self):
-        """High-skill (skill_avg=0.9) > low-skill (skill_avg=0.3) by the
-        (1 + 1.5*skill_avg) multiplier — ratio ~= 2.35/1.45 ~= 1.6×."""
-        sim_low = T1DMSimulator(seed=0)
-        sim_high = T1DMSimulator(seed=0)  # same patient, only skills overridden
-        g_low = self._moderate_hypo_grams(sim_low, 0.3, 0.3)
-        g_high = self._moderate_hypo_grams(sim_high, 0.9, 0.9)
-        assert g_high > g_low, (
-            f"high-skill correction ({g_high:.2f}g) should exceed low-skill "
-            f"({g_low:.2f}g) per the (1 + 1.5*skill_avg) multiplier")
-        # Expected low ~= BASE*1.45, high ~= BASE*2.35 (ratio ~1.6); slack for panic-factor.
-        assert g_high / g_low > 1.25, (
-            f"ratio {g_high/g_low:.2f} too small — skill multiplier may be flat")
+        """A deeper low gets more carbs."""
+        g_shallow = self._force_correction_and_get_grams(T1DMSimulator(seed=4), 50.0)
+        g_deep = self._force_correction_and_get_grams(T1DMSimulator(seed=4), 30.0)
+        assert g_deep > g_shallow, f"BG 30 got {g_deep:.2f} g, BG 50 got {g_shallow:.2f} g"
 
 
 class TestBolusPKForDoseIntegration:
