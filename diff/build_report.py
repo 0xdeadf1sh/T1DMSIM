@@ -34,6 +34,7 @@ from compare_all_datasets import (  # noqa: E402
 )
 from simulator import T1DMSimulator  # noqa: E402
 import extended_stats as es  # noqa: E402
+import dynamics_stats as ds  # noqa: E402
 
 
 COL = {"Ohio": "#1f77b4", "Shanghai": "#ff7f0e",
@@ -427,7 +428,9 @@ def assemble_sim(n_seeds=30, days=70, warmup_h=24):
     for seed in range(n_seeds):
         s = T1DMSimulator(seed=seed, initial_bg=120.0)
         s.generate_hours(warmup_h)
+        start_idx = s.state.current_idx
         d = s.generate_hours(days * 24)
+        d["injection_log"], d["start_idx"] = s.injection_log, start_idx
         bg = np.asarray(d["bg_observed"], dtype=float)
         # Advances origin by warmup so weekday matches the sim internal clock (starts Monday).
         t0 = datetime(2024, 1, 1) + timedelta(hours=warmup_h)
@@ -1747,7 +1750,7 @@ def _build_ml_section(cohorts, distances, pooled_moments, pooled_percentiles,
 
 def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
                     pooled_risk, cohort_summaries, recov_summaries,
-                    az_event_stats, sim_event_stats, unexpl_stats, ext, path):
+                    az_event_stats, sim_event_stats, unexpl_stats, ext, dyn, path):
     """Templates the full markdown report from computed stats. Tables come
     from the same numbers as stats.json; prose stays neutral/observational
     so re-runs after simulator changes need no hand-editing."""
@@ -1861,6 +1864,7 @@ def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
 
     # ML-friendly section (volume, normalization, class balance, autocorr, ...)
     ext_section_md = _build_extended_section(ext, cohorts)
+    dyn_section_md = _build_dynamics_section(dyn)
     ml_section_md = _build_ml_section(cohorts, distances, pooled_moments,
                                        pooled_percentiles, cohort_summaries)
 
@@ -2111,6 +2115,8 @@ def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
 | KS statistic | {distances['Sim_vs_Ohio']['ks_stat']:.3f} | {distances['Sim_vs_Shanghai']['ks_stat']:.3f} | {distances['Sim_vs_AZT1D']['ks_stat']:.3f} | {distances['Ohio_vs_Shanghai']['ks_stat']:.3f} | {distances['Ohio_vs_AZT1D']['ks_stat']:.3f} | {distances['Shanghai_vs_AZT1D']['ks_stat']:.3f} |
 
 {ext_section_md}
+
+{dyn_section_md}
 """
     # Trims whitespace inside **bold** markers (else GitHub refuses to bold padded values).
     md = re.sub(r"\*\*[ \t]*([^*\n]+?)[ \t]*\*\*", r"**\1**", md)
@@ -2276,6 +2282,109 @@ def compute_extended(cohorts, pooled_moments, pooled_risk):
     return ext
 
 
+def _build_dynamics_section(dyn):
+    """Section 11 markdown from the dynamics dict. Simulator only; observational."""
+    dr, band, cl = dyn["dose_response"], dyn["band_response"], dyn["closed_loop"]
+    bc, rs, cb = dyn["bolus_context"], dyn["rescue"], dyn["carb_balance"]
+    mi = dyn["meal_bolus_coupling"]
+    hz = ds.HORIZONS_MIN
+
+    def r(v, f=".1f"):
+        return "n/a" if v is None or not np.isfinite(v) else f"{v:{f}}"
+
+    def cells(vals, f="+.1f"):
+        return " | ".join(r(v, f) for v in vals) if vals else " | ".join("n/a" for _ in hz)
+
+    head = " | ".join(f"{h} min" for h in hz)
+    rule = "|".join("---:" for _ in hz)
+    dose_rows = "\n".join(
+        f"| {u:g} U | " + cells([dr["mean_delta"][str(h)][j] for h in hz])
+        + f" | {r(dr['per_unit_4h'][j], '+.1f')} | {r(dr['marginal_per_unit_4h'][j], '+.1f')} |"
+        for j, u in enumerate(dr["doses_u"]))
+    band_rows = "\n".join(f"| {k} | {v['n']} | {r(v['per_unit_4h'], '+.1f')} |"
+                          for k, v in band["bands"].items())
+    labels = {"isolated": "Isolated (under 2 g of meal carbs from 3 h before to 4 h after)",
+              "carbs_follow": "Meal carbs follow (20 g or more in the next 3 h)",
+              "no_carbs_follow": "No meal carbs follow (under 2 g in the next 3 h)"}
+    ctx_rows = "\n".join(f"| {labels[k]} | {g['n']} | {cells(g['mean_delta'])} |"
+                         for k, g in bc["groups"].items())
+    dose_bin_rows = "\n".join(
+        f"| Isolated, {b['lo_u']:g}–{b['hi_u']:g} U | {b['n']} | {cells(b['mean_delta'])} |"
+        for b in bc["isolated_by_dose"])
+    mi_rows = "\n".join(f"| {lag:+.0f} | {bits:.4f} |"
+                        for lag, bits in zip(mi["lags_min"], mi["mi_bits"]))
+    return f"""## 11. Insulin and rescue dynamics (T1DMSIM only)
+
+Each probe forks the simulator at a quiet point (no carbs or bolus within 2 h either side) into
+arms that differ only by one injected bolus. Both arms share the physiology and sensor noise
+stream. Open-loop arms stop every behaviour after the fork; closed-loop arms keep it. ΔBG is true
+BG in the dosed arm minus the undosed arm. {dr['n_probes']} probes.
+
+### 11.1 Open-loop dose-response
+
+| Dose | {head} | ΔBG per U at 4 h | Marginal ΔBG per U at 4 h |
+|---|{rule}|---:|---:|
+{dose_rows}
+
+Mean patient correction factor {r(dr['correction_factor_mean'])} mg/dL/U; mean true-BG drop 4 h after
+1 U {r(dr['drop_1u_4h_mean'])} mg/dL.
+
+Probes whose ΔBG is non-increasing in dose: {r(dr['monotone_pct_2h'])}% at 2 h,
+{r(dr['monotone_pct_4h'])}% at 4 h, {r(dr['monotone_pct_both'])}% at both.
+
+### 11.2 Open-loop response by starting BG ({band['units']:g} U, 4 h)
+
+Every probe restarts at the midpoint of each band, so both rows hold the same patients.
+
+| Starting band (mg/dL) | Probes | ΔBG per U |
+|---|---:|---:|
+{band_rows}
+
+Low-band over high-band per-unit ratio: {r(band['low_over_high'], '.2f')}.
+
+### 11.3 Closed-loop retention ({cl['units']:g} U, 4 h)
+
+| Open-loop ΔBG | Closed-loop ΔBG | Retention | Extra rescue carbs, mean | Probes with extra rescue |
+|---:|---:|---:|---:|---:|
+| {r(cl['open_loop_4h'], '+.1f')} | {r(cl['closed_loop_4h'], '+.1f')} | {r(cl['retention_pct'], '.0f')}% | {r(cl['extra_rescue_g_mean'])} g | {r(cl['extra_rescue_probe_pct'], '.0f')}% |
+
+### 11.4 Forward CGM ΔBG after a bolus
+
+{bc['n_bolus']} bolus injections; {r(bc['isolated_pct'])}% have under 2 g of meal carbs within 3 h
+either side. Isolated ΔBG non-increasing in
+dose bin at every horizon (bins with at least {ds.MIN_BIN_EVENTS} events):
+{'yes' if bc['isolated_monotone_in_dose'] else 'no'}.
+
+| Context | n | {head} |
+|---|---:|{rule}|
+{ctx_rows}
+{dose_bin_rows}
+
+### 11.5 Hypo rescue
+
+Per CGM episode below 70 mg/dL lasting 15 min or more; rescue carbs counted from 30 min before
+the episode to 30 min after it.
+
+| Episodes / day | Rescued | Latency to first rescue, median | Grams, median | Grams, p90 | Rescue injections / day |
+|---:|---:|---:|---:|---:|---:|
+| {r(rs['episodes_per_day'], '.2f')} | {r(rs['rescued_pct'], '.0f')}% | {r(rs['latency_min_median'], '+.0f')} min | {r(rs['grams_median'])} | {r(rs['grams_p90'])} | {r(rs['rescue_injections_per_day'], '.2f')} |
+
+### 11.6 Carb channel and meal–bolus coupling
+
+Largest gap between a meal's carb-channel grams and its logged grams: {cb['max_abs_error_g']:.2e} g
+over {cb['n_meals']} meals.
+
+Mutual information between meal grams and bolus units in 30-minute bins (positive lag: bolus after
+meal). Bound: the largest value over every lag with the bolus series shifted by 1 to
+{ds.MI_NULL_WEEK_SHIFTS} whole weeks: {mi['null_bound_bits']:.4f} bits. Every lag below it:
+{'yes' if mi['below_bound'] else 'no'}.
+
+| Lag (min) | MI (bits) |
+|---:|---:|
+{mi_rows}
+"""
+
+
 def _build_extended_section(ext, cohorts):
     """Section 12 markdown from the extended-stats dict. Observational only."""
     O, S, A, M = "Ohio", "Shanghai", "AZT1D", "Sim"
@@ -2423,6 +2532,8 @@ def main():
                     help="simulated days per seed (default 70)")
     ap.add_argument("--warmup-h", type=int, default=24,
                     help="warm-up hours discarded per seed (default 24)")
+    ap.add_argument("--probe-seeds", type=int, default=25,
+                    help="seeds forked for the dose-response probes (default 25)")
     cfg = ap.parse_args()
 
     print("Loading OhioT1DM…")
@@ -2446,6 +2557,8 @@ def main():
                                       warmup_h=cfg.warmup_h)
     sim = assemble_cohort("Sim", sim_items, trivial_regularize_5min, step_min=5)
     print(f"  {len(sim['per'])} simulator runs")
+    print("Insulin and rescue dynamics…")
+    dyn = ds.compute_dynamics(sim_raw, cfg.probe_seeds)
 
     cohorts = {"Ohio": ohio, "Shanghai": shang, "AZT1D": azt1d, "Sim": sim}
 
@@ -2572,6 +2685,7 @@ def main():
                        if k not in ("basal_values", "carb_values")},
         "unexplained_excursions": unexpl_stats,
         "extended": ext,
+        "dynamics": dyn,
     }
     out = os.path.join(DIFF, "stats.json")
     with open(out, "w") as f:
@@ -2582,7 +2696,7 @@ def main():
     report_path = os.path.join(DIFF, "README.md")
     write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
                     pooled_risk, cohort_summaries, recov_summaries,
-                    az_event_stats, sim_event_stats, unexpl_stats, ext,
+                    az_event_stats, sim_event_stats, unexpl_stats, ext, dyn,
                     report_path)
     print(f"Wrote {report_path}")
     print(f"Figures in {FIGS}")
