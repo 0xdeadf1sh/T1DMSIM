@@ -192,7 +192,7 @@ BG_TARGET = 158.0  # Aims near real median ~155-157; sim correction kinetics ove
 BG_HIGH_THRESHOLD = 175.0  # Corrections fire moderately above BG_TARGET=158.
 BG_LOW_THRESHOLD = 60.0  # Hypo-band floor label; the acting trigger is per-patient hypo_threshold.
 # Per-patient hypo threshold centred on HYPO_THRESHOLD_MEDIAN; drives the rescue AND blocks boluses.
-HYPO_THRESHOLD_MEDIAN = 80.0      # threshold of a median-skill patient (mg/dL)
+HYPO_THRESHOLD_MEDIAN = 30.0      # threshold of a median-skill patient (mg/dL)
 HYPO_THRESHOLD_SKILL_SPAN = 10.0  # mg/dL dev at each skill end; population spans MEDIAN +/- this.
 HYPO_THRESHOLD_SKILL_MID = 0.5  # median skill_avg; piecewise since SKILL_MIN/MAX aren't symmetric.
 
@@ -211,6 +211,7 @@ HYPO_CORRECTION_BASE_GRAMS = 8.0  # Under rule-of-15's 15g; deficit-scaling form
 HYPO_PANIC_FACTOR_BASE = 1.0  # How much extra is eaten, scaled by 1/s3
 HYPO_DETECTION_AWAKE_MINUTES = 5.0  # Detection delay awake
 HYPO_DETECTION_ASLEEP_LAMBDA = 30.0  # Exp. mean detection delay asleep; severe hypo bypasses this.
+ASLEEP_WAKE_HIGH_BG = 300.0  # Asleep, a high above this may wake the patient after that delay.
 
 # Exercise
 EXERCISE_PROBABILITY_BASE = 0.3  # Base daily probability
@@ -287,8 +288,8 @@ INSULIN_ABSORPTION_NOISE_SIGMA = 0.0  # [MINNOISE] removed; basal/bolus curves w
 
 # BG computation
 BG_SCALE_FACTOR = 3.5  # 1.5->3.5: Sg now supplies in-band restore; 1.5 over-damped corrections too.
-BG_CLAMP_MIN = 10.0  # 40->10: CGM stops reporting at 40; patient keeps falling. Keeps log defined.
-BG_CLAMP_MAX = 400.0  # [HIVAR] 500→400 — match real CGM device ceiling (Ohio/AZT1D max = 400).
+BG_CLAMP_MIN = -40.0  # 10->-40. Below 1 mg/dL the Kovatchev log is NaN: T1DMAI cannot consume it.
+BG_CLAMP_MAX = 350.0  # 400->350; the real CGM device ceiling (Ohio/AZT1D) is 400.
 BG_INITIAL_MEAN = 120.0
 BG_INITIAL_SIGMA = 60.0  # [HIVAR] 30→60 — wider warmup start (washes out over the run).
 BG_INITIAL_FLOOR = 40.0  # Clipping initial draw at CLAMP_MIN starts patients in severe hypo (~4%).
@@ -296,16 +297,16 @@ BG_INITIAL_FLOOR = 40.0  # Clipping initial draw at CLAMP_MIN starts patients in
 # Soft bounds: near floor/ceiling, a step closes at most SOFT_APPROACH_FRACTION of headroom (decay).
 
 # BG never reaches the hard clamp under normal dynamics; the clamp is kept only as a backstop.
-BG_SOFT_FLOOR = 20.0  # 50->20: tracks BG_CLAMP_MIN; at 50 damping re-imposed the removed taper.
-BG_SOFT_CEILING = 385.0        # [HIVAR] 400→385 — keep a soft runway below the new 400 hard ceiling
+BG_SOFT_FLOOR = -30.0  # 20->-30: tracks BG_CLAMP_MIN; at 50 damping re-imposed the removed taper.
+BG_SOFT_CEILING = 335.0        # 385->335: a soft runway below the 350 hard ceiling
 SOFT_APPROACH_FRACTION = 0.15  # [DAMP] 0.3→0.15 — stronger delta-damping as BG nears the bounds.
 
 # BG regulatory computation
 RENAL_THRESHOLD = 180.0  # Kidneys start excreting glucose above this
 RENAL_CLEARANCE_RATE = 0.015  # 0.005->0.015: arrests hyper excursions faster (shorter/shallower).
-COUNTER_REGULATORY_THRESHOLD = 70.0  # Body releases glucagon below this
+COUNTER_REGULATORY_THRESHOLD = 20.0  # Body releases glucagon below this
 COUNTER_REGULATORY_RATE = 1.5  # [DAMP] 0.8→1.5 — arrest hypo excursions faster.
-SEVERE_HYPO_THRESHOLD = 55.0  # Below this, glucagon dump kicks in
+SEVERE_HYPO_THRESHOLD = 5.0  # Below this, glucagon dump kicks in
 SEVERE_HYPO_GLUCAGON_RATE = 2.0  # Extra mg/dL per step at severity=1.0
 
 # Glucose effectiveness (Bergman Sg): always-on insulin-independent pull to a stochastic OU target.
@@ -341,7 +342,7 @@ GE_DAY_RAMP_HOURS = 3.0    # smootherstep ramp width for the day/night setpoint 
 GE_REL_SIGMA = 0.30  # per-patient lognormal spread of Sg around GE_RATE (~2x inter-individual).
 GE_RATE_MIN = 0.004        # floor so no patient is a pure (undamped) integrator
 GE_RATE_MAX = 0.150  # Raised so the strong per-patient Sg (lognormal around GE_RATE) isn't clipped.
-GE_EQ_FLOOR = 64.0  # 75->60->64: kept above SEVERE_HYPO_THRESHOLD=55 so the pull stays up in a low.
+GE_EQ_FLOOR = 14.0  # 64->14: kept above SEVERE_HYPO_THRESHOLD=5 so the pull stays up in a low.
 
 # CGM lag: first-order diffusion dIG/dt=(BG-IG)/tau (Rebrin/Steil), applied before sensor noise.
 
@@ -367,7 +368,7 @@ RARE_EVENT_SKILL_REDUCTION = 0.3  # Even skilled people have bad days sometimes
 
 # Post-hypo basal stand-down prevents cascading corrections; patients suspend basal, not carbs.
 HYPO_CORRECTION_REFRACTORY_MIN = 20.0  # Min minutes between hypo corrections (moderate hypo 55-70).
-SEVERE_HYPO_REFRACTORY_MIN = 10.0  # Shorter gap for severe hypo (<55); first rescue's carbs act.
+SEVERE_HYPO_REFRACTORY_MIN = 10.0  # Shorter gap for severe hypo; first rescue's carbs act.
 # Without this gap, rage-eating stacked 3-5 doses (60+g), sawtoothing hypo vs overcorrection peaks.
 POST_HYPO_BASAL_SUSPEND_DURATION_HOURS = 6.0  # sin^2 caps 10-min change ~3-6%; was 2h (56% drops).
 POST_HYPO_BASAL_SUSPEND_FACTOR = 0.65  # Peak basal mult; shallower than legacy, same integral.
@@ -413,7 +414,7 @@ TREND_CORRECTION_WINDOW_STEPS = 6      # BG history window for trend (6 steps = 
 TREND_HIGH_RATE_THRESHOLD = 5.0  # mg/dL/step; modest so flat climbs into 200-250 trip the gate.
 TREND_HIGH_BG_MIN = 145.0  # Below eff_high_thresh's 160 (high-skill) so the window isn't empty.
 TREND_LOW_RATE_THRESHOLD = -5.0        # mg/dL/step falling trend to trigger preemptive carb
-TREND_LOW_BG_MAX = 110.0  # Attentive patients eat preemptively while falling through 90-110.
+TREND_LOW_BG_MAX = 60.0  # Attentive patients eat preemptively while falling through 40-60.
 
 # ALCOHOL MODELING
 
@@ -1481,14 +1482,14 @@ class T1DMSimulator:
         p = self.patient
         s = self.state
 
-        # Severe hypo (<55) is unignorable; awake acts now, asleep wakes. Bypasses 6h+ danger.
+        # Severe hypo is unignorable; awake acts now, asleep wakes. Bypasses 6h+ danger.
         severe_hypo = s.bg_observed < SEVERE_HYPO_THRESHOLD
 
         is_awake = self._today_wake_idx <= time_idx < self._today_sleep_idx
         if not is_awake:
             if severe_hypo:
                 pass  # symptoms wake them — proceed to act this step
-            elif s.bg_observed < 55 or s.bg_observed > 350:
+            elif s.bg_observed < SEVERE_HYPO_THRESHOLD or s.bg_observed > ASLEEP_WAKE_HIGH_BG:
                 delay_steps = int(self.rng.exponential(HYPO_DETECTION_ASLEEP_LAMBDA) / DT_MINUTES)
                 if delay_steps > 0:
                     return
@@ -1543,13 +1544,13 @@ class T1DMSimulator:
             correction_grams = (HYPO_CORRECTION_BASE_GRAMS * skill_grams_multiplier
                                 + p.panic_factor * severity / 20.0)
 
-            # Severe hypo (<55) rage-eats reflexively; floor scales w/ deficit (BG=30 -> ~22g).
+            # Severe hypo rage-eats reflexively; floor scales w/ deficit (deficit 25 -> ~23g).
 
             # Tuned so BG=30 stays clear of hyper (not 41g, which ejects straight into hyper).
             if severe_hypo:
                 deficit = max(0.0, SEVERE_HYPO_THRESHOLD - projected_bg)
                 correction_grams = max(correction_grams, 14.0 + 0.35 * deficit)
-            # Former probabilistic rage-eat (BG<50) unreachable: BG<55 already trips severe_hypo.
+            # Former probabilistic rage-eat (BG<50) removed.
 
             # Hypo correction uses fast-acting carbs (glucose tablets / juice)
             k = HYPO_CARB_K

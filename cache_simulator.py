@@ -100,6 +100,7 @@ def _kovatchev_numerators(bg: np.ndarray) -> tuple[float, float]:
 NORM_BG_RISK_SCALE = 2.2211457449985317
 NORM_BG_RISK_POWER = 1.084
 NORM_BG_RISK_OFFSET = 5.540076976170212
+NORM_BG_RISK_SHIFT = 50.0  # mg/dL added before ln; mirrors T1DMAI utils._KOVATCHEV_BG_SHIFT.
 
 # File name of the emitted 4-channel {mean, std} stats the T1DMAI model reads.
 NORM_STATS_FILE = 'normalization_stats.json'
@@ -116,11 +117,12 @@ NORM_CHANNEL_SOURCES: dict[str, str] = {
 def _norm_bg_risk(bg: np.ndarray) -> np.ndarray:
     """Kovatchev risk transform of raw mg/dL ``bg`` (model risk space).
 
-    Clips to [BG_CLAMP_MIN, BG_CLAMP_MAX]; f(g)=SCALE*(ln(g)^POWER-OFFSET), anchored
-    at f(40)=-sqrt(10)/f(400)=+sqrt(10). Range asymmetric: [f(10),f(400)]=[-6.82,+3.16].
+    Clips to [BG_CLAMP_MIN, BG_CLAMP_MAX]; f(g)=SCALE*(ln(g+SHIFT)^POWER-OFFSET), anchored at
+    SHIFT 0 to f(40)=-sqrt(10)/f(400)=+sqrt(10). Range asymmetric: [f(-40),f(350)]=[-6.82,+3.16].
     """
     g = np.clip(np.asarray(bg, dtype=np.float64), BG_CLAMP_MIN, BG_CLAMP_MAX)
-    return NORM_BG_RISK_SCALE * (np.log(g) ** NORM_BG_RISK_POWER - NORM_BG_RISK_OFFSET)
+    return NORM_BG_RISK_SCALE * (np.log(g + NORM_BG_RISK_SHIFT) ** NORM_BG_RISK_POWER
+                                 - NORM_BG_RISK_OFFSET)
 
 
 def _norm_forward(cache_name: str, block: np.ndarray) -> np.ndarray:
