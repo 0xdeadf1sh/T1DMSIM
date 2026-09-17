@@ -70,7 +70,7 @@ Basal (long-acting): Bateman curve from `basal_curve()`, per analogue in `BASAL_
     tmax   = ln(ka / ke) / (ka − ke)               5.3 h, 12 h, 12 h
     t_half = ln 2 / ke                             13.9 h, 18.4 h, 25 h
 
-The action window (`action_hours`: 73, 101, 133 h) ends where 3% of the untruncated area remains, so daily doses overlap as at steady state. A smootherstep over the last `BASAL_TAIL_CLIP_FRACTION` (1/6) of the window tapers the residual to zero. Normalized so the area equals the dose.
+The action window (`action_hours`: 73, 101, 133 h) ends where 3% of the untruncated area remains, so daily doses overlap as at steady state. A smootherstep over the first `BASAL_ONSET_RAMP_HOURS` (3 h) eases each dose in from zero, and one over the last `BASAL_TAIL_CLIP_FRACTION` (1/6) of the window tapers the residual to zero; the onset ramp is not in SPEC/invariants.md §5. Normalized so the area equals the dose.
 
 ### Injection site quality (lipohypertrophy)
 

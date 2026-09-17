@@ -177,6 +177,8 @@ BASAL_CORRECTION_MAX_ADJUSTMENT = 0.22  # Max % a patient will adjust basal vs b
 BASAL_KA_PER_HOUR = 0.477  # glargine U100
 BASAL_KE_PER_HOUR = 0.0499
 BASAL_TAIL_CLIP_FRACTION = 1.0 / 6.0  # of the action window, smootherstep-tapered to zero
+# Not in SPEC §5: without it each dose's rise starts at full slope and kinks the summed basal trace.
+BASAL_ONSET_RAMP_HOURS = 3.0
 
 # Per-basal-dose damping of the lipohypertrophy site-quality multiplier.
 # `_site_quality` returns a per-injection absorption factor whose variance
@@ -861,7 +863,8 @@ def basal_curve(total_amount: float, duration_minutes: float,
                 ke_per_hour: float = BASAL_KE_PER_HOUR,
                 dt: float = DT_MINUTES) -> np.ndarray:
     """Long-acting basal Bateman curve f(t)=exp(-ke*t)-exp(-ka*t), sampled at each step's start.
-    The last BASAL_TAIL_CLIP_FRACTION of the window tapers to zero. sum(values) = total_amount.
+    The first BASAL_ONSET_RAMP_HOURS ease in from zero and the last BASAL_TAIL_CLIP_FRACTION of
+    the window tapers to zero, both by smootherstep. sum(values) = total_amount.
     """
     n_steps = int(duration_minutes / dt)
     if n_steps <= 0:
@@ -879,6 +882,11 @@ def basal_curve(total_amount: float, duration_minutes: float,
         s = np.linspace(1.0, 0.0, tail_steps)
         window = s * s * s * (s * (s * 6.0 - 15.0) + 10.0)
         curve[-tail_steps:] *= window
+
+    onset_steps = int(BASAL_ONSET_RAMP_HOURS * 60 / dt)
+    if 0 < onset_steps < n_steps:
+        s = np.arange(onset_steps) / onset_steps
+        curve[:onset_steps] *= s * s * s * (s * (s * 6.0 - 15.0) + 10.0)
 
     area = float(np.sum(curve))
     if area > 0.0:
