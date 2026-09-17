@@ -202,7 +202,7 @@ Insulin-suppressed via a Hill function on EMA-smoothed insulin (proxies plasma i
     meal_rebound  = sum over active meal_hgo_effects of (magnitude * envelope_intensity) * (DT_MINUTES / 60)
     HGO(t)        = HGO_baseline + meal_rebound
 
-- `HGO_INSULIN_HALF_MAX` is tuned so a typical basal level (~0.086 U/step) yields 8.25 g/hr = `HGO_BASE_GRAMS_PER_HOUR`, the balanced reference rate. This preserves basal sizing — `ideal_basal = HGO_BASE_GRAMS_PER_HOUR * 24 * (body_weight_kg / BODY_WEIGHT_MEAN_KG) * is_base / ICR` gives near-zero net delta. The weight factor mirrors the per-step HGO scaling; `is_base` keeps the invariant across baseline insulin needs.
+- `HGO_INSULIN_HALF_MAX` is tuned so a typical basal level (~0.052 U/step) yields 4.95 g/hr = `HGO_BASE_GRAMS_PER_HOUR`, the balanced reference rate. This preserves basal sizing — `ideal_basal = HGO_BASE_GRAMS_PER_HOUR * 24 * (body_weight_kg / BODY_WEIGHT_MEAN_KG) * is_base / ICR` gives near-zero net delta. The weight factor mirrors the per-step HGO scaling; `is_base` keeps the invariant across baseline insulin needs.
 - At zero insulin, HGO climbs toward `HGO_UNSUPPRESSED_GRAMS_PER_HOUR` (DKA-like).
 - `(dawn_g_per_hr - night_dip_g_per_hr)` is a cortisol-driven dawn surge (Gaussian peaking at `DAWN_HGO_PEAK_HOUR`) minus a deep-sleep trough (Gaussian at `NIGHT_HGO_DIP_HOUR`), added in g/hr rather than as a multiplier so the Hill suppression does not cancel it — this produces the dawn phenomenon.
 - `alcohol_factor` (trapezoidal envelope around 1.0) suppresses HGO on top of insulin's suppression; `glycogen_gate` ramps HGO down when the reservoir is depleted.

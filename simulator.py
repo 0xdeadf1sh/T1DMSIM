@@ -210,9 +210,7 @@ ICR_MEAN = 8.0   # Insulin-to-carb ratio (1 unit per X grams). Lowered from 11.0
                  # 0.45 U/kg/day with a 55/45 basal:bolus split; 8 brings it to ~0.65 U/kg
                  # with a ~50/50 split that matches AZT1D's pump-log totals. ICR also enters
                  # `ideal_basal = HGO*24*is/ICR`, so lowering it raises both bolus and basal
-                 # symmetrically while preserving the HGO-balances-basal invariant. The Hill
-                 # calibration anchor `compute_hgo_rate(0.086) ≈ 8.25` is unaffected because
-                 # it depends only on HGO_INSULIN_HALF_MAX and HGO_BASE, not ICR.
+                 # symmetrically while preserving the HGO-balances-basal invariant.
 ICR_SIGMA = 2.0
 BOLUS_TIMING_COMPETENT_MEAN = -15.0 # Minutes before meal (negative = before). Deepened from -5
                                      # to -15 so the bolus is already active when breakfast
@@ -325,35 +323,14 @@ EXERCISE_GAMMA_K = 3.0
 EXERCISE_GAMMA_THETA = 15.0
 
 # Hepatic glucose output (insulin-suppressed via Hill function)
-# At zero insulin, HGO runs near UNSUPPRESSED. As plasma insulin rises, HGO
-# saturates toward the SUPPRESSED floor. HGO_INSULIN_HALF_MAX is tuned so that
-# a typical basal level (~0.07 U/step) lands at the legacy ~9 g/hr rate, which
-# preserves the basal-balances-HGO test invariant.
-HGO_BASE_GRAMS_PER_HOUR = 8.25  # "Balanced" reference rate used for basal sizing
-                                 # (ideal_basal = HGO_BASE * 24 * weight/75 * is / ICR).
-                                 # Lowered from 9.0 → 8.25 jointly with the ICR_MEAN 11→8
-                                 # drop: at HGO=9 + ICR=8 the simulator's basal share ran
-                                 # 58% (mean rate 1.32 U/hr) while AZT1D's pump log shows
-                                 # ~0.92 U/hr at ~43% basal share. 8.25/8 = 24.75 U/day
-                                 # basal lands the mean rate at ~0.94 U/hr (matches AZT1D
-                                 # within rounding) and brings basal share to ~53%. Going
-                                 # lower (e.g. 7.5) overshoots the basal-share target but
-                                 # collapses mean BG dynamics because the steeper Hill
-                                 # curve required for anchoring robs meal boluses of their
-                                 # extra dynamic HGO-suppression power — post-meal BG
-                                 # climbs +15 mg/dL.
-HGO_UNSUPPRESSED_GRAMS_PER_HOUR = 18.0  # Rate with no insulin (DKA-like)
-HGO_SUPPRESSED_FLOOR_GRAMS_PER_HOUR = 6.0  # Maximum suppression
-HGO_INSULIN_HALF_MAX = 0.0198  # Insulin per step at which HGO is half-suppressed (U/step).
-                                # Retuned 0.025 → 0.0198 jointly with HGO_BASE so that
-                                # Hill(typical_basal_per_step) ≈ HGO_BASE under the new
-                                # ICR/HGO calibration. With ICR=8 and HGO_BASE=8.25,
-                                # typical basal-per-step is 8.25*24/8/288 ≈ 0.0859 U/step;
-                                # the closed-form solution for the anchor constraint
-                                # `Hill(B/96) = B` is h = B*(B-6) / (96*(18-B)) =
-                                # 8.25*2.25/(96*9.75) ≈ 0.0198. Mild change from 0.025 so
-                                # the Hill curve remains close to its previous shape and
-                                # meal-bolus HGO suppression dynamics are preserved.
+# At zero insulin, HGO runs near UNSUPPRESSED; as plasma insulin rises it saturates toward the
+# SUPPRESSED floor. Liver output sets the basal share of daily insulin: ~47% at these values.
+HGO_BASE_GRAMS_PER_HOUR = 4.95  # balanced reference rate for basal sizing (ideal_basal = HGO_BASE * 24 * weight/75 * is / ICR)
+HGO_UNSUPPRESSED_GRAMS_PER_HOUR = 10.8  # Rate with no insulin (DKA-like)
+HGO_SUPPRESSED_FLOOR_GRAMS_PER_HOUR = 3.6  # Maximum suppression
+# U/step at which HGO is half-suppressed. Anchor: Hill(B*24/ICR_MEAN/288) = B, i.e.
+# h = (B/96) * (B - FLOOR) / (UNSUPPRESSED - B).
+HGO_INSULIN_HALF_MAX = 0.0119
 HGO_NOISE_SIGMA = 0.0  # [MINNOISE] step-to-step hepatic-output noise minimized to zero
 HGO_INSULIN_SMOOTHING_ALPHA = 0.25  # EMA factor for the insulin level fed into the Hill function.
 # Models plasma-insulin lag behind SC absorption (~10-15 min), and prevents HGO
@@ -988,8 +965,8 @@ def compute_hgo_rate(insulin_per_step: float) -> float:
     """Hill-function HGO rate (g/hr) given current plasma insulin per step.
 
     HGO = SUPPRESSED + (UNSUPPRESSED - SUPPRESSED) / (1 + insulin/HALF_MAX).
-    Tuned so a typical basal level (~0.086 U/step under ICR=8) yields exactly
-    HGO_BASE (8.25 g/hr), preserving the basal-balances-HGO invariant.
+    Tuned so a typical basal level (~0.052 U/step under ICR=8) yields
+    HGO_BASE (4.95 g/hr), preserving the basal-balances-HGO invariant.
     """
     span = HGO_UNSUPPRESSED_GRAMS_PER_HOUR - HGO_SUPPRESSED_FLOOR_GRAMS_PER_HOUR
     suppression = 1.0 / (1.0 + max(0.0, insulin_per_step) / HGO_INSULIN_HALF_MAX)
