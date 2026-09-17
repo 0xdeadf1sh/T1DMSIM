@@ -130,8 +130,8 @@ class TestSpecCurveTable:
     def test_bolus_pk_at_15_units(self):
         from simulator import bolus_pk_for_dose, BOLUS_VARIANTS
         x = np.sqrt(15.0) - np.sqrt(5.0)
-        for name, theta15, dia15 in [("aspart", 45.0 * (1 + 0.17 * x), 5.6 + 0.8 * x),
-                                     ("faster_aspart", 52.0 * (1 + 0.17 * x), 4.7 + 0.8 * x)]:
+        for name, theta15, dia15 in [("aspart", 30.0 * (1 + 0.06 * x), 4.0 + 0.6 * x),
+                                     ("faster_aspart", 35.0 * (1 + 0.06 * x), 3.4 + 0.6 * x)]:
             v = BOLUS_VARIANTS[name]
             k, theta, dur = bolus_pk_for_dose(15.0, v["gamma_k"], v["gamma_theta"], v["dia_base_hours"])
             assert k == v["gamma_k"]
@@ -150,3 +150,26 @@ class TestSpecCurveTable:
         v = BASAL_VARIANTS["degludec"]
         curve = basal_curve(1.0, v["action_hours"] * 60, v["ka"], v["ke"])
         assert curve[-1] == 0.0 and curve[-2] > 0.0
+
+    def test_bolus_tail_reaches_zero(self):
+        from simulator import bolus_pk_for_dose, BOLUS_VARIANTS
+        for name, v in BOLUS_VARIANTS.items():
+            for dose in (5.0, 15.0):
+                curve = gamma_curve(dose, *bolus_pk_for_dose(dose, v["gamma_k"], v["gamma_theta"], v["dia_base_hours"]))
+                tail_drop = np.abs(np.diff(curve[-len(curve) // 6 - 1:])).max()
+                assert curve[-1] == 0.0 and tail_drop < 0.07 * curve.max(), f"{name} {dose} U"
+
+    def test_daily_basal_has_no_corner_at_injection(self):
+        """Once-daily doses summed at steady state: the slope change per step stays under 0.5% of the mean level.
+        Without the onset ease-in, glargine U100 turns by 4.9% at each injection."""
+        from simulator import BASAL_VARIANTS
+        steps_per_day = 24 * 60 // DT_MINUTES
+        for name, v in BASAL_VARIANTS.items():
+            curve = basal_curve(24.0, v["action_hours"] * 60, v["ka"], v["ke"])
+            total = np.zeros(20 * steps_per_day)
+            for start in range(0, len(total), steps_per_day):
+                n = min(len(curve), len(total) - start)
+                total[start:start + n] += curve[:n]
+            day = total[15 * steps_per_day - 5:16 * steps_per_day + 5]
+            corner = np.abs(np.diff(day, 2)).max() / day.mean()
+            assert corner < 0.005, f"{name}: slope turns by {corner:.4f} of the mean per step"

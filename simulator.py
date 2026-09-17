@@ -176,9 +176,8 @@ BASAL_CORRECTION_MAX_ADJUSTMENT = 0.22  # Max % a patient will adjust basal vs b
                                         # weeks at a time even averaging over 7 days).
 BASAL_KA_PER_HOUR = 0.477  # glargine U100
 BASAL_KE_PER_HOUR = 0.0499
-BASAL_TAIL_CLIP_FRACTION = 1.0 / 6.0  # of the action window, smootherstep-tapered to zero
-# Not in SPEC §5: without it each dose's rise starts at full slope and kinks the summed basal trace.
-BASAL_ONSET_RAMP_HOURS = 3.0
+CURVE_TAIL_CLIP_FRACTION = 1.0 / 6.0  # of every gamma and basal curve, smootherstep-tapered to zero
+BASAL_ONSET_RAMP_HOURS = 3.0  # smootherstep ease-in; without it each injection puts a corner in the summed basal
 
 # Per-basal-dose damping of the lipohypertrophy site-quality multiplier.
 # `_site_quality` returns a per-injection absorption factor whose variance
@@ -189,10 +188,10 @@ BASAL_ONSET_RAMP_HOURS = 3.0
 # the basal trace doesn't inherit bolus-grade per-dose noise.
 BASAL_SITE_QUALITY_DAMPING = 0.30
 
-# Insulin action (clamp glucose infusion), not plasma insulin. Table: SPEC/invariants.md §5.
+# Insulin action, not plasma insulin. Table: SPEC/invariants.md §5.
 # Bolus: gamma_curve, peak (k-1)*theta min; theta and DIA at the 5 U reference dose.
-_RAPID = {"gamma_k": 3.0, "gamma_theta": 45.0, "dia_base_hours": 5.6}
-_ULTRA_RAPID = {"gamma_k": 2.55, "gamma_theta": 52.0, "dia_base_hours": 4.7}
+_RAPID = {"gamma_k": 3.0, "gamma_theta": 30.0, "dia_base_hours": 4.0}
+_ULTRA_RAPID = {"gamma_k": 2.55, "gamma_theta": 35.0, "dia_base_hours": 3.4}
 BOLUS_VARIANTS = {
     "aspart": _RAPID,
     "lispro": _RAPID,
@@ -203,10 +202,10 @@ BOLUS_VARIANTS = {
 BOLUS_GAMMA_K = BOLUS_VARIANTS["aspart"]["gamma_k"]
 BOLUS_GAMMA_THETA = BOLUS_VARIANTS["aspart"]["gamma_theta"]
 BOLUS_DIA_BASE_HOURS = BOLUS_VARIANTS["aspart"]["dia_base_hours"]
-BOLUS_DIA_DOSE_SCALE = 0.8  # hours per unit of sqrt(dose) - sqrt(5)
+BOLUS_DIA_DOSE_SCALE = 0.6  # hours per unit of sqrt(dose) - sqrt(5)
 BOLUS_DIA_MIN_HOURS = 2.0
-BOLUS_DIA_MAX_HOURS = 9.0
-BOLUS_THETA_DOSE_SLOPE = 0.17  # theta multiplier per unit of sqrt(dose) - sqrt(5)
+BOLUS_DIA_MAX_HOURS = 7.5
+BOLUS_THETA_DOSE_SLOPE = 0.06  # theta multiplier per unit of sqrt(dose) - sqrt(5)
 ICR_MEAN = 8.0   # Insulin-to-carb ratio (1 unit per X grams). Lowered from 11.0 → 8.0 to
                  # raise TDD into the clinical 0.5-0.7 U/kg/day band. At 11 the sim ran at
                  # 0.45 U/kg/day with a 55/45 basal:bolus split; 8 brings it to ~0.65 U/kg
@@ -834,6 +833,17 @@ class SimulatorState:
 GAMMA_CURVE_SUBSTEPS = 16  # sub-samples per step when integrating a gamma curve below
 
 
+def _smootherstep(s: np.ndarray) -> np.ndarray:
+    return s * s * s * (s * (s * 6.0 - 15.0) + 10.0)
+
+
+def _taper_tail(curve: np.ndarray) -> None:
+    """In place: the last CURVE_TAIL_CLIP_FRACTION of the curve falls to exactly zero, so it never ends on a cliff."""
+    tail_steps = int(len(curve) * CURVE_TAIL_CLIP_FRACTION)
+    if 0 < tail_steps < len(curve):
+        curve[-tail_steps:] *= _smootherstep(np.linspace(1.0, 0.0, tail_steps))
+
+
 def gamma_curve(total_amount: float, k: float, theta: float,
                 duration_minutes: float, dt: float = DT_MINUTES) -> np.ndarray:
     """
@@ -851,6 +861,7 @@ def gamma_curve(total_amount: float, k: float, theta: float,
     sub = GAMMA_CURVE_SUBSTEPS
     t = (np.arange(n_steps * sub) + 0.5) * (dt / sub)  # sub-step midpoints from 0
     values = (t ** (k - 1) * np.exp(-t / theta)).reshape(n_steps, sub).mean(axis=1)
+    _taper_tail(values)
     # Normalize so the sum of the array equals total_amount (amount per step)
     area = np.sum(values)
     if area > 0:
@@ -863,7 +874,7 @@ def basal_curve(total_amount: float, duration_minutes: float,
                 ke_per_hour: float = BASAL_KE_PER_HOUR,
                 dt: float = DT_MINUTES) -> np.ndarray:
     """Long-acting basal Bateman curve f(t)=exp(-ke*t)-exp(-ka*t), sampled at each step's start.
-    The first BASAL_ONSET_RAMP_HOURS ease in from zero and the last BASAL_TAIL_CLIP_FRACTION of
+    The first BASAL_ONSET_RAMP_HOURS ease in from zero and the last CURVE_TAIL_CLIP_FRACTION of
     the window tapers to zero, both by smootherstep. sum(values) = total_amount.
     """
     n_steps = int(duration_minutes / dt)
@@ -877,16 +888,11 @@ def basal_curve(total_amount: float, duration_minutes: float,
     curve = np.exp(-ke * t_h) - np.exp(-ka * t_h)
     np.maximum(curve, 0.0, out=curve)
 
-    tail_steps = int(n_steps * BASAL_TAIL_CLIP_FRACTION)
-    if 0 < tail_steps < n_steps:
-        s = np.linspace(1.0, 0.0, tail_steps)
-        window = s * s * s * (s * (s * 6.0 - 15.0) + 10.0)
-        curve[-tail_steps:] *= window
+    _taper_tail(curve)
 
     onset_steps = int(BASAL_ONSET_RAMP_HOURS * 60 / dt)
     if 0 < onset_steps < n_steps:
-        s = np.arange(onset_steps) / onset_steps
-        curve[:onset_steps] *= s * s * s * (s * (s * 6.0 - 15.0) + 10.0)
+        curve[:onset_steps] *= _smootherstep(np.arange(onset_steps) / onset_steps)
 
     area = float(np.sum(curve))
     if area > 0.0:

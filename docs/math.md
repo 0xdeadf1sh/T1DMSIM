@@ -36,10 +36,10 @@ Sample from a 4D multivariate normal — `Sigma` has `SKILL_VARIANCE` on the dia
 
 Every carbohydrate curve is a gamma whose shape comes from a glycaemic index (`gi_gamma_params`, SPEC/invariants.md §5). Entry `n` of a curve is the amount appearing *during* step `n`, so `gamma_curve` integrates the gamma across the step — the mean of `GAMMA_CURVE_SUBSTEPS = 16` sub-step midpoints, starting from `t = 0`:
 
-    C[n] = A * mean{ t^(k - 1) * exp(-t / theta) : t in [n*dt, (n+1)*dt) }
+    C[n] = A * w[n] * mean{ t^(k - 1) * exp(-t / theta) : t in [n*dt, (n+1)*dt) }
            A s.t. sum_n C[n] = carb_grams
 
-Averaging the density across the step is what sizes the leading edge: the first step of a `k = 2, theta = 15` rescue curve carries 37% of the peak and a `k = 3, theta = 25` bolus 2%, so a curve rises through its onset. The same integration applies to every gamma curve — meals, rescue and follow-up carbs, exercise, and every bolus.
+Averaging the density across the step is what sizes the leading edge: the first step of a `k = 2, theta = 15` rescue curve carries 37% of the peak and a `k = 3, theta = 25` bolus 2%, so a curve rises through its onset. `w[n]` is 1 except over the last `CURVE_TAIL_CLIP_FRACTION` (1/6) of the steps, where a smootherstep takes it to exactly 0, so no curve ends on a cliff. The same construction applies to every gamma curve — meals, rescue and follow-up carbs, exercise, and every bolus.
 
     g        = clip(GI, 0, 100) / 100
     k        = 4.5 + (2.0 - 4.5) * g
@@ -54,7 +54,7 @@ One curve per meal, summing to the meal's logged grams, `carb_amount`. Rescue an
 
 ## Insulin Action Curves
 
-Both curves are glucose-lowering action fit to clamp glucose-infusion data; the parameter table is SPEC/invariants.md §5.
+Both curves are glucose-lowering action; the parameter table is SPEC/invariants.md §5.
 
 Bolus (rapid-acting): gamma curve whose duration and theta scale with dose about a 5U reference, per analogue class in `BOLUS_VARIANTS` (rapid: aspart, lispro; ultra-rapid: faster aspart, ultra-rapid lispro). Helper: `bolus_pk_for_dose(dose, k, theta, dia) -> (k, theta, duration_minutes)`. Meal boluses scale `k` and `theta` by `1 + N(0, 0.05)` each.
 
@@ -70,7 +70,7 @@ Basal (long-acting): Bateman curve from `basal_curve()`, per analogue in `BASAL_
     tmax   = ln(ka / ke) / (ka − ke)               5.3 h, 12 h, 12 h
     t_half = ln 2 / ke                             13.9 h, 18.4 h, 25 h
 
-The action window (`action_hours`: 73, 101, 133 h) ends where 3% of the untruncated area remains, so daily doses overlap as at steady state. A smootherstep over the first `BASAL_ONSET_RAMP_HOURS` (3 h) eases each dose in from zero, and one over the last `BASAL_TAIL_CLIP_FRACTION` (1/6) of the window tapers the residual to zero; the onset ramp is not in SPEC/invariants.md §5. Normalized so the area equals the dose.
+The action window (`action_hours`: 73, 101, 133 h) ends where 3% of the untruncated area remains, so daily doses overlap as at steady state. A smootherstep over the first `BASAL_ONSET_RAMP_HOURS` (3 h) eases each dose in from zero, so the summed basal has no corner at an injection, and one over the last `CURVE_TAIL_CLIP_FRACTION` (1/6) of the window tapers the residual to zero. Normalized so the area equals the dose.
 
 ### Injection site quality (lipohypertrophy)
 
@@ -146,7 +146,7 @@ In T1DM the incretin / GLP-1 axis is blunted and there is no endogenous insulin 
 
 ### Glucose effectiveness (Bergman Sg) equilibrium
 
-`Sg = glucose_effectiveness` is the per-patient Bergman minimal-model glucose effectiveness (a per-step reversion fraction), sampled lognormally around `GE_RATE = 0.015` and clipped to `[GE_RATE_MIN, GE_RATE_MAX] = [0.004, 0.150]` (~2–3× inter-individual spread; the floor prevents a pure integrator). `GE_RATE` is the MEDIAN of that lognormal, not its mean, so the median patient's reversion time constant is `1 / GE_RATE` ≈ 67 steps ≈ 5.6 h — longer than the 2.5 h bolus duration of action at the 5 U reference (`BOLUS_DIA_BASE_HOURS`, scaling as √dose), so the pull leaves insulin's sustained effect intact. The pull supplies the within-band mean reversion the renal / counter-regulatory guardrails do not: inside 70–180 net flux is otherwise integrated with an over-long autocorrelation.
+`Sg = glucose_effectiveness` is the per-patient Bergman minimal-model glucose effectiveness (a per-step reversion fraction), sampled lognormally around `GE_RATE = 0.015` and clipped to `[GE_RATE_MIN, GE_RATE_MAX] = [0.004, 0.150]` (~2–3× inter-individual spread; the floor prevents a pure integrator). `GE_RATE` is the MEDIAN of that lognormal, not its mean, so the median patient's reversion time constant is `1 / GE_RATE` ≈ 67 steps ≈ 5.6 h — longer than the 4 h bolus duration of action at the 5 U reference (`BOLUS_DIA_BASE_HOURS`, scaling as √dose), so the pull leaves insulin's sustained effect intact. The pull supplies the within-band mean reversion the renal / counter-regulatory guardrails do not: inside 70–180 net flux is otherwise integrated with an over-long autocorrelation.
 
 `E(t)` is an Ornstein–Uhlenbeck process. With `rho = exp(-DT_MINUTES / (GE_EQ_TAU_HOURS * 60))`:
 
