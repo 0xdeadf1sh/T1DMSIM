@@ -764,6 +764,7 @@ class Visualizer:
         """Main loop."""
         running = True
         scroll_speed = 20
+        key_scroll_speed = 5
         
         # ADDED: Flag to track if the screen actually needs to be updated
         needs_redraw = True 
@@ -844,10 +845,10 @@ class Visualizer:
             # Keyboard scrolling (continuous)
             keys = pygame.key.get_pressed()
             if keys[pygame.K_LEFT]:
-                self.scroll_x = max(0, self.scroll_x - scroll_speed)
+                self.scroll_x = max(0, self.scroll_x - key_scroll_speed)
                 needs_redraw = True # Trigger redraw while holding key
             if keys[pygame.K_RIGHT]:
-                self.scroll_x = min(max(0, self.total_steps - 10), self.scroll_x + scroll_speed)
+                self.scroll_x = min(max(0, self.total_steps - 10), self.scroll_x + key_scroll_speed)
                 needs_redraw = True # Trigger redraw while holding key
 
             # Keep redrawing while the toast is live so it fades and clears on its own.
