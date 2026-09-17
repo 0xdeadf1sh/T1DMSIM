@@ -19,11 +19,7 @@ from simulator import (
 )
 
 
-# Measurement window for a single Bateman basal_curve. The curve rises to a
-# broad peak around 6h post-injection (tmax = ln(ka/ke)/(ka-ke) ≈ 6.3h for the
-# default ka=0.30, ke=0.07), so 4h warmup lands inside the rising phase and 8h
-# of measurement straddles the peak — the broadest, flattest region of the
-# unit curve and the natural place to enforce HGO/basal balance.
+# Basal tmax ≈ 5.3h (glargine U100); 4h warmup + 8h measurement straddles that peak.
 _BAL_WARMUP_HOURS = 4.0
 _BAL_MEASURE_HOURS = 8.0
 

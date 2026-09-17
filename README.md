@@ -89,7 +89,7 @@ Each virtual patient is defined by four skill dimensions sampled from a multivar
 
 | Skill | Governs |
 |---|---|
-| Dietary discipline (s1) | Carb amount per meal, number of meals/snacks, fast-vs-slow carb mixture, meal-timing regularity. Low s1 patients eat more fast carbs, more erratically. |
+| Dietary discipline (s1) | Carb amount per meal, number of meals/snacks, meal glycaemic index, meal-timing regularity. Low s1 patients eat higher-GI meals, more erratically. |
 | Attentiveness (s2) | CGM check frequency, response speed to highs and lows, whether overnight alarms are noticed, trend-based anticipatory corrections. |
 | Dosing competence (s3) | Carb-counting accuracy, bolus timing (pre- vs post-meal), IOB awareness before correcting, correction-dose appropriateness, probability of rage bolusing. |
 | Lifestyle consistency (s4) | Regularity of wake/sleep times, exercise frequency, meal-schedule stability, alcohol frequency, overall routine predictability. |
@@ -104,7 +104,8 @@ Skills are mapped through a sigmoid and clipped to a configurable range (default
 | `ge_anchor` | Normal about `GE_EQ_ANCHOR_MEAN`, lifted by resistance | The patient's own mean glucose level |
 | `ge_sigma_mult` | Lognormal, clipped | Within-patient glycemic variability |
 | `meal_appetite` | Lognormal, clipped | Per-meal carb amount |
-| `basal_type` | Uniform over `BASAL_VARIANTS` | Glargine (26h) or degludec (42h) basal PK |
+| `bolus_type` | Uniform over `BOLUS_VARIANTS` | Aspart, lispro, faster aspart or ultra-rapid lispro bolus PK |
+| `basal_type` | Uniform over `BASAL_VARIANTS` | Glargine U100 (73h), glargine U300 (101h) or degludec (133h) basal PK |
 | `cgm_lag_minutes` | Normal, clipped | Interstitial lag of this patient's sensor behind plasma glucose (0-20 min) |
 
 These traits are sampled independently of skill and give the population its between-patient spread in mean glucose, variability, and sensor timing.
@@ -124,9 +125,9 @@ Modifiers applied on top of the diurnal pattern:
 
 ## Behavioral Events
 
-- **Meals**: number, timing, and carb amount are all skill-dependent, and each meal decomposes into 2-5 overlapping gamma absorption components classified fast / medium / slow by the patient's `slow_carb_preference`, plus a protein/fat tail.
+- **Meals**: number, timing, and carb amount are all skill-dependent, and each meal is one gamma absorption curve shaped by a glycaemic index drawn around the patient's `meal_gi_mean`. The curve sums to the meal's logged grams.
 
-- **Basal insulin**: one long-acting injection per day, anchored to `HGO_base × 24h × (body_weight_kg / BODY_WEIGHT_MEAN_KG) × is_base / ICR` and absorbed through a Bateman one-compartment PK curve `f(t) = exp(-ke·t) − exp(-ka·t)` whose duration is the patient's assigned analogue, glargine (26h) or degludec (42h).
+- **Basal insulin**: one long-acting injection per day, anchored to `HGO_base × 24h × (body_weight_kg / BODY_WEIGHT_MEAN_KG) × is_base / ICR` and absorbed through a Bateman one-compartment PK curve `f(t) = exp(-ke·t) − exp(-ka·t)` whose rates and action window are the patient's assigned analogue: glargine U100 (73h), glargine U300 (101h) or degludec (133h).
 
 - **Bolus insulin**: dosed per meal from a carb count carrying skill-dependent error, with competent patients pre-bolusing and duration of action scaling as `√dose` about a 5U reference, so larger doses act longer and peak slightly later. Almost every dose is preceded by a glance at the CGM: below the patient's own hypo threshold the bolus is skipped and the meal carbs go untreated, and within 30 mg/dL above it the dose is cut.
 
@@ -144,7 +145,7 @@ Modifiers applied on top of the diurnal pattern:
 
 - **Illness**: with low daily probability, the patient gets sick; insulin resistance ramps up over several days and returns to normal during recovery.
 
-- **Anomalous events**: with ~1% daily probability, one meal curve has its gamma shape parameters dramatically modified (k and theta multiplied by random factors), modelling bimodal absorption, injection site issues, or unexplained BG spikes.
+- **Anomalous events**: with ~1% daily probability, one meal absorbs with a glycaemic index between 0 and 20, modelling delayed gastric emptying or an unusual food.
 
 
 ## Installation and Usage

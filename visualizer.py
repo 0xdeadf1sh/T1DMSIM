@@ -383,11 +383,11 @@ class Visualizer:
         summary = self.sim.get_patient_summary()
         param_keys = ['is_base', 'icr', 'correction_factor', 'basal_dose',
                       'basal_duration', 'cgm_check_interval', 'patience_time',
-                      'exercise_prob', 'basal_miss_prob', 'slow_carb_pref',
+                      'exercise_prob', 'basal_miss_prob', 'meal_gi_mean',
                       'panic_factor']
         param_labels = ['IS Base', 'ICR', 'Correction Factor', 'Basal Dose',
                         'Basal Duration', 'CGM Check Interval', 'Patience Time',
-                        'Exercise Prob', 'Basal Miss Prob', 'Slow Carb Pref',
+                        'Exercise Prob', 'Basal Miss Prob', 'Meal GI Mean',
                         'Panic Factor']
 
         param_col_x = x + self._s(150)
