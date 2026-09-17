@@ -259,15 +259,15 @@ PATIENCE_TIME_COMPETENT = 120  # Minutes before re-correcting (competent). IOB-a
 PATIENCE_TIME_INCOMPETENT = 60  # Minutes before re-correcting (incompetent)
 CORRECTION_FACTOR_MEAN = 40.0  # mg/dL drop per unit of insulin
 CORRECTION_FACTOR_SIGMA = 20.0  # [HIVAR 2x] 10.0→20.0 — correction-factor scatter
-BG_TARGET = 158.0  # Target BG for corrections. Aims near the real-cohort median (155–157) — corrections targeting lower routinely overshoot into hypo because absorbed insulin keeps acting after BG arrives at target. Sits well above the ATTD ideal (~110) — sim correction
+BG_TARGET = 120.0  # Target BG for corrections. Aims near the real-cohort median (155–157) — corrections targeting lower routinely overshoot into hypo because absorbed insulin keeps acting after BG arrives at target. Sits well above the ATTD ideal (~110) — sim correction
                    # kinetics + delivery lag tend to overshoot, so a higher target keeps median BG
                    # near the real OhioT1DM ~157 and TBR1 near real's ~3% rather than runaway hypo.
 BG_HIGH_THRESHOLD = 175.0  # Threshold to trigger correction. Paired with `BG_TARGET=158`, corrections fire moderately above target.
-BG_LOW_THRESHOLD = 60.0  # Floor of the hypo band; the acting trigger is the per-patient PatientProfile.hypo_threshold below.
+BG_LOW_THRESHOLD = 40.0  # Floor of the hypo band; the acting trigger is the per-patient PatientProfile.hypo_threshold below.
 # [CF] Per-patient "what I treat as low", centred on HYPO_THRESHOLD_MEDIAN and
 # spread across the skill range: attentive, competent patients act earlier (higher
 # BG). This one value drives the rescue AND blocks every bolus beneath it.
-HYPO_THRESHOLD_MEDIAN = 80.0      # threshold of a median-skill patient (mg/dL)
+HYPO_THRESHOLD_MEDIAN = 60.0      # threshold of a median-skill patient (mg/dL)
 HYPO_THRESHOLD_SKILL_SPAN = 10.0  # mg/dL deviation at each end of the skill range, so the population spans MEDIAN +/- this
 HYPO_THRESHOLD_SKILL_MID = 0.5    # population-median skill_avg; the gain is applied piecewise about it because SKILL_MIN/MAX are NOT symmetric around it (0.15 vs 0.98), so one linear gain cannot hit +/-SPAN at both ends and hold the median
 
