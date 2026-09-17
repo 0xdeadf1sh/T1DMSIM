@@ -449,7 +449,7 @@ INSULIN_ABSORPTION_NOISE_SIGMA = 0.0  # [MINNOISE] per-step insulin-absorption n
 
 # BG computation
 BG_SCALE_FACTOR = 3.5  # [GE-FIX] 1.5→3.5 — restored toward the pre-DAMP scale now that glucose effectiveness (below) supplies the in-band restoring force. The prior 1.5 damped every flux term including the patient's own correction insulin, slowing the correction loop and lengthening the BG memory (long-lag ACF). With Sg bounding excursions, alpha can carry realistic 5-min delta scale and faster correction dynamics again.
-BG_CLAMP_MIN = 10.0  # [CF] 40→10 — the 40 floor was the real CGM device floor, but a device that stops REPORTING at 40 does not stop the patient falling. Pinning the dynamics there taught every downstream model that a descent tapers out near 40 and that a dangerous low is unreachable. 10 mg/dL is below survivable, so it never binds physiologically; it exists only to keep the Kovatchev log transform defined (f is -inf at 0, NaN below 1). Risk space is now asymmetric, f(10) = -6.82 vs f(400) = +3.16, which correctly prices a deep low above a high.
+BG_CLAMP_MIN = 1.0  # [CF] 40→10 — the 40 floor was the real CGM device floor, but a device that stops REPORTING at 40 does not stop the patient falling. Pinning the dynamics there taught every downstream model that a descent tapers out near 40 and that a dangerous low is unreachable. 10 mg/dL is below survivable, so it never binds physiologically; it exists only to keep the Kovatchev log transform defined (f is -inf at 0, NaN below 1). Risk space is now asymmetric, f(10) = -6.82 vs f(400) = +3.16, which correctly prices a deep low above a high.
 BG_CLAMP_MAX = 400.0  # [HIVAR] 500→400 — match real CGM device ceiling (Ohio/AZT1D max = 400).
 BG_INITIAL_MEAN = 120.0
 BG_INITIAL_SIGMA = 60.0  # [HIVAR] 30→60 — wider warmup start (washes out over the run).
@@ -460,16 +460,16 @@ BG_INITIAL_FLOOR = 40.0  # [CF] a run starts at a plausible BG, not at the dynam
 # gives geometric asymptotic decay toward the floor/ceiling — BG never
 # actually reaches the hard clamp under normal dynamics, regardless of how
 # large the raw delta is. The hard clamp is kept only as a backstop.
-BG_SOFT_FLOOR = 20.0           # [CF] 50→20 — tracks BG_CLAMP_MIN down. Left at 50 the damping engaged 30 mg/dL above the new floor and re-imposed the taper the floor change removes.
-BG_SOFT_CEILING = 385.0        # [HIVAR] 400→385 — keep a soft runway below the new 400 hard ceiling
+BG_SOFT_FLOOR = 0.0           # [CF] 50→20 — tracks BG_CLAMP_MIN down. Left at 50 the damping engaged 30 mg/dL above the new floor and re-imposed the taper the floor change removes.
+BG_SOFT_CEILING = 500.0        # [HIVAR] 400→385 — keep a soft runway below the new 400 hard ceiling
 SOFT_APPROACH_FRACTION = 0.15  # [DAMP] 0.3→0.15 — stronger delta-damping as BG nears the bounds.
 
 # BG regulatory computation
-RENAL_THRESHOLD = 180.0  # Kidneys start excreting glucose above this
+RENAL_THRESHOLD = 250.0  # Kidneys start excreting glucose above this
 RENAL_CLEARANCE_RATE = 0.015  # [DAMP] 0.005→0.015 — arrest hyper excursions faster (shorter/shallower highs).
-COUNTER_REGULATORY_THRESHOLD = 70.0  # Body releases glucagon below this
+COUNTER_REGULATORY_THRESHOLD = 50.0  # Body releases glucagon below this
 COUNTER_REGULATORY_RATE = 1.5  # [DAMP] 0.8→1.5 — arrest hypo excursions faster.
-SEVERE_HYPO_THRESHOLD = 55.0  # Below this, glucagon dump kicks in
+SEVERE_HYPO_THRESHOLD = 25.0  # Below this, glucagon dump kicks in
 SEVERE_HYPO_GLUCAGON_RATE = 2.0  # Extra mg/dL per step at severity=1.0
 
 # Glucose effectiveness (Bergman minimal-model Sg): the insulin-INDEPENDENT
