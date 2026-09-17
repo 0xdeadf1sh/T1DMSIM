@@ -44,14 +44,14 @@ SNACK_CARB_SIGMA = 20.0  # [HIVAR 2x] 10.0→20.0 — unused by generation
 
 # Carb curve peak = (k-1)*theta; FAST_CARB_K/THETA are test-only, production uses MIXED_MEAL ranges.
 FAST_CARB_K = 3.0  # Gamma shape for fast carbs (peak ~40 min)
-FAST_CARB_THETA = 20.0  # Gamma scale for fast carbs (minutes)
+FAST_CARB_THETA = 30.0  # Gamma scale for fast carbs (minutes)
 # slow_carb_preference ~0.18 (mid-skill) keeps envelope peak ~100min (Ohio); 0.55 -> past 200min.
 SLOW_CARB_PREFERENCE_BASE = 0.10  # Base probability of choosing slow carbs
 SLOW_CARB_PREFERENCE_SKILL_BONUS = 0.15  # Added probability from s1
 
 # Hypo correction carbs (glucose tablets / juice — kick in faster than meal carbs)
-HYPO_CARB_K = 2.0
-HYPO_CARB_THETA = 15.0  # Peak ~15 min
+HYPO_CARB_K = 30.0
+HYPO_CARB_THETA = 60.0
 
 # Carb curve noise
 CARB_CURVE_K_NOISE = 0.2  # [HIVAR 2x] 0.1→0.2 — absorption-shape scatter
@@ -150,8 +150,8 @@ ICR_SIGMA = 2.0
 # Bolus policy: count, clock time and dose are drawn independent of meals, carbs and BG.
 BOLUS_NIGHT_START_HOUR = 1.0  # clock hour the meal-free night window opens
 BOLUS_NIGHT_HOURS = 4.0  # night window length; day events fall anywhere outside it
-BOLUS_NIGHT_EVENTS_PER_DAY = 16.0  # Poisson rate of bolus events in the night window
-BOLUS_DAY_EVENTS_PER_DAY = 8.0  # Poisson rate of bolus events outside it
+BOLUS_NIGHT_EVENTS_PER_DAY = 1.0  # Poisson rate of bolus events in the night window
+BOLUS_DAY_EVENTS_PER_DAY = 3.0  # Poisson rate of bolus events outside it
 BOLUS_NIGHT_UNIT_SHARE = 0.35  # share of daily bolus units given in the night window
 BOLUS_DOSE_LOG_SIGMA = 0.3  # lognormal sigma of one bolus dose around its window's median
 BOLUS_BALANCE_GAIN = 1.1  # a day's bolus units over the units that clear its planned glucose
@@ -171,8 +171,8 @@ CGM_CHECK_INTERVAL_INATTENTIVE = 240  # Minutes for inattentive patient
 CORRECTION_HORIZON_STEPS = 48  # a correction factor is the true-BG drop this long after 1 U
 BG_LOW_THRESHOLD = 60.0  # Hypo-band floor label; the acting trigger is per-patient hypo_threshold.
 # Per-patient hypo threshold centred on HYPO_THRESHOLD_MEDIAN; drives the rescue AND blocks boluses.
-HYPO_THRESHOLD_MEDIAN = 80.0      # threshold of a median-skill patient (mg/dL)
-HYPO_THRESHOLD_SKILL_SPAN = 10.0  # mg/dL dev at each skill end; population spans MEDIAN +/- this.
+HYPO_THRESHOLD_MEDIAN = 50.0      # threshold of a median-skill patient (mg/dL)
+HYPO_THRESHOLD_SKILL_SPAN = 20.0  # mg/dL dev at each skill end; population spans MEDIAN +/- this.
 HYPO_THRESHOLD_SKILL_MID = 0.5  # median skill_avg; piecewise since SKILL_MIN/MAX aren't symmetric.
 
 # Pre-meal BG-awareness: a scheduled bolus otherwise dumps into an already-hypo patient (sawtooth).
@@ -182,9 +182,20 @@ BOLUS_REDUCE_MARGIN = 30.0  # Band above hypo_threshold where bolus reduces, not
 BOLUS_REDUCE_FACTOR_BASE = 0.3  # Reduction floor*(1+0.3*dosing_competence); near-low bolus halved+.
 BOLUS_BG_CHECK_BASE_PROB = 0.95  # Prob of pre-bolus CGM check, +0.05*attentive; nearly all gated.
 
+# Correction bolus: rolled on each awake CGM check reading above the threshold.
+HYPER_CORRECTION_THRESHOLD = 180.0  # mg/dL
+HYPER_CORRECTION_PROBABILITY = 1.0  # per qualifying check
+HYPER_CORRECTION_TARGET = 120.0  # mg/dL the dose aims for
+HYPER_CORRECTION_DOSE_GAIN_MEAN = 1.0  # units given over units computed
+HYPER_CORRECTION_DOSE_GAIN_SIGMA = 0.3  # normal sd of that gain
+HYPER_CORRECTION_MIN_UNITS = 0.5  # smaller computed doses are not given
+HYPER_CORRECTION_MAX_UNITS = 10.0
+HYPER_CORRECTION_IOB_AWARENESS = 1.0  # fraction of bolus units still on board subtracted
+HYPER_CORRECTION_REFRACTORY_MIN = 60.0   # min minutes between corrections
+
 # Hypo correction
-HYPO_RESCUE_TARGET_MARGIN = 20.0  # mg/dL above the patient's threshold a rescue aims for
-HYPO_RESCUE_MIN_GRAMS = 4.0  # smallest rescue, g
+HYPO_RESCUE_TARGET_MARGIN = 40.0  # mg/dL above the patient's threshold a rescue aims for
+HYPO_RESCUE_MIN_GRAMS = 20.0 # smallest rescue, g
 HYPO_RESCUE_DEFICIT_GAIN = 1.0  # grams per gram needed to close the deficit at BG_SCALE_FACTOR
 HYPO_RESCUE_PANIC_GAIN = 0.5  # extra gain per unit panic_factor
 HYPO_PANIC_FACTOR_BASE = 1.0  # How much extra is eaten, scaled by 1/s3
@@ -264,23 +275,23 @@ INSULIN_ABSORPTION_NOISE_SIGMA = 0.0  # [MINNOISE] removed; basal/bolus curves w
 
 # BG computation
 BG_SCALE_FACTOR = 3.5  # 1.5->3.5: Sg now supplies in-band restore; 1.5 over-damped corrections too.
-BG_CLAMP_MIN = 10.0  # CGM reading floor, keeps the log risk transform defined; true BG has none.
+BG_CLAMP_MIN = 1.0   # CGM reading floor, keeps the log risk transform defined; true BG has none.
 BG_CLAMP_MAX = 400.0  # [HIVAR] 500→400 — match real CGM device ceiling (Ohio/AZT1D max = 400).
 BG_INITIAL_MEAN = 120.0
 BG_INITIAL_SIGMA = 60.0  # [HIVAR] 30→60 — wider warmup start (washes out over the run).
 BG_INITIAL_FLOOR = 40.0  # Clipping initial draw at CLAMP_MIN starts patients in severe hypo (~4%).
 
 # Soft ceiling: past it a step closes at most SOFT_APPROACH_FRACTION of the headroom to the clamp.
-BG_SOFT_CEILING = 385.0        # [HIVAR] 400→385 — keep a soft runway below the new 400 hard ceiling
+BG_SOFT_CEILING = 500.0        # [HIVAR] 400→385 — keep a soft runway below the new 400 hard ceiling
 SOFT_APPROACH_FRACTION = 0.15  # [DAMP] 0.3→0.15 — stronger delta-damping as BG nears the bounds.
 
 # BG regulatory computation
-RENAL_THRESHOLD = 180.0  # Kidneys start excreting glucose above this
+RENAL_THRESHOLD = 250.0  # Kidneys start excreting glucose above this
 RENAL_CLEARANCE_RATE = 0.0025  # per step, times mg/dL above RENAL_THRESHOLD; UVA/Padova ke1
-COUNTER_REGULATORY_THRESHOLD = 70.0  # Body releases glucagon below this
+COUNTER_REGULATORY_THRESHOLD = 40.0  # Body releases glucagon below this
 # Weak: per-unit insulin response stays within 15% between starting BG 90-120 and 160-220.
 COUNTER_REGULATORY_RATE = 0.2  # mg/dL per step at BG 0, linear up to the threshold
-SEVERE_HYPO_THRESHOLD = 55.0  # Below this, glucagon dump kicks in
+SEVERE_HYPO_THRESHOLD = 20.0  # Below this, glucagon dump kicks in
 SEVERE_HYPO_GLUCAGON_RATE = 0.2  # Extra mg/dL per step at severity=1.0
 
 # Glucose effectiveness (Bergman Sg): always-on insulin-independent pull to a stochastic OU target.
@@ -326,7 +337,7 @@ GE_EQ_FLOOR = 64.0  # 75->60->64: kept above SEVERE_HYPO_THRESHOLD=55 so the pul
 CGM_LAG_MEAN_MINUTES = 8.0  # Population mean; below physiological 15min since firmware compensates.
 CGM_LAG_SIGMA_MINUTES = 4.0  # between-patient spread over sensor generation and physiology
 CGM_LAG_CLIP = (0.0, 20.0)  # 0=fully compensated (reports plasma), 20=uncompensated and slow
-CGM_NOISE_FRACTION = 0.060  # 0.120->0.060: reverted to value calibrated for ~5.8 mg/dL d5min-std.
+CGM_NOISE_FRACTION = 0.040  # 04120->0.060: reverted to value calibrated for ~5.8 mg/dL d5min-std.
 # ~9 mg/dL drift at BG=150; AR(1)-correlated wobble like real CGM, not white-noise per-step spikes.
 
 # AR(1) smooths noise: rho=0.85 metabolic (~22min half-life), rho=0.92 sensor (~42min, Dexcom-like).
@@ -341,15 +352,15 @@ RARE_EVENT_PROBABILITY = 0.01  # chaotic-day rate; its 3x meal jitter reaches th
 RARE_EVENT_SKILL_REDUCTION = 0.3  # Even skilled people have bad days sometimes
 
 # Post-hypo basal stand-down prevents cascading corrections; patients suspend basal, not carbs.
-HYPO_CORRECTION_REFRACTORY_MIN = 20.0  # Min minutes between hypo corrections (moderate hypo 55-70).
-SEVERE_HYPO_REFRACTORY_MIN = 10.0  # Shorter gap for severe hypo (<55); first rescue's carbs act.
+HYPO_CORRECTION_REFRACTORY_MIN = 30.0  # Min minutes between hypo corrections (moderate hypo 55-70).
+SEVERE_HYPO_REFRACTORY_MIN = 15.0  # Shorter gap for severe hypo (<55); first rescue's carbs act.
 # Without this gap, rage-eating stacked 3-5 doses (60+g), sawtoothing hypo vs overcorrection peaks.
 POST_HYPO_BASAL_SUSPEND_DURATION_HOURS = 6.0  # sin^2 caps 10-min change ~3-6%; was 2h (56% drops).
 POST_HYPO_BASAL_SUSPEND_FACTOR = 0.65  # Peak basal mult; shallower than legacy, same integral.
 POST_HYPO_BASAL_SUSPEND_RAMP_MIN = 20.0  # Unused legacy ramp param; superseded by sin^2 envelope.
 
 # Rage behavior
-RAGE_EAT_BG_THRESHOLD = 50.0       # Below this, patient may rage eat
+RAGE_EAT_BG_THRESHOLD = 40.0       # Below this, patient may rage eat
 RAGE_EAT_CARB_MIN = 12.0           # Minimum rage eat carbs
 RAGE_EAT_CARB_MAX = 30.0           # Maximum rage eat carbs
 RAGE_EAT_PROBABILITY_BASE = 0.10   # Base chance of rage eating when below threshold
@@ -520,6 +531,7 @@ class SimulatorState:
     glucotox_bg_ema: float = 120.0  # 3h EMA of true BG, drives glucotoxic IR
     # Hypo correction tracking (see HYPO_CORRECTION_REFRACTORY_MIN).
     last_hypo_correction_idx: int = -9999
+    last_hyper_correction_idx: int = -9999
     # (start_idx, until_idx) suspend envelopes; effective factor is min across overlaps, never up.
     post_hypo_basal_suspend_windows: list = field(default_factory=list)
     # Next scheduled basal injection idx (-1=uninitialised); advances by BASAL_DOSE_INTERVAL_HOURS.
@@ -1508,6 +1520,9 @@ class T1DMSimulator:
                 recheck_steps = max(1, 15 // DT_MINUTES)
                 s.last_cgm_check_idx = time_idx - check_interval_steps + recheck_steps
 
+        elif s.bg_observed > HYPER_CORRECTION_THRESHOLD:
+            self._correct_high(time_idx)
+
         # --- Trend-based anticipatory rescue carbs ---
         elif len(s.bg_obs_history) >= TREND_CORRECTION_WINDOW_STEPS:
             # Slope from CGM-observed history (bg_obs_history), not true BG: sensor-only action.
@@ -1528,6 +1543,34 @@ class T1DMSimulator:
                     self.inject_curve(curve, time_idx, 'correction_carb',
                                       f'Trend corr {correction_grams:.0f}g')
                     s.last_hypo_correction_idx = time_idx
+
+    def _correct_high(self, time_idx: int) -> None:
+        """Correction bolus toward HYPER_CORRECTION_TARGET, net of bolus units still on board."""
+        p = self.patient
+        s = self.state
+        refractory_steps = int(HYPER_CORRECTION_REFRACTORY_MIN / DT_MINUTES)
+        if time_idx - s.last_hyper_correction_idx < refractory_steps:
+            return
+        # Zero probability draws nothing, so the behaviour stream is untouched.
+        if HYPER_CORRECTION_PROBABILITY <= 0.0 or self.rng.random() >= HYPER_CORRECTION_PROBABILITY:
+            return
+
+        # Step time_idx is already absorbed; the dose starts at the next step.
+        start_idx = time_idx + 1
+        on_board = float(np.sum(self._bolus_totals[start_idx:]))
+        wanted = (s.bg_observed - HYPER_CORRECTION_TARGET) / p.correction_factor
+        gain = float(self.rng.normal(HYPER_CORRECTION_DOSE_GAIN_MEAN, HYPER_CORRECTION_DOSE_GAIN_SIGMA))
+        dose = gain * (wanted - HYPER_CORRECTION_IOB_AWARENESS * on_board)
+        if dose < HYPER_CORRECTION_MIN_UNITS:
+            return
+        dose = min(dose, HYPER_CORRECTION_MAX_UNITS)
+
+        k, theta, duration = bolus_pk_for_dose(
+            dose, p.bolus_gamma_k, p.bolus_gamma_theta, p.bolus_dia_base_hours)
+        delivered = dose * self._site_quality(p.lifestyle_consistency)
+        self.inject_curve(gamma_curve(delivered, k, theta, duration), start_idx, 'bolus',
+                          f'Correction {delivered:.1f}U')
+        s.last_hyper_correction_idx = time_idx
 
     def generate(self) -> dict:
         """

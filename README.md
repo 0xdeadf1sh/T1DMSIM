@@ -96,7 +96,7 @@ Each virtual patient is defined by four skill dimensions sampled from a multivar
 | Dosing competence (s3) | The hypo threshold, how much absorbing rescue carbohydrate is counted before eating again, rage-eating, basal-dose noise. |
 | Lifestyle consistency (s4) | Regularity of wake/sleep times, exercise frequency, meal-schedule stability, alcohol frequency, injection-site rotation. |
 
-Skills are mapped through a sigmoid and clipped to a configurable range (default 0.15-0.98). Meals, CGM checks, rescue behavior and exercise habits derive from them; bolus dosing does not.
+Skills are mapped through a sigmoid and clipped to a configurable range (default 0.15-0.98). Meals, CGM checks, rescue behavior and exercise habits derive from them; scheduled bolus dosing does not, and correction frequency follows CGM check frequency.
 
 | Trait | Sampled | Governs |
 |---|---|---|
@@ -130,7 +130,7 @@ Modifiers applied on top of the diurnal pattern:
 
 - **Basal insulin**: one long-acting injection per day, anchored to `HGO_base × 24h × (body_weight_kg / BODY_WEIGHT_MEAN_KG) × is_base / ICR` and absorbed through a Bateman one-compartment PK curve `f(t) = exp(-ke·t) − exp(-ka·t)` whose duration is the patient's assigned analogue, glargine (26h) or degludec (42h). The basal dose is not titrated to BG.
 
-- **Bolus insulin**: count, clock time and dose are drawn independently of meals, carbs and BG — a deliberate departure from how patients dose, so the insulin channel carries its own effect rather than a meal's shadow. Each day has a night window of boluses in the meal-free small hours and a separate daytime stream; each day's units cover that day's planned meals and the liver output the basal leaves uncovered. Duration of action scales as `√dose` about a 5U reference. Almost every dose is preceded by a glance at the CGM: below the patient's own hypo threshold the bolus is skipped, and within 30 mg/dL above it the dose is cut. There are no correction boluses.
+- **Bolus insulin**: scheduled count, clock time and dose are drawn independently of meals, carbs and BG — a deliberate departure from how patients dose, so the insulin channel carries its own effect rather than a meal's shadow. Each day has a night window of boluses in the meal-free small hours and a separate daytime stream; each day's units cover that day's planned meals and the liver output the basal leaves uncovered. Duration of action scales as `√dose` about a 5U reference. Almost every dose is preceded by a glance at the CGM: below the patient's own hypo threshold the bolus is skipped, and within 30 mg/dL above it the dose is cut. A CGM check while awake that reads above a high threshold can draw a correction bolus, sized to bring the reading to a target net of bolus insulin still on board, with a minimum gap between corrections (`HYPER_CORRECTION_*`).
 
 - **Hypo rescue**: the CGM is checked at skill-dependent intervals while awake; asleep, only a reading below the 55 mg/dL severe threshold wakes the patient. What counts as low is one number per patient — a `hypo_threshold` spanning 70-90 mg/dL across the skill range — and that single value fires the rescue, gates every bolus, and sets the bar for exercise. A rescue is sized to lift the projected BG to 20 mg/dL above that threshold; the projection nets off rescue carbohydrate still absorbing, in a competence-scaled fraction, and a rage-eat roll drops that arithmetic. Attentive patients also eat small preemptive amounts when BG falls fast below 110 mg/dL.
 

@@ -244,7 +244,7 @@ Hepatic glycogen is a finite store gating the glycogenolysis-sourced fraction of
 
 ## Bolus Policy
 
-Count, clock time and dose are drawn independent of meals, carbs and BG. Per patient, at generation:
+Scheduled bolus count, clock time and dose are drawn independent of meals, carbs and BG. Per patient, at generation:
 
     day_glucose   = planned meal grams + delayed HGO rebound grams                   (that day)
     surplus(u)    = compute_hgo_rate((basal_dose + u) / 288) * 24 * weight_factor
@@ -262,7 +262,20 @@ with `sigma = BOLUS_DOSE_LOG_SIGMA`. The day's total tracks the day's planned gl
 
 `start = BOLUS_NIGHT_START_HOUR`. Small `MEAL_TIME_JITTER_BASE_MIN` and `WAKE_TIME_SIGMA_BASE` keep that window meal-free.
 
-The one BG-reactive step is a glance at the CGM when a bolus falls due — probability `BOLUS_BG_CHECK_BASE_PROB + 0.05 * attentiveness`. On that glance the bolus is skipped below `hypo_threshold` and scaled by `BOLUS_REDUCE_FACTOR_BASE + 0.3 * dosing_competence` within `BOLUS_REDUCE_MARGIN` above it.
+A scheduled bolus reacts to BG only through a glance at the CGM when it falls due — probability `BOLUS_BG_CHECK_BASE_PROB + 0.05 * attentiveness`. On that glance the bolus is skipped below `hypo_threshold` and scaled by `BOLUS_REDUCE_FACTOR_BASE + 0.3 * dosing_competence` within `BOLUS_REDUCE_MARGIN` above it.
+
+### Correction bolus
+
+On an awake CGM check with `bg_observed > HYPER_CORRECTION_THRESHOLD`, at least `HYPER_CORRECTION_REFRACTORY_MIN` after the last correction, with probability `HYPER_CORRECTION_PROBABILITY`:
+
+    on_board = sum of bolus units from the next step on
+    gain     ~ N(HYPER_CORRECTION_DOSE_GAIN_MEAN, HYPER_CORRECTION_DOSE_GAIN_SIGMA)
+    dose     = gain * ((bg_observed - HYPER_CORRECTION_TARGET) / correction_factor
+                       - HYPER_CORRECTION_IOB_AWARENESS * on_board)
+    dose < HYPER_CORRECTION_MIN_UNITS  ->  none
+    dose = min(dose, HYPER_CORRECTION_MAX_UNITS)
+
+PK from `bolus_pk_for_dose`, × `site_quality(lifestyle_consistency)`; the curve starts the step after the check.
 
 
 ## Hypo Rescue

@@ -477,6 +477,93 @@ class TestRescueAmount:
         assert g_deep > g_shallow, f"BG 30 got {g_deep:.2f} g, BG 50 got {g_shallow:.2f} g"
 
 
+class TestHyperCorrection:
+    """An awake CGM check reading high may draw a correction bolus sized to the target."""
+
+    @pytest.fixture
+    def exact(self, monkeypatch):
+        import simulator as sim_module
+        monkeypatch.setattr(sim_module, 'HYPER_CORRECTION_PROBABILITY', 1.0)
+        monkeypatch.setattr(sim_module, 'HYPER_CORRECTION_DOSE_GAIN_SIGMA', 0.0)
+        monkeypatch.setattr(sim_module.T1DMSimulator, '_site_quality', lambda self, s4: 1.0)
+        return sim_module
+
+    def _setup_high(self, sim, bg):
+        sim.generate()
+        idx = sim.state.current_idx
+        s = sim.state
+        s.bg = bg
+        s.bg_observed = bg
+        s.last_cgm_check_idx = -9999
+        s.last_hyper_correction_idx = -9999
+        sim._today_wake_idx = 0
+        sim._today_sleep_idx = idx + STEPS_PER_DAY
+        sim._bolus_totals[:] = 0.0
+        return idx
+
+    @staticmethod
+    def _corrections(sim):
+        return [c for c in sim.state.active_curves if c.label.startswith('Correction')]
+
+    def _expected_units(self, sim_module, sim, bg, on_board=0.0):
+        wanted = (bg - sim_module.HYPER_CORRECTION_TARGET) / sim.patient.correction_factor
+        dose = sim_module.HYPER_CORRECTION_DOSE_GAIN_MEAN * (
+            wanted - sim_module.HYPER_CORRECTION_IOB_AWARENESS * on_board)
+        return min(dose, sim_module.HYPER_CORRECTION_MAX_UNITS)
+
+    def test_zero_probability_gives_nothing_and_draws_nothing(self, monkeypatch):
+        import simulator as sim_module
+        monkeypatch.setattr(sim_module, 'HYPER_CORRECTION_PROBABILITY', 0.0)
+        sim = T1DMSimulator(seed=0)
+        idx = self._setup_high(sim, 350.0)
+        rng_before = sim.rng.bit_generator.state
+        sim._check_and_correct(idx)
+        assert not self._corrections(sim)
+        assert sim.rng.bit_generator.state == rng_before
+
+    def test_dose_closes_gap_to_target(self, exact):
+        sim = T1DMSimulator(seed=0)
+        idx = self._setup_high(sim, 350.0)
+        sim._check_and_correct(idx)
+        (c,) = self._corrections(sim)
+        assert float(np.sum(c.values)) == pytest.approx(self._expected_units(exact, sim, 350.0), rel=1e-6)
+        assert c.start_time_idx == idx + 1
+
+    def test_on_board_units_are_subtracted(self, exact):
+        sim = T1DMSimulator(seed=0)
+        idx = self._setup_high(sim, 400.0)
+        sim._bolus_totals[idx + 1:idx + 11] = 0.1
+        sim._check_and_correct(idx)
+        (c,) = self._corrections(sim)
+        expected = self._expected_units(exact, sim, 400.0, on_board=1.0)
+        assert float(np.sum(c.values)) == pytest.approx(expected, rel=1e-6)
+
+    def test_refractory_blocks_a_second_dose(self, exact):
+        sim = T1DMSimulator(seed=0)
+        idx = self._setup_high(sim, 350.0)
+        sim._check_and_correct(idx)
+        refractory_steps = int(exact.HYPER_CORRECTION_REFRACTORY_MIN / DT_MINUTES)
+        for later, expected in ((idx + refractory_steps - 1, 1), (idx + refractory_steps, 2)):
+            sim.state.last_cgm_check_idx = -9999
+            sim._bolus_totals[:] = 0.0
+            sim._today_sleep_idx = later + STEPS_PER_DAY
+            sim._check_and_correct(later)
+            assert len(self._corrections(sim)) == expected
+
+    def test_asleep_gives_nothing(self, exact):
+        sim = T1DMSimulator(seed=0)
+        idx = self._setup_high(sim, 350.0)
+        sim._today_wake_idx = idx + 1
+        sim._check_and_correct(idx)
+        assert not self._corrections(sim)
+
+    def test_below_threshold_gives_nothing(self, exact):
+        sim = T1DMSimulator(seed=0)
+        idx = self._setup_high(sim, exact.HYPER_CORRECTION_THRESHOLD)
+        sim._check_and_correct(idx)
+        assert not self._corrections(sim)
+
+
 class TestBolusPKForDoseIntegration:
     """The dose-dependent bolus PK helper is unit-tested above; this verifies
     the simulator's bolus dispatch *actually routes through it*, rather than
