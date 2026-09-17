@@ -579,8 +579,8 @@ RARE_EVENT_SKILL_REDUCTION = 0.3  # Even skilled people have bad days sometimes
 # as the patient eats to recover. Real patients respond by reducing or
 # suspending basal coverage — for pump users a temp basal / pump suspend,
 # for MDI users skipping the next basal injection — not by stacking carbs.
-HYPO_CORRECTION_REFRACTORY_MIN = 20.0  # Min minutes between hypo corrections (moderate hypo 55-70).
-SEVERE_HYPO_REFRACTORY_MIN = 10.0      # Shorter refractory for severe hypo (<55). Rule-of-15 spirit:
+HYPO_CORRECTION_REFRACTORY_MIN = 30.0  # Min minutes between hypo corrections (moderate hypo 55-70).
+SEVERE_HYPO_REFRACTORY_MIN = 15.0      # Shorter refractory for severe hypo (<55). Rule-of-15 spirit:
                                        # symptomatic patient still rage-eats, but waits ~10 min between
                                        # doses so the first rescue's carbs can act. Without this gap,
                                        # the CGM-check bypass let the patient eat every 5 min, stacking
@@ -591,7 +591,7 @@ POST_HYPO_BASAL_SUSPEND_FACTOR = 0.65          # Basal contribution multiplier a
 POST_HYPO_BASAL_SUSPEND_RAMP_MIN = 20.0        # Legacy constant from the previous smootherstep-plus-plateau implementation. The active envelope is now a single sin² profile over the full duration window (no separate ramp/plateau), so this constant is unused — kept only for backward compatibility with anything that imports it.
 
 # Rage behavior
-RAGE_EAT_BG_THRESHOLD = 50.0       # Below this, patient may rage eat
+RAGE_EAT_BG_THRESHOLD = 10.0       # Below this, patient may rage eat
 RAGE_EAT_CARB_MIN = 12.0           # Minimum rage eat carbs
 RAGE_EAT_CARB_MAX = 30.0           # Maximum rage eat carbs
 RAGE_EAT_PROBABILITY_BASE = 0.10   # Base chance of rage eating when below threshold
