@@ -2132,16 +2132,11 @@ class T1DMSimulator:
         bolus_step = float(self._bolus_totals[idx]) if idx < len(self._bolus_totals) else 0.0
         # Post-hypo basal stand-down (set by _check_cgm_and_correct after any
         # hypo correction). Represents pump suspend / next-basal skip behavior.
-        # Each correction queues a sin² envelope over the suspend window;
-        # multiple overlapping envelopes are combined by taking the minimum
-        # factor at each step. The sin² profile is C∞-smooth (no slope
-        # discontinuities anywhere) with max slope π / window — over a 4h
-        # window with depth 0.50 the worst 10-min change is ~6.5%. The
-        # min-over-envelopes combiner means a fresh correction during an
-        # ongoing suspend deepens or extends the dip without ever jumping
-        # the factor upward.
+        # Each correction queues a sin² envelope over the suspend window.
+        # Overlapping envelopes combine as 1 - prod(1 - envelope): smooth where two
+        # cross, unlike a maximum, and never deeper than POST_HYPO_BASAL_SUSPEND_FACTOR.
         if s.post_hypo_basal_suspend_windows:
-            min_factor = 1.0
+            not_suspended = 1.0
             still_active = []
             for start, until in s.post_hypo_basal_suspend_windows:
                 if idx >= until:
@@ -2151,11 +2146,9 @@ class T1DMSimulator:
                     continue
                 total = until - start
                 envelope = np.sin(np.pi * (idx - start) / total) ** 2
-                factor = 1.0 - envelope * (1.0 - POST_HYPO_BASAL_SUSPEND_FACTOR)
-                if factor < min_factor:
-                    min_factor = factor
+                not_suspended *= 1.0 - envelope
             s.post_hypo_basal_suspend_windows = still_active
-            basal_step *= min_factor
+            basal_step *= 1.0 - (1.0 - not_suspended) * (1.0 - POST_HYPO_BASAL_SUSPEND_FACTOR)
         total_insulin = basal_step + bolus_step
         total_exercise = float(self._exercise_totals[idx]) if idx < len(self._exercise_totals) else 0.0
 
