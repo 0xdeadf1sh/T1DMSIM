@@ -11,8 +11,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from simulator import (
     T1DMSimulator, BG_CLAMP_MIN, BG_CLAMP_MAX,
-    gamma_curve, BOLUS_GAMMA_K, BOLUS_GAMMA_THETA, BOLUS_DURATION_HOURS,
-    FAST_CARB_K, FAST_CARB_THETA, PUBLIC_HOLIDAYS_PER_YEAR_MIN,
+    gamma_curve, gi_gamma_params, RESCUE_CARB_GI, PUBLIC_HOLIDAYS_PER_YEAR_MIN,
     PUBLIC_HOLIDAYS_PER_YEAR_MAX, SIMULATION_START_DAY_OF_WEEK,
     bolus_pk_for_dose, BOLUS_DIA_BASE_HOURS, BOLUS_DIA_MIN_HOURS, BOLUS_DIA_MAX_HOURS,
     GLYCOGEN_CAPACITY_GRAMS, DT_MINUTES,
@@ -109,7 +108,7 @@ class TestMealAndInsulinEffect:
 
         bg_before = sim.state.bg
         # Inject a 60g fast carb curve via the public inject_curve API
-        carb_curve = gamma_curve(60.0, FAST_CARB_K, FAST_CARB_THETA, 120.0)
+        carb_curve = gamma_curve(60.0, *gi_gamma_params(RESCUE_CARB_GI))
         sim.inject_curve(carb_curve, sim.state.current_idx, 'carb', 'Test meal')
         # Run for 60 minutes (12 steps)
         for _ in range(12):
@@ -127,8 +126,7 @@ class TestMealAndInsulinEffect:
 
         bg_before = sim.state.bg
         # Inject 10U bolus via the public inject_curve API
-        bolus_curve = gamma_curve(10.0, BOLUS_GAMMA_K, BOLUS_GAMMA_THETA,
-                                  BOLUS_DURATION_HOURS * 60)
+        bolus_curve = gamma_curve(10.0, *bolus_pk_for_dose(10.0))
         sim.inject_curve(bolus_curve, sim.state.current_idx, 'insulin', 'Test bolus')
         for _ in range(24):  # 2 hours
             sim.generate()
@@ -566,8 +564,7 @@ class TestHyperCorrection:
 
 class TestBolusPKForDoseIntegration:
     """The dose-dependent bolus PK helper is unit-tested above; this verifies
-    the simulator's bolus dispatch *actually routes through it*, rather than
-    the legacy fixed-duration BOLUS_DURATION_HOURS path."""
+    the simulator's bolus dispatch *actually routes through it*."""
 
     def test_meal_boluses_use_bolus_pk_for_dose(self, monkeypatch):
         """At least a few meal/correction boluses fire through the helper
@@ -652,7 +649,7 @@ class TestInjectCurveUpdatesTotals:
         for _ in range(10):
             sim_a.generate()
         bg_before_a = sim_a.state.bg
-        curve = gamma_curve(60.0, FAST_CARB_K, FAST_CARB_THETA, 120.0)
+        curve = gamma_curve(60.0, *gi_gamma_params(RESCUE_CARB_GI))
         sim_a.inject_curve(curve, sim_a.state.current_idx, 'carb', 'injected')
         for _ in range(12):
             sim_a.generate()

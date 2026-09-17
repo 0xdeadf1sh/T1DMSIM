@@ -14,7 +14,7 @@ from simulator import (
 )
 
 
-# Basal tmax ≈ 6.3h (ka=0.30, ke=0.07); 4h warmup + 8h measurement straddles that peak.
+# Basal tmax ≈ 5.3h (glargine U100); 4h warmup + 8h measurement straddles that peak.
 _BAL_WARMUP_HOURS = 4.0
 _BAL_MEASURE_HOURS = 8.0
 

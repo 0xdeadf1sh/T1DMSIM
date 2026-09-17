@@ -326,7 +326,7 @@ class Visualizer:
         summary = self.sim.get_patient_summary()
         param_keys = ['is_base', 'icr', 'correction_factor', 'basal_dose',
                       'basal_duration', 'cgm_check_interval', 'bolus_per_day',
-                      'exercise_prob', 'basal_miss_prob', 'slow_carb_pref',
+                      'exercise_prob', 'basal_miss_prob', 'meal_gi_mean',
                       'panic_factor']
         param_labels = ['IS Base', 'ICR', 'Correction Factor', 'Basal Dose',
                         'Basal Duration', 'CGM Check Interval', 'Boluses / Day',

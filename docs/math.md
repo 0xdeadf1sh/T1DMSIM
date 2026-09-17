@@ -36,43 +36,43 @@ Sample from a 4D multivariate normal — `Sigma` has `SKILL_VARIANCE` on the dia
 
 ## Carbohydrate Absorption Curves
 
-Each meal becomes 2-5 overlapping gamma-distributed absorption curves. Entry `n` of a curve is the amount appearing *during* step `n`, so `gamma_curve` integrates the gamma across the step — the mean of `GAMMA_CURVE_SUBSTEPS = 16` sub-step midpoints, starting from `t = 0`:
+Every carbohydrate curve is a gamma whose shape comes from a glycaemic index (`gi_gamma_params`, SPEC/invariants.md §5). Entry `n` of a curve is the amount appearing *during* step `n`, so `gamma_curve` integrates the gamma across the step — the mean of `GAMMA_CURVE_SUBSTEPS = 16` sub-step midpoints, starting from `t = 0`:
 
-    C_i[n] = A_i * mean{ t^(k_i - 1) * exp(-t / theta_i) : t in [n*dt, (n+1)*dt) }
-             A_i s.t. sum_n C_i[n] = component_carb_grams
+    C[n] = A * mean{ t^(k - 1) * exp(-t / theta) : t in [n*dt, (n+1)*dt) }
+           A s.t. sum_n C[n] = carb_grams
 
-Averaging the density across the step is what sizes the leading edge: the first step of a `k = 2, theta = 15` rescue curve carries 37% of the peak and a `k = 3, theta = 25` bolus 2%, so a curve rises through its onset. The same integration applies to every gamma curve — meal components, rescue carbs, exercise, and every bolus.
+Averaging the density across the step is what sizes the leading edge: the first step of a `k = 2, theta = 15` rescue curve carries 37% of the peak and a `k = 3, theta = 25` bolus 2%, so a curve rises through its onset. The same integration applies to every gamma curve — meals, rescue carbs, exercise, and every bolus.
 
-Component sampling and per-component noise:
+    g        = clip(GI, 0, 100) / 100
+    k        = 4.5 + (2.0 - 4.5) * g
+    theta    = 30.0 + (15.0 - 30.0) * g
+    duration = clip(4 * k * theta, 120, 360)                    minutes
 
-    n_components  = min(MIXED_MEAL_MIN_COMPONENTS + Poisson(MIXED_MEAL_EXTRA_COMPONENTS_LAMBDA),
-                        MIXED_MEAL_MAX_COMPONENTS)
-    carb_fraction ~ Dirichlet(MIXED_MEAL_DIRICHLET_ALPHA)
-    type_i        ~ {fast, medium, slow}, weighted by slow_carb_preference
-    k_i, theta_i  ~ U(category range)                  e.g. MIXED_MEAL_FAST_K_RANGE
-    k_actual      = k * (1 + N(0, CARB_CURVE_K_NOISE))
-    theta_actual  = theta * (1 + N(0, CARB_CURVE_THETA_NOISE))
+    meal_gi_mean = MEAL_GI_MEAN_MAX - MEAL_GI_DISCIPLINE_SPAN * s1       per patient
+    meal GI      = clip(N(meal_gi_mean, MEAL_GI_SIGMA), 0, 100)          per meal
 
-The components sum to the meal's logged grams, `carb_amount`. Rescue carbs use a separate fast pair (`HYPO_CARB_K`, `HYPO_CARB_THETA`) peaking faster than meal carbs (glucose tablets / juice).
+One curve per meal, summing to the meal's logged grams, `carb_amount`. Rescue and trend carbs use `RESCUE_CARB_GI` (100).
 
 
 ## Insulin Action Curves
 
-Bolus (rapid-acting): gamma curve whose duration and theta scale with dose about a 5U reference, so larger doses act longer and peak later, matching subcutaneous insulin PK. Helper: `bolus_pk_for_dose(dose) -> (k, theta, duration_minutes)`; the legacy `BOLUS_DURATION_HOURS` constant is kept for tests but not used by new code.
+Both curves are glucose-lowering action fit to clamp glucose-infusion data; the parameter table is SPEC/invariants.md §5.
+
+Bolus (rapid-acting): gamma curve whose duration and theta scale with dose about a 5U reference, per analogue class in `BOLUS_VARIANTS` (rapid: aspart, lispro; ultra-rapid: faster aspart, ultra-rapid lispro). Helper: `bolus_pk_for_dose(dose, k, theta, dia) -> (k, theta, duration_minutes)`.
 
     sqrt_excess = sqrt(dose) - sqrt(5)
     duration_h  = clip(BOLUS_DIA_BASE_HOURS + BOLUS_DIA_DOSE_SCALE * sqrt_excess,
                        BOLUS_DIA_MIN_HOURS, BOLUS_DIA_MAX_HOURS)
-    theta       = BOLUS_GAMMA_THETA * (1 + BOLUS_THETA_DOSE_SLOPE * sqrt_excess)
-    k           = BOLUS_GAMMA_K
+    theta       = gamma_theta * (1 + BOLUS_THETA_DOSE_SLOPE * sqrt_excess)
+    k           = gamma_k
 
-Basal (long-acting): Bateman one-compartment PK from `basal_curve()` — subcutaneous depot absorption (rate `ka`) followed by first-order elimination (rate `ke`):
+Basal (long-acting): Bateman curve from `basal_curve()`, per analogue in `BASAL_VARIANTS` (glargine U100, glargine U300, degludec):
 
-    f(t)   = exp(-BASAL_KE_PER_HOUR · t) − exp(-BASAL_KA_PER_HOUR · t)
-    tmax   = ln(ka / ke) / (ka − ke) ≈ 6.3 h      with ka = 0.30/h, ke = 0.07/h
-    t_half ≈ 9.9 h                                (elimination)
+    f(t)   = exp(-ke · t) − exp(-ka · t)          t in hours, sampled at each step's start
+    tmax   = ln(ka / ke) / (ka − ke)               5.3 h, 12 h, 12 h
+    t_half = ln 2 / ke                             13.9 h, 18.4 h, 25 h
 
-A broad-peaked long-acting profile sitting between the glargine and degludec time-action curves, with no flat plateau and no slope discontinuity. A smootherstep window over the last `BASAL_TAIL_CLIP_HOURS` tapers the late residual to zero so consecutive daily doses join without a tail-step. Normalized so the area equals the dose.
+The action window (`action_hours`: 73, 101, 133 h) ends where 3% of the untruncated area remains, so daily doses overlap as at steady state. A smootherstep over the last `BASAL_TAIL_CLIP_FRACTION` (1/6) of the window tapers the residual to zero. Normalized so the area equals the dose.
 
 ### Injection site quality (lipohypertrophy)
 
@@ -341,10 +341,9 @@ From the last `TREND_CORRECTION_WINDOW_STEPS` CGM readings, a patient not yet be
 
 ### Anomalous absorption events
 
-With per-day probability `ANOMALOUS_EVENT_PROBABILITY`, one absorption curve on that day has its shape modified — unusual gastric emptying, food composition outliers, or other absorption surprises:
+With per-day probability `ANOMALOUS_EVENT_PROBABILITY`, that day's first meal absorbs anomalously slowly — delayed gastric emptying or an unusual food:
 
-    k     *= U(ANOMALOUS_K_MULT_MIN,     ANOMALOUS_K_MULT_MAX)
-    theta *= U(ANOMALOUS_THETA_MULT_MIN, ANOMALOUS_THETA_MULT_MAX)
+    GI ~ U(0, ANOMALOUS_MEAL_GI_MAX)
 
 ### Rare event days
 

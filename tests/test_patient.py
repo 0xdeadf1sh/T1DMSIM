@@ -103,9 +103,8 @@ class TestPhysiologicalParameters:
                 f"seed={seed}: unknown bolus_type {p.bolus_type!r}")
 
     def test_both_insulin_analogues_appear(self):
-        """Across many seeds both bolus analogues (lispro/aspart) and both
-        basal analogues (glargine/degludec) must be assigned; a degenerate
-        selector returning a constant would fail this."""
+        """Across many seeds every bolus and basal analogue must be assigned; a
+        degenerate selector returning a constant would fail this."""
         bolus = {make_patient(s).bolus_type for s in range(300)}
         basal = {make_patient(s).basal_type for s in range(300)}
         assert bolus == set(BOLUS_VARIANTS), (
@@ -135,11 +134,11 @@ class TestBehavioralParameters:
             p = make_patient(seed)
             assert 0.0 <= p.exercise_probability <= 1.0
 
-    def test_slow_carb_preference_skill_relationship(self):
-        """More dietary discipline → higher slow carb preference."""
+    def test_meal_gi_skill_relationship(self):
+        """More dietary discipline → lower mean meal GI."""
         patients = [make_patient(s) for s in range(200)]
         low_disc = [p for p in patients if p.dietary_discipline < 0.65]
         high_disc = [p for p in patients if p.dietary_discipline > 0.80]
         if low_disc and high_disc:
-            assert np.mean([p.slow_carb_preference for p in low_disc]) < \
-                   np.mean([p.slow_carb_preference for p in high_disc])
+            assert np.mean([p.meal_gi_mean for p in low_disc]) > \
+                   np.mean([p.meal_gi_mean for p in high_disc])

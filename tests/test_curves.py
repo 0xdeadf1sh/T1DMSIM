@@ -73,16 +73,15 @@ class TestBasalCurve:
 
     def test_bateman_shape(self):
         """Basal curve is a Bateman PK: a smooth rise from ~0 to a single broad
-        interior peak near tmax (~6.3h), then a decline with the tail clipped
-        back toward zero. ramp_up_hours/ramp_down_hours are legacy no-op
-        parameters and are intentionally not exercised here.
+        interior peak near tmax (~5.3h), then a decline with the tail clipped
+        back toward zero.
         """
         curve = basal_curve(total_amount=20.0, duration_minutes=1560.0)
         peak = int(np.argmax(curve))
         steps_per_hour = 60 // DT_MINUTES
         # Single broad interior peak near the analytic tmax, not a plateau or boundary spike.
         assert 4 * steps_per_hour < peak < 10 * steps_per_hour, (
-            f"peak at step {peak} should sit near tmax≈6.3h")
+            f"peak at step {peak} should sit near tmax≈5.3h")
         # Rises from ~0 and the smootherstep tail clips back toward 0.
         assert curve[0] < 0.2 * curve[peak], "curve should rise from ~0"
         assert curve[-1] < 0.2 * curve[peak], "tail-clip should taper toward 0"
@@ -105,3 +104,37 @@ class TestBasalCurve:
         assert abs(basal_short.sum() - 20.0) < 1e-6
         assert abs(basal_long.sum() - 20.0) < 1e-6
         assert basal_long.mean() < basal_short.mean()
+
+
+class TestSpecCurveTable:
+    """SPEC/invariants.md §5 pins these numbers; T1DMDROID's golden vectors are generated from them."""
+
+    def test_gi_gamma_params(self):
+        from simulator import gi_gamma_params
+        assert gi_gamma_params(100.0) == (2.0, 15.0, 120.0)
+        assert gi_gamma_params(50.0) == (3.25, 22.5, 292.5)
+        assert gi_gamma_params(-5.0) == gi_gamma_params(0.0)
+
+    def test_bolus_pk_at_15_units(self):
+        from simulator import bolus_pk_for_dose, BOLUS_VARIANTS
+        x = np.sqrt(15.0) - np.sqrt(5.0)
+        for name, theta15, dia15 in [("aspart", 45.0 * (1 + 0.17 * x), 5.6 + 0.8 * x),
+                                     ("faster_aspart", 52.0 * (1 + 0.17 * x), 4.7 + 0.8 * x)]:
+            v = BOLUS_VARIANTS[name]
+            k, theta, dur = bolus_pk_for_dose(15.0, v["gamma_k"], v["gamma_theta"], v["dia_base_hours"])
+            assert k == v["gamma_k"]
+            assert abs(theta - theta15) < 1e-9
+            assert abs(dur - dia15 * 60.0) < 1e-9
+
+    def test_basal_window_leaves_three_percent(self):
+        from simulator import BASAL_VARIANTS
+        for name, v in BASAL_VARIANTS.items():
+            ka, ke, w = v["ka"], v["ke"], v["action_hours"]
+            left = (np.exp(-ke * w) / ke - np.exp(-ka * w) / ka) / (1 / ke - 1 / ka)
+            assert 0.02 < left <= 0.031, f"{name}: {left:.4f} of the area lies past {w} h"
+
+    def test_basal_tail_reaches_zero(self):
+        from simulator import BASAL_VARIANTS
+        v = BASAL_VARIANTS["degludec"]
+        curve = basal_curve(1.0, v["action_hours"] * 60, v["ka"], v["ke"])
+        assert curve[-1] == 0.0 and curve[-2] > 0.0

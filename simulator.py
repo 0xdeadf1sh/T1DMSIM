@@ -6,7 +6,6 @@ Seed-driven, step-based; call generate() to advance 5 minutes.
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional
-from enum import Enum
 
 # Time resolution
 DT_MINUTES = 5  # Time step in minutes
@@ -42,34 +41,12 @@ MEAL_CARB_SCALE = 1.51  # meal carbs/day 189 g, the channel total before the pro
 SNACK_CARB_MEAN = 20.0
 SNACK_CARB_SIGMA = 20.0  # [HIVAR 2x] 10.0→20.0 — unused by generation
 
-# Carb curve peak = (k-1)*theta; FAST_CARB_K/THETA are test-only, production uses MIXED_MEAL ranges.
-FAST_CARB_K = 3.0  # Gamma shape for fast carbs (peak ~40 min)
-FAST_CARB_THETA = 30.0  # Gamma scale for fast carbs (minutes)
-# slow_carb_preference ~0.18 (mid-skill) keeps envelope peak ~100min (Ohio); 0.55 -> past 200min.
-SLOW_CARB_PREFERENCE_BASE = 0.10  # Base probability of choosing slow carbs
-SLOW_CARB_PREFERENCE_SKILL_BONUS = 0.15  # Added probability from s1
-
-# Hypo correction carbs (glucose tablets / juice — kick in faster than meal carbs)
-HYPO_CARB_K = 30.0
-HYPO_CARB_THETA = 60.0
-
-# Carb curve noise
-CARB_CURVE_K_NOISE = 0.2  # [HIVAR 2x] 0.1→0.2 — absorption-shape scatter
-CARB_CURVE_THETA_NOISE = 0.2  # [HIVAR 2x] 0.1→0.2 — absorption-shape scatter
-
-# Mixed-meal composition (each meal becomes 2-5 overlapping carb components)
-MIXED_MEAL_MIN_COMPONENTS = 2
-MIXED_MEAL_EXTRA_COMPONENTS_LAMBDA = 1.5  # Poisson, added to MIN
-MIXED_MEAL_MAX_COMPONENTS = 5
-MIXED_MEAL_DIRICHLET_ALPHA = 1.5  # Higher = more uniform fractions per component
-MIXED_MEAL_FAST_K_RANGE = (2.0, 3.5)
-MIXED_MEAL_FAST_THETA_RANGE = (7.5, 11.0)
-MIXED_MEAL_MED_K_RANGE = (3.0, 4.5)
-MIXED_MEAL_MED_THETA_RANGE = (10.0, 14.0)
-# Component peaks (k-1)*theta: fast 8-28 min, medium 20-49 min, slow 28-70 min.
-MIXED_MEAL_SLOW_K_RANGE = (3.5, 5.0)
-MIXED_MEAL_SLOW_THETA_RANGE = (11.0, 17.5)
-MIXED_MEAL_MED_WEIGHT_BASE = 0.4  # Base weight for medium-speed components
+# Every carb curve is the SPEC/invariants.md §5 GI gamma (gi_gamma_params).
+# Per-patient mean meal GI falls with s1 from MAX to MAX - SPAN; each meal draws around it.
+MEAL_GI_MEAN_MAX = 70.0
+MEAL_GI_DISCIPLINE_SPAN = 20.0
+MEAL_GI_SIGMA = 12.0
+RESCUE_CARB_GI = 100.0  # glucose tablets / juice
 
 # Independent per-patient axes: body_weight_kg scales HGO/basal, IR factor scales ICR and is_base.
 BODY_WEIGHT_MEAN_KG = 75.0
@@ -109,42 +86,34 @@ ILLNESS_IS_RAMP_RATE = 0.4  # How fast illness IS factor changes per day (0 to 1
 # Basal insulin (long-acting); ideal_basal is derived from HGO and ICR in generate_patient().
 BASAL_DOSE_SIGMA = 9.0  # [HIVAR 2x] 4.5→9.0 — inter-patient basal-dose scatter
 BASAL_DOSE_COMPETENCE_NOISE = 0.1  # 0.15->0.1: real basal CV is 5-15% (glargine~12%, degludec~6%).
-BASAL_DURATION_HOURS = 28.0  # Test ref; per-patient uses BASAL_VARIANTS (26h/42h), 24h cadence.
-BASAL_DURATION_HOURS_MIN = 15.0  # Legacy basal-duration span bound — no longer read
-BASAL_DURATION_HOURS_MAX = 34.0  # Legacy basal-duration span bound — no longer read
+BASAL_DURATION_HOURS = 73.0  # Test ref (glargine U100); per-patient uses BASAL_VARIANTS.
 BASAL_MISS_PROB_BASE = 0.02  # 0.10->0.02: low-skill missed ~35% at 0.10; real MDI skip <3%.
 BASAL_MISS_SKILL_SCALE = 5.0  # How much skills reduce miss probability
-BASAL_KA_PER_HOUR = 0.30  # tmax=ln(ka/ke)/(ka-ke)~6.3h; peak between glargine(~4h)/degludec(~9h).
-BASAL_KE_PER_HOUR = 0.07  # Half-life ~9.9h; dose stays within ~50% of peak across cadence window.
-BASAL_TAIL_CLIP_HOURS = 5.0  # Smootherstep tapers residual so consecutive doses join, no tail-step.
-# Unused: dose duration=basal_duration_hours (26h/42h) exceeds 24h cadence, tails overlap overnight.
-BASAL_PK_OVERLAP_FRACTION = 1.00
+BASAL_KA_PER_HOUR = 0.477  # glargine U100
+BASAL_KE_PER_HOUR = 0.0499
+BASAL_TAIL_CLIP_FRACTION = 1.0 / 6.0  # of the action window, smootherstep-tapered to zero
 
 # Contracts lipohypertrophy multiplier toward 1.0: basal sites absorb more consistently than bolus.
 BASAL_SITE_QUALITY_DAMPING = 0.30
-# Legacy aliases for tests/warmup math; with Bateman PK read as time-to-peak / tail-clip, not ramps.
-BASAL_RAMP_UP_HOURS = 4.0
-BASAL_RAMP_DOWN_HOURS = BASAL_TAIL_CLIP_HOURS
 
-# Bolus/basal PK/PD sourced from prescribing info; curve is glucose-lowering action, not plasma.
-
-# Bolus analogues -> gamma_curve: peak=(k-1)*theta min, dia_base_hours=DIA at the 5U reference dose.
-
-# aspart (NovoLog): onset ~0.25h, peak ~1h, DIA ~4h. lispro: onset 0.25-0.5h, peak 1-2h, DIA ~5h.
+# Insulin action (clamp glucose infusion), not plasma insulin. Table: SPEC/invariants.md §5.
+# Bolus: gamma_curve, peak (k-1)*theta min; theta and DIA at the 5 U reference dose.
+_RAPID = {"gamma_k": 3.0, "gamma_theta": 45.0, "dia_base_hours": 5.6}
+_ULTRA_RAPID = {"gamma_k": 2.55, "gamma_theta": 52.0, "dia_base_hours": 4.7}
 BOLUS_VARIANTS = {
-    "aspart": {"gamma_k": 3.0, "gamma_theta": 30.0, "dia_base_hours": 4.0},  # peak ~60 min
-    "lispro": {"gamma_k": 3.0, "gamma_theta": 37.5, "dia_base_hours": 5.0},  # peak ~75 min
+    "aspart": _RAPID,
+    "lispro": _RAPID,
+    "faster_aspart": _ULTRA_RAPID,
+    "ultra_rapid_lispro": _ULTRA_RAPID,
 }
 
-# Default bolus PK is aspart's; duration scales BASE+SCALE*(sqrt(dose)-sqrt(5)).
 BOLUS_GAMMA_K = BOLUS_VARIANTS["aspart"]["gamma_k"]
 BOLUS_GAMMA_THETA = BOLUS_VARIANTS["aspart"]["gamma_theta"]
 BOLUS_DIA_BASE_HOURS = BOLUS_VARIANTS["aspart"]["dia_base_hours"]
-BOLUS_DURATION_HOURS = 4.0  # Legacy typical duration; new code uses bolus_pk_for_dose()
-BOLUS_DIA_DOSE_SCALE = 0.6  # Hours added per unit of sqrt(dose) - sqrt(5)
+BOLUS_DIA_DOSE_SCALE = 0.8  # hours per unit of sqrt(dose) - sqrt(5)
 BOLUS_DIA_MIN_HOURS = 2.0
-BOLUS_DIA_MAX_HOURS = 7.5
-BOLUS_THETA_DOSE_SLOPE = 0.06  # Theta multiplier per unit of sqrt(dose) - sqrt(5)
+BOLUS_DIA_MAX_HOURS = 9.0
+BOLUS_THETA_DOSE_SLOPE = 0.17  # theta multiplier per unit of sqrt(dose) - sqrt(5)
 ICR_MEAN = 8.0   # 11.0->8.0: raises TDD to clinical 0.5-0.7 U/kg/day, basal:bolus ~50/50 (AZT1D).
 ICR_SIGMA = 2.0
 # Bolus policy: count, clock time and dose are drawn independent of meals, carbs and BG.
@@ -156,12 +125,11 @@ BOLUS_NIGHT_UNIT_SHARE = 0.35  # share of daily bolus units given in the night w
 BOLUS_DOSE_LOG_SIGMA = 0.3  # lognormal sigma of one bolus dose around its window's median
 BOLUS_BALANCE_GAIN = 1.1  # a day's bolus units over the units that clear its planned glucose
 
-# Basal analogues -> basal_curve (Bateman PK): f(t)=exp(-ke t)-exp(-ka t), tmax=ln(ka/ke)/(ka-ke).
-
-# glargine: half-life ~12h, tmax~6.8h, action 26h. degludec: half-life >25h, tmax~11.5h, action 42h.
+# Basal: basal_curve (Bateman), f(t)=exp(-ke t)-exp(-ka t); action window ends at 3% area left.
 BASAL_VARIANTS = {
-    "glargine": {"ka": 0.30, "ke": 0.058, "action_hours": 26.0, "tail_clip_hours": 4.0},
-    "degludec": {"ka": 0.20, "ke": 0.028, "action_hours": 42.0, "tail_clip_hours": 6.0},
+    "glargine_u100": {"ka": 0.477, "ke": 0.0499, "action_hours": 73.0},
+    "glargine_u300": {"ka": 0.156, "ke": 0.0377, "action_hours": 101.0},
+    "degludec": {"ka": 0.187, "ke": 0.0277, "action_hours": 133.0},
 }
 BASAL_DOSE_INTERVAL_HOURS = 24.0  # Both analogues are injected once daily.
 
@@ -420,18 +388,10 @@ STRESS_IS_RAMP_HOURS = 0.5             # Trapezoidal ramp up/down for stress env
 
 # ANOMALOUS EVENTS
 
-ANOMALOUS_EVENT_PROBABILITY = 0.01     # Per-day probability of an anomalous curve modification
-ANOMALOUS_THETA_MULT_MIN = 1.5         # Min theta multiplier (slower absorption)
-ANOMALOUS_THETA_MULT_MAX = 3.0         # Max theta multiplier (much slower absorption)
-ANOMALOUS_K_MULT_MIN = 0.3             # Min k multiplier (flatter curve)
-ANOMALOUS_K_MULT_MAX = 2.0             # Max k multiplier (sharper peak)
+ANOMALOUS_EVENT_PROBABILITY = 0.01     # Per-day probability of one anomalously slow meal
+ANOMALOUS_MEAL_GI_MAX = 20.0           # that meal's GI is uniform on [0, this]
 
 # DATA STRUCTURES
-
-class CarbType(Enum):
-    FAST = "fast"
-    SLOW = "slow"
-
 
 @dataclass
 class PatientProfile:
@@ -461,14 +421,13 @@ class PatientProfile:
 
     # One bolus analogue + one basal analogue per patient (BOLUS_VARIANTS/BASAL_VARIANTS).
     bolus_type: str = "aspart"
-    basal_type: str = "glargine"
+    basal_type: str = "glargine_u100"
     bolus_gamma_k: float = BOLUS_GAMMA_K
     bolus_gamma_theta: float = BOLUS_GAMMA_THETA
     bolus_dia_base_hours: float = BOLUS_DIA_BASE_HOURS
     basal_ka: float = BASAL_KA_PER_HOUR
     basal_ke: float = BASAL_KE_PER_HOUR
     basal_duration_hours: float = BASAL_DURATION_HOURS  # PK action duration (h)
-    basal_tail_clip_hours: float = BASAL_TAIL_CLIP_HOURS
     basal_dose_interval_hours: float = BASAL_DOSE_INTERVAL_HOURS  # injection cadence (h)
 
     dawn_hgo_amplitude: float = DAWN_HGO_AMPLITUDE_MEAN
@@ -479,7 +438,7 @@ class PatientProfile:
     # Derived behavioral parameters
     wake_time_hours: float = 8.0
     sleep_duration_hours: float = 7.5
-    slow_carb_preference: float = 0.5
+    meal_gi_mean: float = 60.0
     meal_appetite: float = 1.0
     cgm_check_interval_min: float = 60.0
     exercise_probability: float = 0.5
@@ -566,16 +525,10 @@ def gamma_curve(total_amount: float, k: float, theta: float,
 def basal_curve(total_amount: float, duration_minutes: float,
                 ka_per_hour: float = BASAL_KA_PER_HOUR,
                 ke_per_hour: float = BASAL_KE_PER_HOUR,
-                tail_clip_hours: float = BASAL_TAIL_CLIP_HOURS,
-                dt: float = DT_MINUTES,
-                ramp_up_hours: Optional[float] = None,
-                ramp_down_hours: Optional[float] = None) -> np.ndarray:
-    """Long-acting basal insulin curve (Bateman one-compartment PK): f(t)=exp(-ke*t)-exp(-ka*t).
-    Broad peak at tmax=ln(ka/ke)/(ka-ke) (~6.3h default); tail-clip window zeros the end smoothly.
-    ramp_up/down_hours are legacy args, ignored. sum(values) = total_amount.
+                dt: float = DT_MINUTES) -> np.ndarray:
+    """Long-acting basal Bateman curve f(t)=exp(-ke*t)-exp(-ka*t), sampled at each step's start.
+    The last BASAL_TAIL_CLIP_FRACTION of the window tapers to zero. sum(values) = total_amount.
     """
-    del ramp_up_hours, ramp_down_hours  # accepted for legacy callers; not used
-
     n_steps = int(duration_minutes / dt)
     if n_steps <= 0:
         return np.array([0.0])
@@ -587,7 +540,7 @@ def basal_curve(total_amount: float, duration_minutes: float,
     curve = np.exp(-ke * t_h) - np.exp(-ka * t_h)
     np.maximum(curve, 0.0, out=curve)
 
-    tail_steps = int(tail_clip_hours * 60 / dt)
+    tail_steps = int(n_steps * BASAL_TAIL_CLIP_FRACTION)
     if 0 < tail_steps < n_steps:
         s = np.linspace(1.0, 0.0, tail_steps)
         window = s * s * s * (s * (s * 6.0 - 15.0) + 10.0)
@@ -603,10 +556,7 @@ def bolus_pk_for_dose(dose_units: float,
                       gamma_k: float = BOLUS_GAMMA_K,
                       gamma_theta: float = BOLUS_GAMMA_THETA,
                       dia_base_hours: float = BOLUS_DIA_BASE_HOURS) -> tuple:
-    """Return (k, theta, duration_minutes) for a bolus of the given dose.
-    DIA scales with dose (larger depots dissolve slower, peak later); centered on a 5U reference.
-    Defaults are the legacy bolus but are overridden per patient by the analogue (BOLUS_VARIANTS).
-    """
+    """(k, theta, duration_minutes) for a bolus; theta and DIA grow with sqrt(dose) about 5 U."""
     dose = max(0.5, dose_units)
     sqrt_excess = float(np.sqrt(dose) - np.sqrt(5.0))
     duration_h = float(np.clip(
@@ -615,6 +565,14 @@ def bolus_pk_for_dose(dose_units: float,
     ))
     theta = gamma_theta * (1.0 + BOLUS_THETA_DOSE_SLOPE * sqrt_excess)
     return gamma_k, theta, duration_h * 60.0
+
+
+def gi_gamma_params(gi: float) -> tuple:
+    """(k, theta_min, duration_min) of the carb gamma for a glycaemic index; SPEC/invariants.md §5."""
+    g = min(max(float(gi), 0.0), 100.0) / 100.0
+    k = 4.5 + (2.0 - 4.5) * g
+    theta = 30.0 + (15.0 - 30.0) * g
+    return k, theta, min(max(k * theta * 4.0, 120.0), 360.0)
 
 
 def ge_day_weight(hour_of_day: float) -> float:
@@ -798,7 +756,6 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     profile.basal_ka = av["ka"]
     profile.basal_ke = av["ke"]
     profile.basal_duration_hours = av["action_hours"]
-    profile.basal_tail_clip_hours = av["tail_clip_hours"]
     profile.basal_dose_interval_hours = BASAL_DOSE_INTERVAL_HOURS
 
     # Behavioral parameters derived from skills
@@ -806,7 +763,7 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     profile.wake_time_hours = rng.normal(WAKE_TIME_MEAN_HOURS, wake_sigma)
     profile.sleep_duration_hours = rng.normal(SLEEP_DURATION_MEAN_HOURS, SLEEP_DURATION_SIGMA_HOURS)
 
-    profile.slow_carb_preference = SLOW_CARB_PREFERENCE_BASE + SLOW_CARB_PREFERENCE_SKILL_BONUS * s1
+    profile.meal_gi_mean = MEAL_GI_MEAN_MAX - MEAL_GI_DISCIPLINE_SPAN * s1
     profile.meal_appetite = float(np.clip(
         np.exp(rng.normal(0.0, MEAL_APPETITE_LOG_SIGMA)),
         MEAL_APPETITE_CLIP[0], MEAL_APPETITE_CLIP[1]))
@@ -1129,8 +1086,7 @@ class T1DMSimulator:
                 actual_dose = max(0.5, p.basal_dose * per_dose_factor * dose_noise * site_q)
                 duration = p.basal_duration_hours * 60
                 curve = basal_curve(float(actual_dose), duration,
-                                    ka_per_hour=p.basal_ka, ke_per_hour=p.basal_ke,
-                                    tail_clip_hours=p.basal_tail_clip_hours)
+                                    ka_per_hour=p.basal_ka, ke_per_hour=p.basal_ke)
                 self._pending_events.append((dose_idx, 'basal', {
                     'curve': curve,
                     'label': (f'Basal {actual_dose:.1f}U '
@@ -1183,52 +1139,18 @@ class T1DMSimulator:
                 carb_mean * discipline_factor * weekend_factor
                 * p.meal_appetite * MEAL_CARB_SCALE, discipline_carb_sigma))
 
-            # Meal = 2-5 overlapping gamma curves (fast/med/slow); weights tilt slow with high s1.
-            slow_pref = SLOW_CARB_PREFERENCE_BASE + SLOW_CARB_PREFERENCE_SKILL_BONUS * eff_s1
-            fast_w = max(0.05, (1.0 - slow_pref) + self.rng.normal(0, 0.1))
-            slow_w = max(0.05, slow_pref + self.rng.normal(0, 0.1))
-            med_w = max(0.05, MIXED_MEAL_MED_WEIGHT_BASE + self.rng.normal(0, 0.1))
-            type_weights = np.array([fast_w, med_w, slow_w])
-            type_weights = type_weights / type_weights.sum()
-
-            n_extra = int(self.rng.poisson(MIXED_MEAL_EXTRA_COMPONENTS_LAMBDA))
-            n_components = min(MIXED_MEAL_MAX_COMPONENTS,
-                               MIXED_MEAL_MIN_COMPONENTS + n_extra)
-            fractions = self.rng.dirichlet(np.full(n_components, MIXED_MEAL_DIRICHLET_ALPHA))
-            component_types = self.rng.choice(['fast', 'med', 'slow'],
-                                               size=n_components, p=type_weights)
-
-            # Apply anomalous event shape modification to one component this day
-            def _maybe_anomalous(k: float, theta: float) -> tuple:
-                nonlocal anomalous_applied
-                if anomalous_today and not anomalous_applied:
-                    anomalous_applied = True
-                    k *= float(self.rng.uniform(ANOMALOUS_K_MULT_MIN, ANOMALOUS_K_MULT_MAX))
-                    theta *= float(self.rng.uniform(ANOMALOUS_THETA_MULT_MIN, ANOMALOUS_THETA_MULT_MAX))
-                return k, theta
-
-            for ctype, frac in zip(component_types, fractions):
-                component_carbs = float(carb_amount * frac)
-                if ctype == 'fast':
-                    k = float(self.rng.uniform(*MIXED_MEAL_FAST_K_RANGE))
-                    theta = float(self.rng.uniform(*MIXED_MEAL_FAST_THETA_RANGE))
-                elif ctype == 'med':
-                    k = float(self.rng.uniform(*MIXED_MEAL_MED_K_RANGE))
-                    theta = float(self.rng.uniform(*MIXED_MEAL_MED_THETA_RANGE))
-                else:
-                    k = float(self.rng.uniform(*MIXED_MEAL_SLOW_K_RANGE))
-                    theta = float(self.rng.uniform(*MIXED_MEAL_SLOW_THETA_RANGE))
-                k *= (1 + self.rng.normal(0, CARB_CURVE_K_NOISE))
-                theta *= (1 + self.rng.normal(0, CARB_CURVE_THETA_NOISE))
-                k, theta = _maybe_anomalous(k, theta)
-                k = max(1.1, k); theta = max(3.0, theta)
-                duration = max(k * theta * 4, 60)
-                self._pending_events.append((meal_idx, 'carb', {
-                    'curve': gamma_curve(component_carbs, k, theta, duration),
-                    'label': f'Meal {component_carbs:.0f}g {ctype}',
-                    'meal_key': (s.day_number, i),
-                    'meal_grams': carb_amount,
-                }))
+            if anomalous_today and not anomalous_applied:
+                anomalous_applied = True
+                gi = float(self.rng.uniform(0.0, ANOMALOUS_MEAL_GI_MAX))
+            else:
+                gi = float(np.clip(self.rng.normal(p.meal_gi_mean, MEAL_GI_SIGMA), 0.0, 100.0))
+            k, theta, duration = gi_gamma_params(gi)
+            self._pending_events.append((meal_idx, 'carb', {
+                'curve': gamma_curve(carb_amount, k, theta, duration),
+                'label': f'Meal {carb_amount:.0f}g GI {gi:.0f}',
+                'meal_key': (s.day_number, i),
+                'meal_grams': carb_amount,
+            }))
 
             day_glucose += carb_amount
             # Delayed HGO rebound: large meals bump HGO 3.5-5.5h later; drives post-meal highs.
@@ -1260,13 +1182,10 @@ class T1DMSimulator:
             bolus_idx = max(s.current_idx, day_start_idx + int((hour % 24.0) * 60 / DT_MINUTES))
             dose = median * float(np.exp(self.rng.normal(0.0, BOLUS_DOSE_LOG_SIGMA)))
             # PK shape follows the intended dose; site quality only modulates absorbed amount.
-            base_k, base_theta, bolus_duration = bolus_pk_for_dose(
+            bolus_k, bolus_theta, bolus_duration = bolus_pk_for_dose(
                 dose, p.bolus_gamma_k, p.bolus_gamma_theta, p.bolus_dia_base_hours)
-            bolus_k = base_k * (1 + self.rng.normal(0, 0.05))
-            bolus_theta = base_theta * (1 + self.rng.normal(0, 0.05))
             delivered_dose = dose * self._site_quality(eff_s4)
-            bolus_curve = gamma_curve(delivered_dose, max(1.5, bolus_k),
-                                      max(5.0, bolus_theta), bolus_duration)
+            bolus_curve = gamma_curve(delivered_dose, bolus_k, bolus_theta, bolus_duration)
             self._pending_events.append((bolus_idx, 'bolus', {
                 'curve': bolus_curve, 'label': f'Bolus {delivered_dose:.1f}U'
             }))
@@ -1499,10 +1418,7 @@ class T1DMSimulator:
                 HYPO_RESCUE_DEFICIT_GAIN + p.panic_factor * HYPO_RESCUE_PANIC_GAIN))
 
             # Hypo correction uses fast-acting carbs (glucose tablets / juice)
-            k = HYPO_CARB_K
-            theta = HYPO_CARB_THETA
-            duration = max(k * theta * 4, 60)
-            curve = gamma_curve(correction_grams, k, theta, duration)
+            curve = gamma_curve(correction_grams, *gi_gamma_params(RESCUE_CARB_GI))
             self.inject_curve(curve, time_idx, 'correction_carb',
                               f'Hypo correction {correction_grams:.0f}g')
             s.last_hypo_correction_idx = time_idx
@@ -1536,10 +1452,7 @@ class T1DMSimulator:
                 if self.rng.random() < p.attentiveness:
                     correction_grams = float(np.clip(
                         abs(trend) * TREND_CORRECTION_WINDOW_STEPS * 2.0, 5.0, 20.0))
-                    k = HYPO_CARB_K
-                    theta = HYPO_CARB_THETA
-                    duration = max(k * theta * 4, 60)
-                    curve = gamma_curve(correction_grams, k, theta, duration)
+                    curve = gamma_curve(correction_grams, *gi_gamma_params(RESCUE_CARB_GI))
                     self.inject_curve(curve, time_idx, 'correction_carb',
                                       f'Trend corr {correction_grams:.0f}g')
                     s.last_hypo_correction_idx = time_idx
@@ -1853,7 +1766,7 @@ class T1DMSimulator:
             'bolus_per_day': f'{BOLUS_NIGHT_EVENTS_PER_DAY + BOLUS_DAY_EVENTS_PER_DAY:.1f}',
             'exercise_prob': f'{p.exercise_probability:.2f}',
             'basal_miss_prob': f'{p.basal_miss_prob:.4f}',
-            'slow_carb_pref': f'{p.slow_carb_preference:.2f}',
+            'meal_gi_mean': f'{p.meal_gi_mean:.0f}',
             'panic_factor': f'{p.panic_factor:.2f}',
         }
 
