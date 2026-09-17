@@ -244,23 +244,19 @@ Hypo correction (BG_observed < hypo_threshold):
 
     rescue_cob        = sum of the not-yet-absorbed correction-carb curve from t onward (g)
     awareness         = COB_AWARENESS_BASE + COB_AWARENESS_SKILL * dosing_competence
-    cob_consideration = rescue_cob * BG_SCALE_FACTOR * awareness
+    iob               = sum of the not-yet-acted bolus curve from t onward (U)
+    cob_consideration = awareness * (rescue_cob * BG_SCALE_FACTOR
+                                     - HYPO_RESCUE_IOB_WEIGHT * iob * correction_factor)
     projected_bg      = BG_observed + cob_consideration
-    severity          = max(0, hypo_threshold - projected_bg)
-    skill_multiplier  = 1 + 1.5 * skill_avg
-    correction_grams  = HYPO_CORRECTION_BASE_GRAMS * skill_multiplier
-                        + panic_factor * severity / 20
+    deficit           = hypo_threshold + HYPO_RESCUE_TARGET_MARGIN - projected_bg
+    correction_grams  = max(HYPO_RESCUE_MIN_GRAMS, deficit / BG_SCALE_FACTOR
+                            * (HYPO_RESCUE_DEFICIT_GAIN + panic_factor * HYPO_RESCUE_PANIC_GAIN))
 
 The trigger is the per-patient `hypo_threshold`, sampled once in `generate_patient` from that patient's own `skill_avg`: attentive/competent patients act on the drop earlier. The gain is piecewise about `HYPO_THRESHOLD_SKILL_MID = 0.5` because `SKILL_MIN` and `SKILL_MAX` (0.15 / 0.98) are not symmetric around it, so the population spans `HYPO_THRESHOLD_MEDIAN ± HYPO_THRESHOLD_SKILL_SPAN` — 70 to 90 mg/dL, median 80 — with median skill landing on the median threshold. The same value defines "low" everywhere else the patient acts on it. A meal bolus is gated on the patient glancing at the CGM first — probability `BOLUS_BG_CHECK_BASE_PROB + 0.05 * attentiveness`, so 0.95 to 0.999 and not a certainty — and on that glance the bolus is skipped below the threshold and scaled by `BOLUS_REDUCE_FACTOR_BASE + 0.3 * dosing_competence` within `BOLUS_REDUCE_MARGIN` (30 mg/dL) above it; and a planned exercise session is abandoned below `hypo_threshold + EXERCISE_HYPO_MARGIN` (20 mg/dL — a higher bar than eating, since guidance is to top up with carbs before activity below ~90 mg/dL).
 
-Severity is measured against `projected_bg`, not the current reading: this is the recheck half of the rule of 15, so rescue glucose already swallowed and still absorbing is counted before more is eaten. Only correction carbs are counted (tracked separately from meal carbs, which arrive with a bolus attached), `BG_SCALE_FACTOR` converts grams to the mg/dL they will raise, and `awareness` = `COB_AWARENESS_BASE + COB_AWARENESS_SKILL * dosing_competence` rises to 0.89 at the `SKILL_MAX` ceiling of 0.98, approaching but never reaching its 0.90 limit. When `projected_bg >= hypo_threshold` the patient waits instead of eating. With probability `RAGE_EAT_PROBABILITY_BASE * (1 - dosing_competence)` the arithmetic is discarded (`cob_consideration = 0`) and the patient treats on the raw reading. The skill multiplier is critical — without it, high-skill patients linger at TBR ~30% because the bare base grams cannot overcome a strong basal pipeline.
+The deficit is measured against `projected_bg`, not the current reading: this is the recheck half of the rule of 15, so rescue glucose already swallowed and still absorbing is counted before more is eaten, and half the drop the bolus insulin still acting will cause is subtracted. One rescue covers the whole projected deficit, so a deep low is not treated in small, frequent doses. Only correction carbs are counted (tracked separately from meal carbs, which arrive with a bolus attached), `BG_SCALE_FACTOR` converts grams to the mg/dL they will raise, and `awareness` = `COB_AWARENESS_BASE + COB_AWARENESS_SKILL * dosing_competence` rises to 0.89 at the `SKILL_MAX` ceiling of 0.98, approaching but never reaching its 0.90 limit. When `projected_bg >= hypo_threshold` the patient waits instead of eating. With probability `RAGE_EAT_PROBABILITY_BASE * (1 - dosing_competence)` the arithmetic is discarded (`cob_consideration = 0`) and the patient treats on the raw reading.
 
-Severe hypo (BG_observed < `SEVERE_HYPO_THRESHOLD`, default 55):
-
-    deficit = max(0, SEVERE_HYPO_THRESHOLD - projected_bg)
-    correction_grams = max(correction_grams, 14 + 0.35 * deficit)
-
-This deterministic rescue is what keeps severe episodes under 1h. Severe hypo also bypasses the CGM check interval, but a `SEVERE_HYPO_REFRACTORY_MIN` (10 min) gate still applies between back-to-back doses so stacked carbs don't sawtooth into post-correction hypers. After any hypo correction, basal is scaled by `POST_HYPO_BASAL_SUSPEND_FACTOR` for `POST_HYPO_BASAL_SUSPEND_DURATION_HOURS` (pump-suspend / temp-basal analogue), and skill-gated patients (`skill_avg > HYPO_FOLLOWUP_SKILL_THRESHOLD`) eat a slow-carb follow-up snack of `HYPO_FOLLOWUP_FRACTION × correction_grams`.
+Severe hypo (BG_observed < `SEVERE_HYPO_THRESHOLD`) bypasses the CGM check interval, but a `SEVERE_HYPO_REFRACTORY_MIN` gate still applies between back-to-back doses so stacked carbs don't sawtooth into post-correction hypers. After any hypo correction, basal is scaled by `POST_HYPO_BASAL_SUSPEND_FACTOR` for `POST_HYPO_BASAL_SUSPEND_DURATION_HOURS` (pump-suspend / temp-basal analogue), and skill-gated patients (`skill_avg > HYPO_FOLLOWUP_SKILL_THRESHOLD`) eat a slow-carb follow-up snack of `HYPO_FOLLOWUP_FRACTION × correction_grams`.
 
 Hyper correction (BG_observed > eff_high_thresh):
 

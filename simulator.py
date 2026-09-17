@@ -290,7 +290,12 @@ AFTERNOON_SNACK_SLOT = 2            # [GE-FIX] index into MEAL_TIME_OFFSETS_HOUR
 AFTERNOON_SNACK_BOLUS_SKIP_BASE = 0.15  # 0.55->0.15 — likewise vestigial now the OU carries the ACF/afternoon shape; a modest residual keeps some real grazing un-bolused. Weighted by (1 - 0.5*s3).
 
 # Hypo correction
-HYPO_CORRECTION_BASE_GRAMS = 8.0  # Base correction (still under rule-of-15 of 15g). Kept at 8 — raising further makes the severe-hypo deficit-scaling formula (`14 + 0.35*deficit`) no longer dominate, breaking the test that deeper hypo yields strictly more rescue carbs.
+# One rescue sized to the whole projected deficit, so a deep low is not treated in small, frequent doses.
+HYPO_RESCUE_TARGET_MARGIN = 40.0  # mg/dL above the patient's threshold a rescue aims for
+HYPO_RESCUE_MIN_GRAMS = 20.0  # smallest rescue, g
+HYPO_RESCUE_DEFICIT_GAIN = 1.0  # grams per gram needed to close the deficit at BG_SCALE_FACTOR
+HYPO_RESCUE_PANIC_GAIN = 0.5  # extra gain per unit panic_factor
+HYPO_RESCUE_IOB_WEIGHT = 0.5  # share of the bolus insulin still acting (x correction_factor) the projection subtracts
 HYPO_PANIC_FACTOR_BASE = 1.0  # How much extra is eaten, scaled by 1/s3
 HYPO_DETECTION_AWAKE_MINUTES = 5.0  # Detection delay awake
 HYPO_DETECTION_ASLEEP_LAMBDA = 30.0  # Exponential mean for detection delay asleep (severe hypo bypasses this)
@@ -1911,9 +1916,9 @@ class T1DMSimulator:
             if time_idx - s.last_hypo_correction_idx < refractory_steps:
                 return
 
-            # Rule-of-15 recheck: account for rescue glucose already swallowed
-            # and still absorbing before deciding whether to eat more, and how
-            # much. Skill-scaled, and a rage-eat roll — likelier the less
+            # Rule-of-15 recheck: account for rescue glucose still absorbing and
+            # bolus insulin still acting before deciding whether to eat more, and
+            # how much. Skill-scaled, and a rage-eat roll — likelier the less
             # competent the patient — discards the arithmetic entirely; a
             # frightened patient at 40 eats the whole packet.
             rescue_cob = (float(np.sum(self._rescue_totals[time_idx:]))
@@ -1923,32 +1928,17 @@ class T1DMSimulator:
                 cob_consideration = 0.0
             else:
                 awareness = COB_AWARENESS_BASE + COB_AWARENESS_SKILL * p.dosing_competence
-                cob_consideration = rescue_cob * BG_SCALE_FACTOR * awareness
+                cob_consideration = awareness * (rescue_cob * BG_SCALE_FACTOR
+                                                 - HYPO_RESCUE_IOB_WEIGHT * iob * p.correction_factor)
             # Where the patient reckons they are heading once that glucose lands.
             projected_bg = s.bg_observed + cob_consideration
             if projected_bg >= eff_low_thresh:
                 return  # already treated enough — wait for it to act
 
-            severity = max(0, eff_low_thresh - projected_bg)
-            # Skilled patients eat more carbs (toward classical rule-of-15) so
-            # they recover from over-bolus crashes; unskilled under-correct and
-            # linger in hypo.
-            skill_grams_multiplier = 1.0 + 1.5 * skill_avg
-            correction_grams = (HYPO_CORRECTION_BASE_GRAMS * skill_grams_multiplier
-                                + p.panic_factor * severity / 20.0)
-
-            # Severe hypo (<55) is symptomatic — patient rage-eats reflexively,
-            # not probabilistically. The grams floor scales with how far below
-            # 55 the BG is. Tuned so a BG=30 → ~22g (clears severe in 15-30 min
-            # without overshooting clean past 70 to TIR), not 41g (which would
-            # collapse total TBR by ejecting the patient straight to hyper).
-            if severe_hypo:
-                deficit = max(0.0, SEVERE_HYPO_THRESHOLD - projected_bg)
-                correction_grams = max(correction_grams, 14.0 + 0.35 * deficit)
-            # (The former probabilistic rage-eat branch below RAGE_EAT_BG_THRESHOLD=50
-            # was unreachable — any BG < 50 already trips severe_hypo (< 55) above,
-            # which rescues deterministically. Reflexive severe-hypo eating supersedes
-            # the stochastic version.)
+            # Grams lift the projection to threshold plus a margin; panic adds overshoot.
+            deficit = eff_low_thresh + HYPO_RESCUE_TARGET_MARGIN - projected_bg
+            correction_grams = max(HYPO_RESCUE_MIN_GRAMS, deficit / BG_SCALE_FACTOR * (
+                HYPO_RESCUE_DEFICIT_GAIN + p.panic_factor * HYPO_RESCUE_PANIC_GAIN))
 
             # Hypo correction uses fast-acting carbs (glucose tablets / juice)
             curve = gamma_curve(correction_grams, *gi_gamma_params(RESCUE_CARB_GI))
