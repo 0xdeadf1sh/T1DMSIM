@@ -188,7 +188,31 @@ import numpy as np
 from simulator import gamma_curve
 curve = gamma_curve(60.0, k=2.0, theta=15.0, duration_minutes=120.0)
 sim.inject_curve(curve, sim.state.current_idx, 'carb', 'Custom meal')
+
+# ... and log the dose behind it as a point event at its onset step
+sim.inject_curve(curve, sim.state.current_idx, 'carb', 'Custom meal',
+                 event={'dose': 60.0, 'gi': 100.0})
 ```
+
+Every step's dict carries the curves (`total_carb`, `total_insulin`,
+`total_exercise`) and, beside them, the point events of `EVENT_CHANNELS`: the
+grams, units or session minutes of each dose at the step it was taken, with its
+glycaemic index or its minutes-to-peak and hours of action. Amounts are the true
+ones the curves are built from. Doses sharing a step are summed and their
+descriptors dose-weighted.
+
+Trajectory cache (needs `blosc2`):
+
+```bash
+python cache_simulator.py --out-dir simulator_cache --pool-size 50000
+python cache_simulator.py --pool-size 50000 --hypo-oversample 0.25   # weight toward hypoglycemia
+python cache_simulator.py --pool-size 50000 --events                 # curves plus point events
+```
+
+The cache is one blosc2 array per channel, a `meta.json`, a `DATASET.md` and the
+`normalization_stats.json` T1DMAI trains under. `--events` appends the point-event
+channels after the curves and adds `normalization_stats_events.json`; without it
+the output is unchanged.
 
 
 ## Visualizer Controls

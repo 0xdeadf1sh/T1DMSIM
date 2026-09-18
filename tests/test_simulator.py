@@ -656,11 +656,11 @@ class TestBasalInjectionCadence:
             basal_indices: list = []
             original_inject = sim.inject_curve
 
-            def capturing_inject(values, start_idx, curve_type, label='',
+            def capturing_inject(values, start_idx, curve_type, label='', event=None,
                                   _orig=original_inject, _store=basal_indices):
                 if curve_type == 'basal':
                     _store.append(int(start_idx))
-                return _orig(values, start_idx, curve_type, label)
+                return _orig(values, start_idx, curve_type, label, event)
 
             sim.inject_curve = capturing_inject
 

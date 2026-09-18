@@ -124,7 +124,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import blosc2
 
-from simulator import (BG_CLAMP_MIN, BG_CLAMP_MAX, DT_MINUTES,
+from simulator import (BG_CLAMP_MIN, BG_CLAMP_MAX, DT_MINUTES, EVENT_CHANNELS,
                        SIMULATOR_WARMUP_HOURS, T1DMSimulator)
 
 
@@ -151,7 +151,13 @@ CHANNEL_DTYPES: dict[str, Any] = {
     'total_exercise': np.float32,
     'hour_of_day': np.float32,
     'day': np.int32,
-}
+} | {c: np.float32 for c in EVENT_CHANNELS}
+
+
+def channel_names(events: bool) -> tuple[str, ...]:
+    """Cached channels; ``--events`` appends the point doses after the curves."""
+    return CHANNEL_NAMES + (EVENT_CHANNELS if events else ())
+
 
 # ============================================================================
 # CACHE / COMPRESSION PARAMETERS
@@ -253,6 +259,11 @@ NORM_CHANNEL_SOURCES: dict[str, str] = {
     'total_insulin': 'insulin_combined',
     'total_exercise': 'exercise_equiv',
 }
+# The events layout's fitted channels: bg plus the four doses, log1p like the curves.
+NORM_STATS_EVENTS_FILE = 'normalization_stats_events.json'
+NORM_EVENT_DOSES = ('carb_g', 'bolus_u', 'basal_u', 'exercise_min')
+# A point dose is far sparser than a curve; this caps its largest value at 12 sigma.
+NORM_EVENT_Z_MAX = 12.0
 
 
 def _norm_bg_risk(bg: np.ndarray) -> np.ndarray:
@@ -284,14 +295,22 @@ def _norm_forward(cache_name: str, block: np.ndarray) -> np.ndarray:
     return np.log1p(np.maximum(v, 0.0))
 
 
+def _split_norm_acc(
+    norm_acc: dict[str, dict[str, float]],
+) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]] | None]:
+    """(curves accumulators, events accumulators or None); bg belongs to both."""
+    curves = {n: a for n, a in norm_acc.items() if n not in NORM_EVENT_DOSES}
+    doses = {n: a for n, a in norm_acc.items() if n in NORM_EVENT_DOSES}
+    return curves, ({'bg_absolute': norm_acc['bg_absolute']} | doses) if doses else None
+
+
 def _finalize_norm_stats(
     norm_acc: dict[str, dict[str, float]],
 ) -> dict[str, dict[str, float]]:
     """Reduce the power-sum accumulators to the T1DMAI ``{name: {mean, std}}`` contract.
 
-    ``std`` is the SAMPLE std ``sqrt(M2 / (n - 1))`` (``M2 = sum_sq - sum^2/n``),
-    matching ``T1DMAI/normalization._finalize_stats``. Returns exactly the four
-    channels bg_absolute / carb_intake / insulin_combined / exercise_equiv.
+    ``std`` is the SAMPLE std ``sqrt(M2 / (n - 1))``, as ``T1DMAI/normalization._finalize_stats``.
+    A point-dose channel's std is floored so its largest value sits at NORM_EVENT_Z_MAX.
     """
     stats: dict[str, dict[str, float]] = {}
     for name, a in norm_acc.items():
@@ -299,6 +318,8 @@ def _finalize_norm_stats(
         mean = a['sum'] / n if n else 0.0
         m2 = (a['sum_sq'] - (a['sum'] * a['sum']) / n) if n else 0.0
         std = float(np.sqrt(max(m2, 0.0) / max(n - 1, 1)))
+        if name in NORM_EVENT_DOSES:
+            std = max(std, (a['max'] - mean) / NORM_EVENT_Z_MAX)
         # A zero std is not a small number, it is an ABSENT channel: the window
         # held no event at all, which happens to the sparse channels (exercise
         # above all) when the pool is small or the kept window short.
@@ -331,6 +352,7 @@ class RowConfig:
     hypo_threshold: float
     seed_salt: int
     event_refractory_steps: int
+    events: bool = False
 
 
 # ============================================================================
@@ -418,9 +440,12 @@ def _simulate_patient(
     day = np.empty(T, np.int32)
     basal = np.empty(T, np.float32)   # not cached; only for the basal:bolus split
     bolus = np.empty(T, np.float32)
+    events = {c: np.empty(T, np.float32) for c in EVENT_CHANNELS} if cfg.events else {}
 
     for i in range(T):
         s = gen()
+        for c, arr in events.items():
+            arr[i] = s[c]
         bg_obs[i] = s['bg_observed']
         carb[i] = s['total_carb']
         ins[i] = s['total_insulin']
@@ -441,6 +466,7 @@ def _simulate_patient(
         'total_exercise': exer,
         'hour_of_day': hod,
         'day': day,
+        **events,
     }
 
     ref = cfg.event_refractory_steps
@@ -551,7 +577,7 @@ def _worker_init(partial_dir: str, cfg: RowConfig) -> None:
     _WORKER['cfg'] = cfg
     _WORKER['mm'] = {
         name: np.lib.format.open_memmap(os.path.join(partial_dir, f'{name}.npy'), mode='r+')
-        for name in CHANNEL_NAMES
+        for name in channel_names(cfg.events)
     }
 
 
@@ -560,7 +586,7 @@ def _worker(cache_idx: int) -> dict[str, Any]:
     cfg: RowConfig = _WORKER['cfg']
     mm = _WORKER['mm']
     channels, stats = _resolve_row(cache_idx, cfg)
-    for name in CHANNEL_NAMES:
+    for name in channel_names(cfg.events):
         mm[name][cache_idx] = channels[name]
     return stats
 
@@ -658,7 +684,7 @@ def _fsync_dir(path: str) -> None:
 
 def _transcode_to_blosc2(
     partial_dir: str, pool_size: int, n_timesteps: int,
-    rows_per_chunk: int, clevel: int, nthreads: int,
+    rows_per_chunk: int, clevel: int, nthreads: int, events: bool = False,
 ) -> tuple[dict[str, dict[str, int]], dict[str, Any], dict[str, dict[str, float]]]:
     """
     Convert each staging ``.npy`` to a compressed ``.b2nd`` and delete the source.
@@ -677,9 +703,10 @@ def _transcode_to_blosc2(
     bg_hist = np.zeros(len(BG_HIST_EDGES) - 1, dtype=np.float64)
     bg_dist = {'sum': 0.0, 'sum_sq': 0.0, 'sum_cube': 0.0,
                'sum_rl': 0.0, 'sum_rh': 0.0, 'n': 0}
+    norm_sources = NORM_CHANNEL_SOURCES | ({c: c for c in NORM_EVENT_DOSES} if events else {})
     norm_acc: dict[str, dict[str, float]] = {
-        norm: {'sum': 0.0, 'sum_sq': 0.0, 'n': 0}
-        for norm in NORM_CHANNEL_SOURCES.values()
+        norm: {'sum': 0.0, 'sum_sq': 0.0, 'n': 0, 'max': 0.0}
+        for norm in norm_sources.values()
     }
     cparams = blosc2.CParams(
         codec=blosc2.Codec.ZSTD,
@@ -696,7 +723,7 @@ def _transcode_to_blosc2(
     )
     inventory: dict[str, dict[str, int]] = {}
 
-    for name in CHANNEL_NAMES:
+    for name in channel_names(events):
         src_path = os.path.join(partial_dir, f'{name}.npy')
         dst_path = os.path.join(partial_dir, f'{name}.b2nd')
         dtype = CHANNEL_DTYPES[name]
@@ -736,12 +763,13 @@ def _transcode_to_blosc2(
                     bg_dist['sum_rl'] += rl
                     bg_dist['sum_rh'] += rh
                     bg_dist['n'] += int(v.size)
-                if name in NORM_CHANNEL_SOURCES:
+                if name in norm_sources:
                     tv = _norm_forward(name, block)
-                    na = norm_acc[NORM_CHANNEL_SOURCES[name]]
+                    na = norm_acc[norm_sources[name]]
                     na['sum'] += float(tv.sum())
                     na['sum_sq'] += float((tv * tv).sum())
                     na['n'] += int(tv.size)
+                    na['max'] = max(na['max'], float(tv.max()))
 
             reopened = blosc2.open(dst_path, mode='r')
             for check_idx in (0, pool_size - 1):
@@ -1094,8 +1122,7 @@ def _render_dataset_md(report: dict[str, Any]) -> str:
     lines.append('')
     lines.append('| Channel | dtype | Uncompressed | Compressed | Ratio |')
     lines.append('|---|---|---|---|---|')
-    for name in CHANNEL_NAMES:
-        inv = st['inventory'][name]
+    for name, inv in st['inventory'].items():
         r = inv['raw_bytes'] / max(inv['compressed_bytes'], 1)
         lines.append(
             f'| `{name}` | {np.dtype(CHANNEL_DTYPES[name]).name} | '
@@ -1150,6 +1177,7 @@ def build_cache(
     dataset_md: str = 'DATASET.md',
     baseline_stats: str | None = DEFAULT_BASELINE_STATS,
     force: bool = False,
+    events: bool = False,
 ) -> dict[str, Any]:
     """Build the cache at ``out_dir`` atomically and emit ``dataset_md``."""
     if pool_size < 1:
@@ -1191,6 +1219,7 @@ def build_cache(
         hypo_threshold=hypo_threshold,
         seed_salt=seed_salt,
         event_refractory_steps=max(1, int(round(EVENT_REFRACTORY_MIN / DT_MINUTES))),
+        events=events,
     )
 
     print(f'Pool size:          {pool_size:,}')
@@ -1212,7 +1241,7 @@ def build_cache(
         # Create the staging memmaps (writes .npy headers, sparse-allocates the
         # body), then drop the parent handles before forking workers so the huge
         # mappings are not inherited -- each worker opens its own r+ handle.
-        for name in CHANNEL_NAMES:
+        for name in channel_names(events):
             np.lib.format.open_memmap(
                 os.path.join(partial_dir, f'{name}.npy'),
                 mode='w+', dtype=CHANNEL_DTYPES[name], shape=(pool_size, keep_steps),
@@ -1265,7 +1294,7 @@ def build_cache(
 
         t_trans = time.time()
         inventory, bg_dist, norm_acc = _transcode_to_blosc2(
-            partial_dir, pool_size, keep_steps, effective_rpc, zstd_clevel, n_jobs
+            partial_dir, pool_size, keep_steps, effective_rpc, zstd_clevel, n_jobs, events
         )
         print(f'Transcode finished in {time.time() - t_trans:.1f}s.')
 
@@ -1294,7 +1323,7 @@ def build_cache(
             'seed_salt': int(seed_salt),
             'rows_per_chunk': int(effective_rpc),
             'zstd_clevel': int(zstd_clevel),
-            'channels': list(CHANNEL_NAMES),
+            'channels': list(channel_names(events)),
             'cache_format': CACHE_FORMAT_VERSION,
             'baseline_stats': baseline['source'] if baseline else None,
         }
@@ -1303,11 +1332,15 @@ def build_cache(
         # consumes) is written BEFORE the meta.json sentinel and fsync'd inside
         # the same atomic flow, so the sentinel never surfaces a cache missing
         # valid stats.
-        norm_stats = _finalize_norm_stats(norm_acc)
-        norm_stats_path = os.path.join(partial_dir, NORM_STATS_FILE)
-        with open(norm_stats_path, 'w') as f:
-            json.dump(norm_stats, f, indent=2)
-        _fsync_file(norm_stats_path)
+        curves_acc, events_acc = _split_norm_acc(norm_acc)
+        for fname, acc_part in ((NORM_STATS_FILE, curves_acc),
+                                (NORM_STATS_EVENTS_FILE, events_acc)):
+            if acc_part is None:
+                continue
+            norm_stats_path = os.path.join(partial_dir, fname)
+            with open(norm_stats_path, 'w') as f:
+                json.dump(_finalize_norm_stats(acc_part), f, indent=2)
+            _fsync_file(norm_stats_path)
         # meta.json is the last file written -- its presence marks a complete
         # cache. fsync every file and the staging dir before the atomic rename so
         # a power loss cannot surface a sentinel-present, data-truncated cache.
@@ -1395,6 +1428,10 @@ def main() -> int:
                         help='Skip the baseline distribution comparison in DATASET.md.')
     parser.add_argument('--force', action='store_true',
                         help='Delete an existing --out-dir before building.')
+    parser.add_argument('--events', action='store_true',
+                        help='Also cache each dose as a point event at its onset step '
+                             f'({", ".join(EVENT_CHANNELS)}) and fit '
+                             f'{NORM_STATS_EVENTS_FILE}.')
     parser.add_argument('--rerender-report', type=str, default=None, metavar='CACHE_DIR',
                         help='Re-emit DATASET.md for an already-built cache from its '
                              'meta.json, without regenerating any trajectories.')
@@ -1429,6 +1466,7 @@ def main() -> int:
         dataset_md=args.dataset_md,
         baseline_stats=None if args.no_baseline else args.baseline_stats,
         force=args.force,
+        events=args.events,
     )
     _print_class_ratios(report)
     return 0

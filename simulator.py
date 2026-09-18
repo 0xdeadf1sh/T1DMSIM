@@ -923,6 +923,61 @@ def gi_gamma_params(gi: float) -> tuple:
     return k, theta, min(max(k * theta * 4.0, 120.0), 360.0)
 
 
+def gamma_peak_min(k: float, theta: float) -> float:
+    """Minutes to the mode of a gamma(k, theta) action curve."""
+    return max(k - 1.0, 0.0) * theta
+
+
+def bateman_peak_min(ka_per_hour: float, ke_per_hour: float) -> float:
+    """Minutes to the peak of exp(-ke t) - exp(-ka t)."""
+    return 60.0 * float(np.log(ka_per_hour / ke_per_hour)) / (ka_per_hour - ke_per_hour)
+
+
+# Point doses per step, FROZEN order: g, GI, U, min, h, U, min, h, session minutes.
+EVENT_CHANNELS = (
+    'carb_g', 'carb_gi',
+    'bolus_u', 'bolus_peak_min', 'bolus_dur_h',
+    'basal_u', 'basal_peak_min', 'basal_dur_h',
+    'exercise_min',
+)
+_EVENT_KINDS = {
+    'carb': ('carb_g', {'gi': 'carb_gi'}),
+    'correction_carb': ('carb_g', {'gi': 'carb_gi'}),
+    'bolus': ('bolus_u', {'peak_min': 'bolus_peak_min', 'dur_h': 'bolus_dur_h'}),
+    'insulin': ('bolus_u', {'peak_min': 'bolus_peak_min', 'dur_h': 'bolus_dur_h'}),
+    'basal': ('basal_u', {'peak_min': 'basal_peak_min', 'dur_h': 'basal_dur_h'}),
+    'exercise': ('exercise_min', {}),
+}
+
+
+class EventLog:
+    """Doses at their onset step; a descriptor is the dose-weighted mean of that step's doses."""
+
+    def __init__(self) -> None:
+        self._dose: dict[tuple[int, str], float] = {}
+        self._weighted: dict[tuple[int, str], float] = {}
+
+    def add(self, idx: int, curve_type: str, dose: float, **descriptors: float) -> None:
+        dose_channel, names = _EVENT_KINDS[curve_type]
+        assert set(descriptors) == set(names), f'{curve_type} event takes {sorted(names)}'
+        if dose <= 0.0:
+            return
+        self._dose[idx, dose_channel] = self._dose.get((idx, dose_channel), 0.0) + dose
+        for d, channel in names.items():
+            self._weighted[idx, channel] = (
+                self._weighted.get((idx, channel), 0.0) + dose * descriptors[d])
+
+    def step(self, idx: int) -> dict[str, float]:
+        """Every EVENT_CHANNELS value at ``idx``; 0.0 where nothing was dosed."""
+        out = {c: 0.0 for c in EVENT_CHANNELS}
+        for dose_channel, names in _EVENT_KINDS.values():
+            dose = self._dose.get((idx, dose_channel), 0.0)
+            out[dose_channel] = dose
+            for channel in names.values():
+                out[channel] = self._weighted.get((idx, channel), 0.0) / dose if dose else 0.0
+        return out
+
+
 def ge_day_weight(hour_of_day: float) -> float:
     """Smootherstep 0..1 waking-hours weight for the diurnal lift of the
     glucose-effectiveness equilibrium anchor (1 through the day, 0 overnight).
@@ -1189,6 +1244,7 @@ class T1DMSimulator:
         self._bolus_totals: np.ndarray = np.zeros(_init_len)
         self._exercise_totals: np.ndarray = np.zeros(_init_len)
         self._rescue_totals: np.ndarray = np.zeros(_init_len)  # correction_carb only, for the rule-of-15 recheck
+        self._events = EventLog()
 
         # EMA-smoothed insulin level used by the HGO Hill function. Models
         # plasma-insulin lag behind subcutaneous absorption.
@@ -1245,6 +1301,7 @@ class T1DMSimulator:
         self._bolus_totals = np.zeros(_init_len)
         self._exercise_totals = np.zeros(_init_len)
         self._rescue_totals = np.zeros(_init_len)  # correction_carb only, for the rule-of-15 recheck
+        self._events = EventLog()
         self._smoothed_insulin_for_hgo = 0.0
 
         # Reset AR(1) noise state (mirrors __init__).
@@ -1308,13 +1365,15 @@ class T1DMSimulator:
             self._exercise_totals[start_idx:end] += curve
 
     def inject_curve(self, values: np.ndarray, start_idx: int,
-                     curve_type: str, label: str = '') -> None:
-        """Inject a curve directly into the simulation.
+                     curve_type: str, label: str = '',
+                     event: dict | None = None) -> None:
+        """Inject a curve: updates active_curves and the accumulation arrays.
 
-        Use this instead of appending to state.active_curves directly when
-        adding curves externally (e.g., in tests or from custom scripts).
-        Both the accumulation arrays and active_curves are updated.
+        External callers use this rather than appending to state.active_curves.
+        ``event`` is the dose behind the curve, ``{'dose': ..., **descriptors}``, for EventLog.
         """
+        if event is not None:
+            self._events.add(start_idx, curve_type, **event)
         self.state.active_curves.append(ActiveCurve(
             start_time_idx=start_idx,
             values=values,
@@ -1554,6 +1613,9 @@ class T1DMSimulator:
                     'curve': curve,
                     'label': (f'Basal {actual_dose:.1f}U '
                               f'{p.basal_type} ({p.basal_duration_hours:.0f}h)'),
+                    'event': {'dose': float(actual_dose),
+                              'peak_min': bateman_peak_min(p.basal_ka, p.basal_ke),
+                              'dur_h': p.basal_duration_hours},
                 }))
 
             # Advance whether or not the injection was missed — the patient
@@ -1610,7 +1672,8 @@ class T1DMSimulator:
             k, theta, duration = gi_gamma_params(gi)
             self._pending_events.append((meal_idx, 'carb', {
                 'curve': gamma_curve(carb_amount, k, theta, duration),
-                'label': f'Meal {carb_amount:.0f}g GI {gi:.0f}'
+                'label': f'Meal {carb_amount:.0f}g GI {gi:.0f}',
+                'event': {'dose': float(carb_amount), 'gi': gi},
             }))
 
             # Delayed-meal HGO rebound: large meals trigger a positive HGO bump
@@ -1656,10 +1719,13 @@ class T1DMSimulator:
                 bolus_k = base_k * (1 + self.rng.normal(0, 0.05))
                 bolus_theta = base_theta * (1 + self.rng.normal(0, 0.05))
                 delivered_dose = intended_dose * self._site_quality(eff_s4)
-                bolus_curve = gamma_curve(delivered_dose, max(1.5, bolus_k),
-                                          max(5.0, bolus_theta), bolus_duration)
+                bolus_k, bolus_theta = max(1.5, bolus_k), max(5.0, bolus_theta)
+                bolus_curve = gamma_curve(delivered_dose, bolus_k, bolus_theta, bolus_duration)
                 self._pending_events.append((bolus_idx, 'bolus', {
-                    'curve': bolus_curve, 'label': f'Bolus {delivered_dose:.1f}U'
+                    'curve': bolus_curve, 'label': f'Bolus {delivered_dose:.1f}U',
+                    'event': {'dose': float(delivered_dose),
+                              'peak_min': gamma_peak_min(bolus_k, bolus_theta),
+                              'dur_h': bolus_duration / 60.0},
                 }))
 
         # --- Exercise ---
@@ -1681,6 +1747,7 @@ class T1DMSimulator:
                 'curve': ex_curve,
                 'label': f'Exercise {ex_duration:.0f}min',
                 'duration_min': ex_duration,  # stored for IS effect scheduling
+                'event': {'dose': float(ex_duration)},
             }))
 
         # --- Alcohol event (suppresses HGO, causing delayed lows) ---
@@ -1957,7 +2024,8 @@ class T1DMSimulator:
             # Hypo correction uses fast-acting carbs (glucose tablets / juice)
             curve = gamma_curve(correction_grams, *gi_gamma_params(RESCUE_CARB_GI))
             self.inject_curve(curve, time_idx, 'correction_carb',
-                              f'Hypo correction {correction_grams:.0f}g')
+                              f'Hypo correction {correction_grams:.0f}g',
+                              event={'dose': float(correction_grams), 'gi': RESCUE_CARB_GI})
             # Slow-carb follow-up snack: standard clinical advice after a
             # rescue is "treat the low, then eat a small carb+protein snack"
             # to keep glucose coming while the active bolus continues to act.
@@ -1971,7 +2039,8 @@ class T1DMSimulator:
                 followup_grams = correction_grams * HYPO_FOLLOWUP_FRACTION
                 followup_curve = gamma_curve(followup_grams, *gi_gamma_params(HYPO_FOLLOWUP_GI))
                 self.inject_curve(followup_curve, time_idx, 'correction_carb',
-                                  f'Hypo followup {followup_grams:.0f}g slow')
+                                  f'Hypo followup {followup_grams:.0f}g slow',
+                                  event={'dose': float(followup_grams), 'gi': HYPO_FOLLOWUP_GI})
             s.last_hypo_correction_idx = time_idx
 
             # Scale down basal insulin for the next ~90 min after any hypo
@@ -2037,7 +2106,10 @@ class T1DMSimulator:
                     delivered_dose = correction_dose * self._site_quality(p.lifestyle_consistency)
                     bolus_curve = gamma_curve(delivered_dose, base_k, base_theta, corr_duration)
                     self.inject_curve(bolus_curve, time_idx, 'bolus',
-                                      f'Correction {delivered_dose:.1f}U')
+                                      f'Correction {delivered_dose:.1f}U',
+                                      event={'dose': float(delivered_dose),
+                                             'peak_min': gamma_peak_min(base_k, base_theta),
+                                             'dur_h': corr_duration / 60.0})
                     s.last_correction_idx = time_idx
 
         # --- Trend-based anticipatory corrections ---
@@ -2062,7 +2134,10 @@ class T1DMSimulator:
                         delivered_dose = correction_dose * self._site_quality(p.lifestyle_consistency)
                         bolus_curve = gamma_curve(delivered_dose, base_k, base_theta, corr_duration)
                         self.inject_curve(bolus_curve, time_idx, 'bolus',
-                                          f'Trend corr {delivered_dose:.1f}U')
+                                          f'Trend corr {delivered_dose:.1f}U',
+                                          event={'dose': float(delivered_dose),
+                                                 'peak_min': gamma_peak_min(base_k, base_theta),
+                                                 'dur_h': corr_duration / 60.0})
                         s.last_correction_idx = time_idx
 
                 elif (trend < TREND_LOW_RATE_THRESHOLD and
@@ -2081,7 +2156,8 @@ class T1DMSimulator:
                         # Pre-emptive low correction uses fast-acting carbs
                         curve = gamma_curve(correction_grams, *gi_gamma_params(RESCUE_CARB_GI))
                         self.inject_curve(curve, time_idx, 'correction_carb',
-                                          f'Trend corr {correction_grams:.0f}g')
+                                          f'Trend corr {correction_grams:.0f}g',
+                                          event={'dose': correction_grams, 'gi': RESCUE_CARB_GI})
                         s.last_hypo_correction_idx = time_idx
 
     def generate(self) -> dict:
@@ -2105,6 +2181,7 @@ class T1DMSimulator:
             event_time, event_type, event_data = self._pending_events.pop(0)
             curve = event_data['curve']
             label = event_data.get('label', '')
+            event = event_data.get('event')
 
             # BG-aware meal-bolus gating. A scheduled pre-bolus is the dominant
             # sawtooth driver: patient corrects a hypo, climbs briefly above 70,
@@ -2120,6 +2197,8 @@ class T1DMSimulator:
                         scale = BOLUS_REDUCE_FACTOR_BASE + 0.3 * p.dosing_competence
                         curve = curve * scale
                         label = f"{label} (low-BG reduced ×{scale:.2f})"
+                        if event is not None:
+                            event = event | {'dose': event['dose'] * scale}
 
             # Same glance at the CGM before a planned session. Unconditional
             # rather than probabilistic like the bolus: setting off on a workout
@@ -2131,7 +2210,7 @@ class T1DMSimulator:
                 if s.bg_observed < p.hypo_threshold + EXERCISE_HYPO_MARGIN:
                     continue
 
-            self.inject_curve(curve, event_time, event_type, label=label)
+            self.inject_curve(curve, event_time, event_type, label=label, event=event)
             # Schedule post-exercise IS sensitivity boost
             if event_type == 'exercise':
                 ex_dur = event_data.get('duration_min', EXERCISE_DURATION_MEAN_MIN)
@@ -2380,6 +2459,8 @@ class T1DMSimulator:
             'is_weekend': s.day_of_week >= 5,
             'is_holiday': s.is_holiday,
             'alcohol_hgo_factor': alcohol_hgo_factor,
+            # Read last: a correction decided this step lands on this step.
+            **self._events.step(idx),
         }
 
     def generate_hours(self, hours: float) -> dict:
@@ -2393,6 +2474,7 @@ class T1DMSimulator:
             'insulin_resistance': [], 'hgo': [], 'glucose_in': [], 'glucose_out': [],
             'is_sick': [], 'is_rare_day': [], 'is_weekend': [], 'is_holiday': [],
             'alcohol_hgo_factor': [],
+            **{c: [] for c in EVENT_CHANNELS},
         }
         for _ in range(n_steps):
             step = self.generate()
