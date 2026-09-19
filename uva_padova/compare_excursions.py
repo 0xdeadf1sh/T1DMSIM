@@ -79,10 +79,11 @@ def capture_ours(seed: int, days: int, initial_bg: float):
     meal_g: dict = {}
     original = sim.inject_curve
 
-    def hook(values, start_idx, curve_type, label=""):
+    # ``values`` is the true curve; the patient's logged carbs never reach here.
+    def hook(values, start_idx, curve_type, label="", **kw):
         if curve_type == "carb":   # food meals only — exclude rescue/correction carbs
             meal_g[int(start_idx)] = meal_g.get(int(start_idx), 0.0) + float(np.sum(values))
-        return original(values, start_idx, curve_type, label)
+        return original(values, start_idx, curve_type, label, **kw)
 
     sim.inject_curve = hook  # type: ignore[method-assign]
     n = days * 24 * 60 // DT

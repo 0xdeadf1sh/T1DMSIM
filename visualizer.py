@@ -126,7 +126,7 @@ STEPS_PER_DAY = 24 * 60 // DT_MINUTES  # 288
 
 CURVES = [
     {'key': 'bg_observed', 'name': 'Blood Glucose',     'color': COLOR_BG_OBS,  'unit': 'mg/dL', 'y_min': BG_CLAMP_MIN, 'y_max': BG_CLAMP_MAX, 'toggle_key': pygame.K_1},
-    {'key': 'total_carb',  'name': 'Carb Intake',       'color': COLOR_CARB,    'unit': 'g/step','y_min': 0,   'y_max': 20,   'toggle_key': pygame.K_2},
+    {'key': 'total_carb',  'name': 'Carbs (logged)',    'color': COLOR_CARB,    'unit': 'g/step','y_min': 0,   'y_max': 20,   'toggle_key': pygame.K_2, 'shadow': 'total_carb_true'},
     {'key': 'total_insulin','name': 'Insulin (total)',  'color': COLOR_INSULIN, 'unit': 'U/step','y_min': 0,   'y_max': 2,   'toggle_key': pygame.K_3},
     {'key': 'basal_insulin','name': 'Basal',             'color': (120, 235, 255), 'unit': 'U/step','y_min': 0, 'y_max': 0.5, 'toggle_key': pygame.K_4},
     {'key': 'bolus_insulin','name': 'Bolus',             'color': (60, 180, 255),  'unit': 'U/step','y_min': 0, 'y_max': 2,   'toggle_key': pygame.K_5},
@@ -635,15 +635,25 @@ class Visualizer:
             color = curve_def['color']
             data = self.data[key]
 
-            # Build point list
-            points = []
-            for step in range(start, min(end, len(data))):
-                px = self._step_to_x(step, chart)
-                val = data[step]
-                frac = (val - y_min) / (y_max - y_min) if y_max != y_min else 0.5
-                frac = max(0, min(1, frac))
-                py = chart.y + chart.height * (1 - frac)
-                points.append((px, py))
+            def point_list(series):
+                pts = []
+                for step in range(start, min(end, len(series))):
+                    px = self._step_to_x(step, chart)
+                    frac = ((series[step] - y_min) / (y_max - y_min)
+                            if y_max != y_min else 0.5)
+                    frac = max(0, min(1, frac))
+                    pts.append((px, chart.y + chart.height * (1 - frac)))
+                return pts
+
+            points = point_list(data)
+
+            # The truth behind a logged channel, dimmed — the log is the trace.
+            shadow_key = curve_def.get('shadow')
+            if shadow_key is not None and shadow_key in self.data:
+                shadow_points = point_list(self.data[shadow_key])
+                if len(shadow_points) >= 2:
+                    draw_glow_lines(self.buffer, tuple(c // 3 for c in color),
+                                    shadow_points, width=1, glow=False)
 
             if len(points) >= 2:
                 # The BG trace is the hero — give it the fullest glow; the rest
@@ -692,6 +702,10 @@ class Visualizer:
             if step < len(self.data[key]):
                 val = self.data[key][step]
                 tooltip_lines.append(f"{curve_def['name']}: {val:.1f} {curve_def['unit']}")
+            shadow_key = curve_def.get('shadow')
+            if shadow_key is not None and step < len(self.data.get(shadow_key, ())):
+                tooltip_lines.append(
+                    f"  true: {self.data[shadow_key][step]:.1f} {curve_def['unit']}")
 
         # Sick/rare indicators
         if step < len(self.data['is_sick']) and self.data['is_sick'][step]:

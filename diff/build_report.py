@@ -691,7 +691,8 @@ def sim_event_summary(raw_runs):
     per = []
     all_basal = []
     for seed, d in raw_runs:
-        carbs_arr = _np.asarray(d.get("total_carb", []), dtype=float)
+        # The physiological curve, not `total_carb`, which carries the logged grams.
+        carbs_arr = _np.asarray(d.get("total_carb_true", []), dtype=float)
         basal_arr = _np.asarray(d.get("basal_insulin", []), dtype=float)
         bolus_arr = _np.asarray(d.get("bolus_insulin", []), dtype=float)
         # basal_insulin / bolus_insulin are per-step (5 min) PK-curve samples,
@@ -1065,7 +1066,7 @@ def unexplained_cohort_sim(raw_runs):
     base = datetime(2024, 1, 1)
     for seed, d in raw_runs:
         bg = np.asarray(d["bg_observed"], dtype=float)
-        carb = np.asarray(d["total_carb"], dtype=float)
+        carb = np.asarray(d["total_carb_true"], dtype=float)
         bol = np.asarray(d["bolus_insulin"], dtype=float)
         exe = np.asarray(d.get("total_exercise", []), dtype=float)
         n = len(bg)

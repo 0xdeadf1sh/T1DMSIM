@@ -125,7 +125,9 @@ Modifiers applied on top of the diurnal pattern:
 
 ## Behavioral Events
 
-- **Meals**: number, timing, and carb amount are all skill-dependent, and each meal is one gamma absorption curve shaped by a glycaemic index drawn around the patient's `meal_gi_mean`. The curve sums to the meal's logged grams.
+- **Meals**: number, timing, and carb amount are all skill-dependent, and each meal is one gamma absorption curve shaped by a glycaemic index drawn around the patient's `meal_gi_mean`. The curve sums to the meal's grams.
+
+- **The carbohydrate log**: the patient is a meticulous logger — every carb event is written down at the moment it happens — but the grams and the glycaemic index are guesses. A meal logs the same carb count its bolus is dosed from; a rescue, a follow-up snack or a trend snack each carry their own error, drawn from the patient's carb-counting sigma. The logged glycaemic index sits around the truth with a spread that narrows with dosing competence. A guess of 0 g logs nothing. The exported carbohydrate is this log, not the truth: a second gamma curve built from the guessed grams and GI, laid at the true onset time, driving nothing. Blood glucose runs on the true curve, exported separately as `total_carb_true`. Insulin and exercise are exact.
 
 - **Basal insulin**: one long-acting injection per day, anchored to `HGO_base × 24h × (body_weight_kg / BODY_WEIGHT_MEAN_KG) × is_base / ICR` and absorbed through a Bateman one-compartment PK curve `f(t) = exp(-ke·t) − exp(-ka·t)` whose rates and action window are the patient's assigned analogue: glargine U100 (73h), glargine U300 (101h) or degludec (133h).
 
@@ -189,17 +191,23 @@ from simulator import gamma_curve
 curve = gamma_curve(60.0, k=2.0, theta=15.0, duration_minutes=120.0)
 sim.inject_curve(curve, sim.state.current_idx, 'carb', 'Custom meal')
 
-# ... and log the dose behind it as a point event at its onset step
+# ... and put it in the patient's log too, as a curve plus a point event
+logged, event = sim._logged_carb(60.0, 100.0)
 sim.inject_curve(curve, sim.state.current_idx, 'carb', 'Custom meal',
-                 event={'dose': 60.0, 'gi': 100.0})
+                 event=event, logged=logged)
 ```
 
-Every step's dict carries the curves (`total_carb`, `total_insulin`,
-`total_exercise`) and, beside them, the point events of `EVENT_CHANNELS`: the
-grams, units or session minutes of each dose at the step it was taken, with its
-glycaemic index or its minutes-to-peak and hours of action. Amounts are the true
-ones the curves are built from. Doses sharing a step are summed and their
-descriptors dose-weighted.
+Every step's dict carries the curves (`total_carb`, `total_carb_true`,
+`total_insulin`, `total_exercise`) and, beside them, the point events of
+`EVENT_CHANNELS`: the grams, units or session minutes of each dose at the step it
+was taken, with its glycaemic index or its minutes-to-peak and hours of action.
+Doses sharing a step are summed and their descriptors dose-weighted.
+
+`total_carb` and the `carb_g` / `carb_gi` events are the patient's log — guessed
+grams and GI at the true onset step. `total_carb_true` is the absorption curve
+blood glucose actually runs on. Insulin, exercise and every other channel are
+exact. A carb curve injected without `logged=` moves blood glucose and appears in
+no log.
 
 Trajectory cache (needs `blosc2`):
 
@@ -212,7 +220,9 @@ python cache_simulator.py --pool-size 50000 --events                 # curves pl
 The cache is one blosc2 array per channel, a `meta.json`, a `DATASET.md` and the
 `normalization_stats.json` T1DMAI trains under. `--events` appends the point-event
 channels after the curves and adds `normalization_stats_events.json`; without it
-the output is unchanged.
+the output is unchanged. The cached `total_carb`, `carb_g` and `carb_gi` are the
+patient's log; the true carbohydrate is not stored, so the fitted normalization
+statistics are the log's.
 
 
 ## Visualizer Controls
@@ -231,7 +241,7 @@ S           Screenshot (PNG)
 Q/ESC       Quit
 ```
 
-Curves: (1) Blood Glucose, (2) Carb Intake, (3) Insulin (total), (4) Basal, (5) Bolus, (6) Insulin Resistance (multiplier; >1 = resistant), (7) Exercise, (8) BG Delta, (9) Hepatic Output, (0) Glucose In.
+Curves: (1) Blood Glucose, (2) Carbs (logged) — the true absorption curve trails it dimmed, and the hover box gives its value, (3) Insulin (total), (4) Basal, (5) Bolus, (6) Insulin Resistance (multiplier; >1 = resistant), (7) Exercise, (8) BG Delta, (9) Hepatic Output, (0) Glucose In.
 
 
 ## Comparison Against Real-World Datasets

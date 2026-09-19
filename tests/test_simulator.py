@@ -143,6 +143,7 @@ class TestGenerateHours:
         sim = T1DMSimulator(seed=0)
         data = sim.generate_hours(24)
         required_keys = ['bg', 'bg_observed', 'bg_delta', 'total_carb',
+                         'total_carb_true',
                          'total_insulin', 'insulin_resistance', 'hgo',
                          'is_sick', 'is_rare_day', 'is_weekend', 'is_holiday',
                          'alcohol_hgo_factor']
@@ -657,10 +658,10 @@ class TestBasalInjectionCadence:
             original_inject = sim.inject_curve
 
             def capturing_inject(values, start_idx, curve_type, label='', event=None,
-                                  _orig=original_inject, _store=basal_indices):
+                                  *, _orig=original_inject, _store=basal_indices, **kw):
                 if curve_type == 'basal':
                     _store.append(int(start_idx))
-                return _orig(values, start_idx, curve_type, label, event)
+                return _orig(values, start_idx, curve_type, label, event, **kw)
 
             sim.inject_curve = capturing_inject
 

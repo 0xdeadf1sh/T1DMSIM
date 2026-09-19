@@ -250,6 +250,10 @@ CARB_COUNT_UNDERBOLUS_BIAS = 0.0    # Zeroed. Stepped -0.20 → -0.10 → 0.0. W
                                      # drove the +50 mg/dL evening overshoot vs Ohio. Educated
                                      # T1Ds in well-controlled cohorts dose closer to truth.
 
+# The patient logs every carb event at its true onset step; the grams and GI are guesses.
+GI_GUESS_SIGMA_BASE = 15.0     # per-patient GI-guess SD = base * (1.3 - s3)^2, the carb-count shape
+CARB_LOG_SEED_STREAM = 1000003  # keyed with the sim seed: a guess never draws from self.rng
+
 # Insulin stacking
 CGM_CHECK_INTERVAL_ATTENTIVE = 20  # Minutes between checks for attentive patient
 CGM_CHECK_INTERVAL_INATTENTIVE = 240  # Minutes for inattentive patient
@@ -754,6 +758,7 @@ class PatientProfile:
     cgm_check_interval_min: float = 60.0
     patience_time_min: float = 120.0
     carb_count_error_sigma: float = 0.15
+    gi_guess_sigma: float = GI_GUESS_SIGMA_BASE  # SD of the GI this patient writes down
     bolus_timing_mean: float = 0.0
     bolus_timing_sigma: float = 10.0
     exercise_probability: float = 0.5
@@ -1181,6 +1186,7 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     # (s3=0.95 -> ~9% sigma, s3=0.25 -> ~66% sigma). The linear form gave
     # high-skill patients enough residual error to spend ~30% in TBR.
     profile.carb_count_error_sigma = CARB_COUNT_ERROR_SIGMA_BASE * (1.3 - s3) ** 2
+    profile.gi_guess_sigma = GI_GUESS_SIGMA_BASE * (1.3 - s3) ** 2
     profile.bolus_timing_mean = (BOLUS_TIMING_COMPETENT_MEAN * s3 +
                                   BOLUS_TIMING_INCOMPETENT_MEAN * (1 - s3))
     profile.bolus_timing_sigma = BOLUS_TIMING_SIGMA_BASE / (0.3 + 0.7 * s3)
@@ -1244,7 +1250,9 @@ class T1DMSimulator:
         self._bolus_totals: np.ndarray = np.zeros(_init_len)
         self._exercise_totals: np.ndarray = np.zeros(_init_len)
         self._rescue_totals: np.ndarray = np.zeros(_init_len)  # correction_carb only, for the rule-of-15 recheck
+        self._logged_carb_totals: np.ndarray = np.zeros(_init_len)  # what the patient wrote down
         self._events = EventLog()
+        self._log_rng = np.random.default_rng([CARB_LOG_SEED_STREAM, seed])
 
         # EMA-smoothed insulin level used by the HGO Hill function. Models
         # plasma-insulin lag behind subcutaneous absorption.
@@ -1301,7 +1309,9 @@ class T1DMSimulator:
         self._bolus_totals = np.zeros(_init_len)
         self._exercise_totals = np.zeros(_init_len)
         self._rescue_totals = np.zeros(_init_len)  # correction_carb only, for the rule-of-15 recheck
+        self._logged_carb_totals = np.zeros(_init_len)  # what the patient wrote down
         self._events = EventLog()
+        self._log_rng = np.random.default_rng([CARB_LOG_SEED_STREAM, seed])
         self._smoothed_insulin_for_hgo = 0.0
 
         # Reset AR(1) noise state (mirrors __init__).
@@ -1340,6 +1350,8 @@ class T1DMSimulator:
             self._bolus_totals = np.concatenate([self._bolus_totals, np.zeros(extra)])
             self._exercise_totals = np.concatenate([self._exercise_totals, np.zeros(extra)])
             self._rescue_totals = np.concatenate([self._rescue_totals, np.zeros(extra)])
+            self._logged_carb_totals = np.concatenate(
+                [self._logged_carb_totals, np.zeros(extra)])
 
     def _add_to_totals(self, curve: np.ndarray, start_idx: int, curve_type: str) -> None:
         """Scatter-add a curve into the appropriate accumulation array.
@@ -1366,11 +1378,12 @@ class T1DMSimulator:
 
     def inject_curve(self, values: np.ndarray, start_idx: int,
                      curve_type: str, label: str = '',
-                     event: dict | None = None) -> None:
+                     event: dict | None = None,
+                     logged: np.ndarray | None = None) -> None:
         """Inject a curve: updates active_curves and the accumulation arrays.
-
         External callers use this rather than appending to state.active_curves.
-        ``event`` is the dose behind the curve, ``{'dose': ..., **descriptors}``, for EventLog.
+        ``event`` is the dose row for EventLog; ``logged`` the logged carb curve,
+        accumulated apart from ``values``, which alone drives BG.
         """
         if event is not None:
             self._events.add(start_idx, curve_type, **event)
@@ -1381,6 +1394,26 @@ class T1DMSimulator:
             label=label
         ))
         self._add_to_totals(values, start_idx, curve_type)
+        if logged is not None:
+            end = start_idx + len(logged)
+            self._ensure_totals_length(end)
+            self._logged_carb_totals[start_idx:end] += logged
+
+    def _logged_carb(self, grams: float, gi: float,
+                     logged_grams: float | None = None) -> tuple:
+        """The curve and EventLog row the patient logs for a carb event.
+        Grams are ``logged_grams`` (a meal's own carb count) or a fresh guess; the GI
+        is guessed around the truth. ``(None, None)`` when the guess is 0 g.
+        """
+        p = self.patient
+        g = logged_grams if logged_grams is not None else grams * max(
+            0.0, 1.0 + self._log_rng.normal(CARB_COUNT_UNDERBOLUS_BIAS,
+                                            p.carb_count_error_sigma))
+        gi_guess = float(np.clip(gi + self._log_rng.normal(0.0, p.gi_guess_sigma), 0.0, 100.0))
+        if g <= 0.0:
+            return None, None
+        return (gamma_curve(float(g), *gi_gamma_params(gi_guess)),
+                {'dose': float(g), 'gi': gi_guess})
 
     def _generate_year_holidays(self, year: int) -> None:
         """Generate and store public holidays for the given simulation year.
@@ -1670,11 +1703,11 @@ class T1DMSimulator:
             else:
                 gi = float(np.clip(self.rng.normal(p.meal_gi_mean, MEAL_GI_SIGMA), 0.0, 100.0))
             k, theta, duration = gi_gamma_params(gi)
-            self._pending_events.append((meal_idx, 'carb', {
+            meal = {
                 'curve': gamma_curve(carb_amount, k, theta, duration),
                 'label': f'Meal {carb_amount:.0f}g GI {gi:.0f}',
-                'event': {'dose': float(carb_amount), 'gi': gi},
-            }))
+            }
+            self._pending_events.append((meal_idx, 'carb', meal))
 
             # Delayed-meal HGO rebound: large meals trigger a positive HGO bump
             # 3.5-5.5h later from delayed gluconeogenesis (amino acids) and cortisol
@@ -1692,6 +1725,9 @@ class T1DMSimulator:
             # --- Bolus for this meal ---
             carb_estimate = max(0, carb_amount * (1 + self.rng.normal(
                 CARB_COUNT_UNDERBOLUS_BIAS, p.carb_count_error_sigma)))
+            # The log and the bolus agree: both read this same carb count.
+            meal['logged'], meal['event'] = self._logged_carb(
+                carb_amount, gi, logged_grams=float(carb_estimate))
 
             # Real pump users bolus for almost everything they eat, including
             # snacks. Skip-prob caps at ~10% for the lowest-skill snackers,
@@ -2023,9 +2059,10 @@ class T1DMSimulator:
 
             # Hypo correction uses fast-acting carbs (glucose tablets / juice)
             curve = gamma_curve(correction_grams, *gi_gamma_params(RESCUE_CARB_GI))
+            logged, logged_event = self._logged_carb(correction_grams, RESCUE_CARB_GI)
             self.inject_curve(curve, time_idx, 'correction_carb',
                               f'Hypo correction {correction_grams:.0f}g',
-                              event={'dose': float(correction_grams), 'gi': RESCUE_CARB_GI})
+                              event=logged_event, logged=logged)
             # Slow-carb follow-up snack: standard clinical advice after a
             # rescue is "treat the low, then eat a small carb+protein snack"
             # to keep glucose coming while the active bolus continues to act.
@@ -2038,9 +2075,10 @@ class T1DMSimulator:
             if skill_avg > HYPO_FOLLOWUP_SKILL_THRESHOLD:
                 followup_grams = correction_grams * HYPO_FOLLOWUP_FRACTION
                 followup_curve = gamma_curve(followup_grams, *gi_gamma_params(HYPO_FOLLOWUP_GI))
+                logged, logged_event = self._logged_carb(followup_grams, HYPO_FOLLOWUP_GI)
                 self.inject_curve(followup_curve, time_idx, 'correction_carb',
                                   f'Hypo followup {followup_grams:.0f}g slow',
-                                  event={'dose': float(followup_grams), 'gi': HYPO_FOLLOWUP_GI})
+                                  event=logged_event, logged=logged)
             s.last_hypo_correction_idx = time_idx
 
             # Scale down basal insulin for the next ~90 min after any hypo
@@ -2155,9 +2193,11 @@ class T1DMSimulator:
                             abs(trend) * TREND_CORRECTION_WINDOW_STEPS * 2.0, 5.0, 20.0))
                         # Pre-emptive low correction uses fast-acting carbs
                         curve = gamma_curve(correction_grams, *gi_gamma_params(RESCUE_CARB_GI))
+                        logged, logged_event = self._logged_carb(
+                            correction_grams, RESCUE_CARB_GI)
                         self.inject_curve(curve, time_idx, 'correction_carb',
                                           f'Trend corr {correction_grams:.0f}g',
-                                          event={'dose': correction_grams, 'gi': RESCUE_CARB_GI})
+                                          event=logged_event, logged=logged)
                         s.last_hypo_correction_idx = time_idx
 
     def generate(self) -> dict:
@@ -2210,7 +2250,8 @@ class T1DMSimulator:
                 if s.bg_observed < p.hypo_threshold + EXERCISE_HYPO_MARGIN:
                     continue
 
-            self.inject_curve(curve, event_time, event_type, label=label, event=event)
+            self.inject_curve(curve, event_time, event_type, label=label, event=event,
+                              logged=event_data.get('logged'))
             # Schedule post-exercise IS sensitivity boost
             if event_type == 'exercise':
                 ex_dur = event_data.get('duration_min', EXERCISE_DURATION_MEAN_MIN)
@@ -2221,6 +2262,8 @@ class T1DMSimulator:
 
         # --- Read per-step contributions from pre-computed accumulation arrays (O(1)) ---
         total_carb = float(self._carb_totals[idx]) if idx < len(self._carb_totals) else 0.0
+        logged_carb = (float(self._logged_carb_totals[idx])
+                       if idx < len(self._logged_carb_totals) else 0.0)
         basal_step = float(self._basal_totals[idx]) if idx < len(self._basal_totals) else 0.0
         bolus_step = float(self._bolus_totals[idx]) if idx < len(self._bolus_totals) else 0.0
         # Post-hypo basal stand-down (set by _check_cgm_and_correct after any
@@ -2445,7 +2488,8 @@ class T1DMSimulator:
             'bg': s.bg,
             'bg_observed': s.bg_observed,
             'bg_delta': bg_delta,
-            'total_carb': total_carb,
+            'total_carb': logged_carb,
+            'total_carb_true': total_carb,
             'total_insulin': total_insulin,
             'basal_insulin': basal_step,
             'bolus_insulin': bolus_step,
@@ -2469,7 +2513,7 @@ class T1DMSimulator:
         results: dict = {
             'index': [], 'time_hours': [], 'day': [], 'hour_of_day': [],
             'bg': [], 'bg_observed': [], 'bg_delta': [],
-            'total_carb': [], 'total_insulin': [], 'basal_insulin': [],
+            'total_carb': [], 'total_carb_true': [], 'total_insulin': [], 'basal_insulin': [],
             'bolus_insulin': [], 'total_exercise': [],
             'insulin_resistance': [], 'hgo': [], 'glucose_in': [], 'glucose_out': [],
             'is_sick': [], 'is_rare_day': [], 'is_weekend': [], 'is_holiday': [],

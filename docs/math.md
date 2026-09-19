@@ -8,6 +8,7 @@ Reference for the T1DM simulator's model: curve generation, the BG delta pipelin
 ```mermaid
 flowchart TD
     CARB["carb curves<br/>meals · hypo corrections · follow-up snacks"] --> GIN["glucose_in = carb + HGO − exercise"]
+    CARB -.->|"guessed grams and GI"| LOG["logged carb curve<br/>exported as total_carb; drives nothing"]
     EX["exercise curves"] -->|subtracted| GIN
     HGO["HGO<br/>Hill insulin suppression × glycogen gate × alcohol<br/>+ dawn/night term + delayed-meal rebound"] --> GIN
     INS["insulin curves<br/>basal · bolus · corrections<br/>× injection-site quality"] --> GOUT["glucose_out = insulin × ICR / IS"]
@@ -49,7 +50,19 @@ Averaging the density across the step is what sizes the leading edge: the first 
     meal_gi_mean = MEAL_GI_MEAN_MAX - MEAL_GI_DISCIPLINE_SPAN * s1       per patient
     meal GI      = clip(N(meal_gi_mean, MEAL_GI_SIGMA), 0, 100)          per meal
 
-One curve per meal, summing to the meal's logged grams, `carb_amount`. Rescue and trend carbs use `RESCUE_CARB_GI` (100); the hypo follow-up snack uses `HYPO_FOLLOWUP_GI` (20).
+One curve per meal, summing to the meal's grams, `carb_amount`. Rescue and trend carbs use `RESCUE_CARB_GI` (100); the hypo follow-up snack uses `HYPO_FOLLOWUP_GI` (20).
+
+### Logged carbohydrate
+
+The patient logs every carb event at its true onset step, but the grams and the glycaemic index are guesses. A meal logs the same `carb_estimate` that sizes its bolus, so the log and the dose agree; every other carb event — rescue, follow-up snack, trend carbs — draws its own:
+
+    logged_grams   = grams * max(0, 1 + N(CARB_COUNT_UNDERBOLUS_BIAS, carb_count_error_sigma))
+    gi_guess_sigma = GI_GUESS_SIGMA_BASE * (1.3 - s3)^2                  per patient
+    logged_gi      = clip(GI + N(0, gi_guess_sigma), 0, 100)             per event
+
+The logged curve is a second gamma, `gamma_curve(logged_grams, gi_gamma_params(logged_gi))`, laid at the true onset index and accumulated apart from the true one. A 0 g guess logs nothing — no curve and no event row. Nothing physiological reads the logged curve: `glucose_in`, the glycogen refill, postprandial insulin resistance, carbs-on-board and the delayed-HGO rebound all read the true one. The guesses are drawn from a generator keyed on the simulator seed alone, so a seed's BG trace is independent of them.
+
+The step dict exports the logged curve as `total_carb` and the true curve as `total_carb_true`; the `carb_g` and `carb_gi` point-event channels carry the guess.
 
 
 ## Insulin Action Curves
@@ -123,12 +136,12 @@ In T1DM the incretin / GLP-1 axis is blunted and there is no endogenous insulin 
 
 ## BG Delta Computation
 
-    glucose_in  = total_carb + HGO - exercise
+    glucose_in  = total_carb_true + HGO - exercise
     glucose_out = total_insulin * ICR / IS(t)
     delta_BG    = BG_SCALE_FACTOR * (glucose_in - glucose_out)
     delta_BG   += Sg * (E(t) - BG)     # glucose-effectiveness restoring pull (see below)
 
-`IS(t)` divides the insulin side only: insulin-resistant patients (IS > 1) clear less glucose per unit insulin. HGO suppression by insulin is handled separately by the Hill function (see Hepatic Glucose Output). Physiological guardrails, then the clamp:
+Carbs enter as the true absorption curve; the logged curve the patient wrote down (see Logged carbohydrate) never appears here. `IS(t)` divides the insulin side only: insulin-resistant patients (IS > 1) clear less glucose per unit insulin. HGO suppression by insulin is handled separately by the Hill function (see Hepatic Glucose Output). Physiological guardrails, then the clamp:
 
     if BG > RENAL_THRESHOLD:
         delta_BG -= (BG - RENAL_THRESHOLD) * RENAL_CLEARANCE_RATE
@@ -228,7 +241,7 @@ Hepatic glycogen is a finite store gating the glycogenolysis-sourced fraction of
         glycogen_gate = 1.0
 
     glycogen -= HGO(t) * GLYCOGEN_DRAIN_FRACTION        (drain from glycogenolysis)
-    glycogen += total_carb * GLYCOGEN_REFILL_FRACTION   (refill from absorbed carbs)
+    glycogen += total_carb_true * GLYCOGEN_REFILL_FRACTION   (refill from absorbed carbs)
     glycogen  = clip(glycogen, 0, GLYCOGEN_CAPACITY)
 
 
@@ -312,8 +325,10 @@ The hard clamp still runs as a backstop after this cap. `BG_SOFT_FLOOR` is 20 mg
 
 Multiplicative noise on the per-step contributions read from the accumulation arrays, modelling moment-to-moment absorption variation the smooth gamma curves cannot capture. Active only when the underlying curve is non-zero:
 
-    total_carb    *= max(0, 1 + N(0, CARB_ABSORPTION_NOISE_SIGMA))      if total_carb > 0
-    total_insulin *= max(0, 1 + N(0, INSULIN_ABSORPTION_NOISE_SIGMA))   if total_insulin > 0
+    total_carb_true *= max(0, 1 + N(0, CARB_ABSORPTION_NOISE_SIGMA))    if total_carb_true > 0
+    total_insulin   *= max(0, 1 + N(0, INSULIN_ABSORPTION_NOISE_SIGMA)) if total_insulin > 0
+
+The logged carb curve is read straight from its accumulator; absorption noise is physiology, not a property of the record.
 
 ### Exercise post-effect IS envelope
 
@@ -366,7 +381,7 @@ All curve values are in "amount per step" units:
 
 | Channel | Unit | Normalization |
 | --- | --- | --- |
-| Carb curves | grams per step | sum of curve = total grams |
+| Carb curves (true, and logged) | grams per step | sum of curve = total grams |
 | Insulin curves | units per step | sum of curve = total units |
 | HGO | grams per step | rate g/hr converted via `DT_MINUTES / 60` |
 | Exercise | grams-equivalent per step | — |

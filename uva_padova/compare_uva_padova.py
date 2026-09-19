@@ -92,9 +92,10 @@ def capture_run(seed: int, days: int, initial_bg: float):
     events: list = []
     original = sim.inject_curve
 
-    def hook(values, start_idx, curve_type, label=""):
+    # ``values`` is the true curve; the patient's logged carbs never reach here.
+    def hook(values, start_idx, curve_type, label="", **kw):
         events.append((int(start_idx), curve_type, float(np.sum(values))))
-        return original(values, start_idx, curve_type, label)
+        return original(values, start_idx, curve_type, label, **kw)
 
     sim.inject_curve = hook  # type: ignore[method-assign]
     n_steps = days * 24 * 60 // DT

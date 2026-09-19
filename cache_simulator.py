@@ -134,7 +134,7 @@ from simulator import (BG_CLAMP_MIN, BG_CLAMP_MAX, DT_MINUTES, EVENT_CHANNELS,
 
 CHANNEL_NAMES = (
     'bg_observed',
-    'total_carb',
+    'total_carb',  # the curve the patient's logged grams and GI build, not the true one
     'total_insulin',
     'insulin_resistance',
     'hgo',
@@ -447,7 +447,7 @@ def _simulate_patient(
         for c, arr in events.items():
             arr[i] = s[c]
         bg_obs[i] = s['bg_observed']
-        carb[i] = s['total_carb']
+        carb[i] = s['total_carb']  # logged; `total_carb_true` is the curve BG runs on
         ins[i] = s['total_insulin']
         ir[i] = s['insulin_resistance']
         hgo[i] = s['hgo']
@@ -1094,8 +1094,8 @@ def _render_dataset_md(report: dict[str, Any]) -> str:
     lines.append(f'| **Total CGM years** | **≈ {_fmt_years(c["total_cgm_years"])}** | exact (= patient-years) |')
     lines.append(f'| **Disk footprint** | **{_fmt_bytes(st["disk_total_bytes"])}** | exact (compressed `.b2nd` + `icr.npy`) |')
     lines.append(f'| Uncompressed channels | {_fmt_bytes(st["raw_channel_bytes"])} | exact ({st["compression_ratio"]:.2f}× ratio) |')
-    lines.append(f'| **Carbs appeared** | **{_fmt_mass_g(cons["carb_total_g"])}** | integral of carb-appearance, incl. hypo rescue ({cons["carb_per_patient_g"]:.0f} g/patient, {cons["carb_per_day_g"]:.1f} g/day) |')
-    lines.append(f'| **Carb-appearance events** | **{cons["meals_total"]:,}** | upward crossings, incl. hypo rescue ({cons["meals_per_patient"]:.2f}/patient, {cons["meals_per_day"]:.2f}/day) |')
+    lines.append(f'| **Carbs logged** | **{_fmt_mass_g(cons["carb_total_g"])}** | integral of the logged carb-appearance curve, incl. hypo rescue ({cons["carb_per_patient_g"]:.0f} g/patient, {cons["carb_per_day_g"]:.1f} g/day) |')
+    lines.append(f'| **Logged carb events** | **{cons["meals_total"]:,}** | upward crossings of the logged curve, incl. hypo rescue ({cons["meals_per_patient"]:.2f}/patient, {cons["meals_per_day"]:.2f}/day) |')
     lines.append(f'| **Insulin delivered** | **{cons["insulin_total_u"]:,.0f} U** (≈ {_fmt_vol_l(cons["insulin_total_litres_u100"])} of U-100) | integral of delivery ({cons["insulin_per_patient_u"]:.1f} U/patient, {cons["insulin_per_day_u"]:.1f} U/day) |')
     lines.append(f'| └ basal : bolus split | {pct(cons["basal_frac"])} : {pct(cons["bolus_frac"])} | exact (separate channels summed) |')
     lines.append(f'| Boluses | {cons["boluses_total"]:,} ({cons["boluses_per_day"]:.2f}/day) | threshold-crossings (merges overlapping PK tails) |')
