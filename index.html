@@ -33,7 +33,7 @@
   --carb: #ff9614;          /* COLOR_CARB — neon amber */
   --ins: #28d2ff;           /* COLOR_INSULIN — neon cyan */
   --is: #c864ff;            /* COLOR_IS — neon magenta */
-  --ex: #ff3782;            /* COLOR_CONSISTENCY — hot pink */
+  --cons: #ff3782;          /* COLOR_CONSISTENCY — hot pink */
   --lo: #ff465a;            /* hypo marker */
   --hi: #ffd228;            /* hyper marker */
   --ir: #aaff3c;            /* in range — the hero trace's own lime */
@@ -195,7 +195,7 @@ pre { background: var(--surface); border: 1px solid var(--rule); border-radius: 
 .pillar.s1 { border-color: var(--carb); }
 .pillar.s2 { border-color: var(--ins); }
 .pillar.s3 { border-color: var(--is); }
-.pillar.s4 { border-color: var(--ex); }
+.pillar.s4 { border-color: var(--cons); }
 
 /* ---- footer ---- */
 footer { border-top: 1px solid var(--rule); padding: 2.5rem 0 3.5rem; font-size: 13px; color: var(--faint); }
@@ -657,7 +657,7 @@ day = sim.generate_hours(<span class="cm">24</span>)   <span class="cm"># dict o
     <p class="sub">A Pygame visualizer renders every factor curve alongside the skill profile and derived
     parameters. Toggle curves, scrub the timeline, reseed at will.</p>
     <figure class="feature">
-      <img src="screenshots/t1dm_seed42_36h.png" alt="The Pygame visualizer showing 36 hours of blood glucose, carbohydrate, insulin and resistance curves for seed 42, with the patient profile and live statistics in a sidebar." loading="lazy">
+      <img src="screenshots/t1dm_seed42_36h.png" alt="The Pygame visualizer showing 36 hours of blood glucose, carbohydrate and insulin curves for seed 42, with the patient profile and live statistics in a sidebar." loading="lazy">
     </figure>
     <p class="btns"><a class="btn ghost" href="https://github.com/0xdeadf1sh/T1DMSIM#installation-and-usage">Install and run</a></p>
   </div>
