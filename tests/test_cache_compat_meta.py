@@ -52,4 +52,4 @@ def test_meta_carries_flat_compat_keys(tmp_path):
     assert meta['patient_uniform_sample_prob'] == 0.0
     assert meta['dt_minutes'] == 5
     assert tuple(meta['channels']) == cs.CHANNEL_NAMES
-    assert meta['cache_format'] == 'blosc2-ndarray-v1'
+    assert meta['cache_format'] == 'blosc2-ndarray-v2'

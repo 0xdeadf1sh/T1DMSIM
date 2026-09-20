@@ -64,7 +64,7 @@ def channel_names(events: bool) -> tuple[str, ...]:
 # CACHE / COMPRESSION PARAMETERS
 # ============================================================================
 
-CACHE_FORMAT_VERSION = 'blosc2-ndarray-v1'
+CACHE_FORMAT_VERSION = 'blosc2-ndarray-v2'
 DEFAULT_ROWS_PER_CHUNK = 32
 DEFAULT_ZSTD_CLEVEL = 5
 # blosc2 chunks must fit a signed 32-bit byte count (the C-extension ceiling).
