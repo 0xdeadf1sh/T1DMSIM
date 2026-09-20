@@ -1,12 +1,13 @@
 """Pre-generate a pool of post-warmup simulator trajectories to disk.
 
-One compressed .b2nd per CHANNEL_NAMES channel, plus icr.npy, NORM_STATS_FILE,
-NORM_STATS_EVENTS_FILE, a meta.json sentinel and a DATASET.md render. A row touching a
-BG rail is re-seeded; --hypo-oversample re-seeds a fixed fraction until hypo-rich."""
+One .b2nd per context and tail channel, plus icr.npy, skills.npy, the two stats files, a
+meta.json sentinel and a DATASET.md render. Row geometry is SPEC/cache.md: a row whose
+CONTEXT touches a BG rail is re-seeded, --hypo-oversample biases a fixed fraction."""
 
 from __future__ import annotations
 
 import argparse
+import copy
 import dataclasses
 import gc
 import hashlib
@@ -27,8 +28,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import blosc2
 
-from simulator import (BG_CLAMP_MIN, BG_CLAMP_MAX, DT_MINUTES, EVENT_CHANNELS,
-                       SIMULATOR_WARMUP_HOURS, T1DMSimulator)
+from simulator import (BG_CLAMP_MIN, BG_CLAMP_MAX, BOLUS_VARIANTS, DT_MINUTES,
+                       EVENT_CHANNELS, SIMULATOR_WARMUP_HOURS, STEPS_PER_DAY,
+                       T1DMSimulator)
 
 
 # ============================================================================
@@ -44,10 +46,26 @@ CHANNEL_NAMES = (
     'hour_of_day',
     'day',
 )
+# The tails additionally carry true BG and the basal/bolus split, FROZEN order.
+TAIL_CHANNEL_NAMES = (
+    'bg_observed',
+    'bg',
+    'total_carb',
+    'total_insulin',
+    'basal_insulin',
+    'bolus_insulin',
+    'insulin_resistance',
+    'hgo',
+    'hour_of_day',
+    'day',
+)
 CHANNEL_DTYPES: dict[str, Any] = {
     'bg_observed': np.float32,
+    'bg': np.float32,
     'total_carb': np.float32,
     'total_insulin': np.float32,
+    'basal_insulin': np.float32,
+    'bolus_insulin': np.float32,
     'insulin_resistance': np.float32,
     'hgo': np.float32,
     'hour_of_day': np.float32,
@@ -56,15 +74,47 @@ CHANNEL_DTYPES: dict[str, Any] = {
 
 
 def channel_names(events: bool) -> tuple[str, ...]:
-    """Cached channels; ``--events`` appends the point doses after the curves."""
+    """Cached context channels; ``--events`` appends the point doses after the curves."""
     return CHANNEL_NAMES + (EVENT_CHANNELS if events else ())
+
+
+def tail_channel_names(events: bool) -> tuple[str, ...]:
+    """Per-step tail channels; ``--events`` appends the point doses after the curves."""
+    return TAIL_CHANNEL_NAMES + (EVENT_CHANNELS if events else ())
+
+
+PATCH_SIZE = 6                                              # inference.md §11
+MAX_CONTEXT_PATCHES = 336                                   # 7 d of context
+PREDICTION_PATCHES = 4                                      # 2 h of forecast
+DEFAULT_CONTEXT_STEPS = MAX_CONTEXT_PATCHES * PATCH_SIZE    # 2016
+DEFAULT_TAIL_STEPS = PREDICTION_PATCHES * PATCH_SIZE        # 24
+DEFAULT_WARMUP_OFFSET_STEPS = STEPS_PER_DAY  # drawn per row: a uniform boundary hour
+
+# The index IS the arm's identity; a 2x2 factorial over the two boundary doses.
+TAIL_ARMS = ('none', 'bolus', 'carbs', 'bolus_carbs')
+N_TAIL_ARMS = len(TAIL_ARMS)
+
+# Keyed with the row seed: a boundary dose never draws from self.rng or _log_rng.
+TAIL_DOSE_SEED_STREAM = 1000033
+TAIL_BOLUS_U_RANGE = (0.5, 20.0)     # log-uniform
+TAIL_CARB_G_RANGE = (5.0, 120.0)     # log-uniform
+TAIL_CARB_GI_RANGE = (0.0, 100.0)    # uniform
+BOLUS_ANALOGUES = tuple(sorted(BOLUS_VARIANTS))
+
+# Patient skills, FROZEN column order, written to skills.npy like icr.npy.
+SKILL_NAMES = ('dietary_discipline', 'attentiveness', 'dosing_competence',
+               'lifestyle_consistency')
+SKILLS_FILE = 'skills.npy'
+
+# Minutes after the boundary at which DATASET.md reports each arm's mean BG.
+TAIL_REPORT_OFFSETS_MIN = (30, 60, 90, 120)
 
 
 # ============================================================================
 # CACHE / COMPRESSION PARAMETERS
 # ============================================================================
 
-CACHE_FORMAT_VERSION = 'blosc2-ndarray-v2'
+CACHE_FORMAT_VERSION = 'blosc2-ndarray-v3'
 DEFAULT_ROWS_PER_CHUNK = 32
 DEFAULT_ZSTD_CLEVEL = 5
 # blosc2 chunks must fit a signed 32-bit byte count (the C-extension ceiling).
@@ -78,8 +128,7 @@ _TRANSCODE_BLOCK_BYTES = 256 * 1024 * 1024
 # GENERATION DEFAULTS
 # ============================================================================
 
-DEFAULT_SIM_HOURS = 199.5    # [CF] 103.5→199.5 — room for a 7-day (336-patch) context, at the smallest length that keeps hour-of-day coverage exactly uniform. T1DMAI draws patch-aligned starts in [context, N - forward_room], so the start count is (N - context - forward)/6 + 1 and must be a multiple of 48 (half-hour slots per day) or some slots are oversampled. N = 2394 gives 384 - n_ctx starts, a multiple of 48 at EVERY whole-day context width from 24 h (336 starts) to 7 days (48); 2400 gives 385 - n_ctx and is a multiple of 48 at none of them, tilting every window distribution toward midnight. The congruence is N ≡ 90 (mod 288); 2394 is the smallest such N that leaves a 336-patch context any candidate at all, since it needs (336 + 16) * 6 = 2112 steps and the previous congruent length is 2106. PAIRED CHANGE: T1DMAI/data.py ON_THE_FLY_SIM_HOURS must move with this or its loader rejects the cache outright.
-DEFAULT_WARMUP_HOURS = SIMULATOR_WARMUP_HOURS  # discarded lead-in so the state has forgotten its init
+DEFAULT_WARMUP_HOURS = SIMULATOR_WARMUP_HOURS  # fixed lead-in, before the row's own offset
 DEFAULT_MAX_ATTEMPTS = 50    # soft cap: budget for meeting the hypo target per row
 # Extra draws devoted purely to finding a rail-VALID trajectory once the hypo
 # budget is spent, before giving up and raising. Validity is a hard requirement,
@@ -181,9 +230,15 @@ def _norm_forward(cache_name: str, block: np.ndarray) -> np.ndarray:
     ``log1p(max(x, 0))``, mirroring ``T1DMAI/normalization.SPARSE_LOG1P_CHANNELS``.
     Returns the flattened float64 transformed values."""
     v = np.asarray(block, dtype=np.float64).reshape(-1)
-    if cache_name == 'bg_observed':
+    if cache_name.removeprefix('tail_') == 'bg_observed':
         return _norm_bg_risk(v)
     return np.log1p(np.maximum(v, 0.0))
+
+
+def _norm_sources(events: bool) -> dict[str, str]:
+    """Staged array name -> normalization channel, over the context and its tails."""
+    base = dict(NORM_CHANNEL_SOURCES) | ({c: c for c in NORM_EVENT_DOSES} if events else {})
+    return base | {f'tail_{name}': norm for name, norm in base.items()}
 
 
 def _split_norm_acc(
@@ -226,9 +281,9 @@ def _finalize_norm_stats(
 
 @dataclasses.dataclass(frozen=True)
 class RowConfig:
-    """Per-row rejection-sampling knobs, shared read-only across workers."""
+    """Per-row geometry and rejection-sampling knobs, shared read-only across workers."""
     warmup_steps: int
-    keep_steps: int
+    context_steps: int
     max_attempts: int
     rail_high: float
     rail_low: float
@@ -238,6 +293,92 @@ class RowConfig:
     seed_salt: int
     event_refractory_steps: int
     events: bool = False
+    tail_steps: int = DEFAULT_TAIL_STEPS
+    warmup_offset_steps: int = DEFAULT_WARMUP_OFFSET_STEPS
+
+
+@dataclasses.dataclass(frozen=True)
+class RowDraws:
+    """The row's draws off the dedicated dose stream, in their frozen order."""
+    warmup_offset: int
+    bolus_u: float
+    analogue: str
+    carb_g: float
+    carb_gi: float
+
+
+@dataclasses.dataclass(frozen=True)
+class BoundaryDose:
+    """One row's boundary dose: intended units, true grams, and what got logged."""
+    bolus_u: float
+    analogue: str
+    site_factor: float
+    carb_g: float
+    carb_gi: float
+    logged_carb_g: float
+    logged_carb_gi: float
+
+
+def _log_uniform(rng: np.random.Generator, lo: float, hi: float) -> float:
+    """Log-uniform draw on ``[lo, hi]``; a degenerate range returns ``lo``."""
+    if hi <= lo:
+        return float(lo)
+    return float(np.exp(rng.uniform(math.log(lo), math.log(hi))))
+
+
+def row_draws(seed: int, cfg: RowConfig) -> RowDraws:
+    """The row's warm-up offset and boundary doses, off a stream keyed on ``seed``."""
+    rng = np.random.default_rng([TAIL_DOSE_SEED_STREAM, int(seed)])
+    warmup_offset = int(rng.integers(0, max(1, cfg.warmup_offset_steps)))
+    bolus_u = _log_uniform(rng, *TAIL_BOLUS_U_RANGE)
+    analogue = str(rng.choice(BOLUS_ANALOGUES))
+    carb_g = _log_uniform(rng, *TAIL_CARB_G_RANGE)
+    carb_gi = float(rng.uniform(*TAIL_CARB_GI_RANGE))
+    return RowDraws(warmup_offset, bolus_u, analogue, carb_g, carb_gi)
+
+
+def boundary_dose(sim: T1DMSimulator, draws: RowDraws) -> BoundaryDose:
+    """Draw the site-quality factor and the carb guess on the PARENT simulator.
+
+    Both come off the simulator's own streams once, before the arms are copied, so
+    every arm inherits the same state and the four tails stay in RNG lockstep.
+    """
+    site_factor = float(sim._site_quality(sim.patient.lifestyle_consistency))
+    _, event = sim._logged_carb(draws.carb_g, draws.carb_gi)
+    return BoundaryDose(
+        bolus_u=draws.bolus_u,
+        analogue=draws.analogue,
+        site_factor=site_factor,
+        carb_g=draws.carb_g,
+        carb_gi=draws.carb_gi,
+        logged_carb_g=float(event['dose']) if event else 0.0,
+        logged_carb_gi=float(event['gi']) if event else 0.0,
+    )
+
+
+def run_tails(sim: T1DMSimulator, dose: BoundaryDose,
+              cfg: RowConfig) -> dict[str, np.ndarray]:
+    """The four behaviour-off arms of ``cfg.tail_steps`` from ``sim``'s boundary.
+
+    Each arm is a deep copy with behaviour off and its own dose injected at tail
+    step 0. Returns one ``(N_TAIL_ARMS, tail_steps)`` array per tail channel.
+    """
+    names = tail_channel_names(cfg.events)
+    out = {n: np.empty((N_TAIL_ARMS, cfg.tail_steps), CHANNEL_DTYPES[n]) for n in names}
+    for arm, arm_name in enumerate(TAIL_ARMS):
+        c = copy.deepcopy(sim)
+        c.behaviour_enabled = False
+        idx = c.state.current_idx
+        if 'bolus' in arm_name:
+            c.inject_bolus(dose.bolus_u, dose.analogue, dose.site_factor, start_idx=idx)
+        if 'carbs' in arm_name:
+            c.inject_carbs(dose.carb_g, dose.carb_gi, dose.logged_carb_g,
+                           dose.logged_carb_gi, start_idx=idx)
+        for i in range(cfg.tail_steps):
+            s = c.generate()
+            for n in names:
+                out[n][arm, i] = s[n]
+    return out
 
 
 # ============================================================================
@@ -298,68 +439,48 @@ def _count_crossings(x: np.ndarray, thresh: float, refractory_steps: int) -> int
 # SINGLE-PATIENT SIMULATION + STATISTICS
 # ============================================================================
 
-def _simulate_patient(
+def simulate_to_boundary(
     seed: int, cfg: RowConfig
-) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    """
-    Simulate one patient and return its cached channels plus a statistics dict.
+) -> tuple[T1DMSimulator, dict[str, np.ndarray], dict[str, Any], RowDraws]:
+    """Run one patient to the boundary: the simulator, its context, stats, draws.
 
-    Advances ``cfg.warmup_steps`` steps unstored, then pulls the eight cached
-    channels (and the basal/bolus split, used only for statistics) out of the
-    per-step ``generate()`` dict into pre-allocated arrays.
-    """
+    ``cfg.warmup_steps`` plus the row's own offset advance unstored, then
+    ``cfg.context_steps`` are stored. Every statistic reads the CONTEXT alone."""
+    draws = row_draws(seed, cfg)
     sim = T1DMSimulator(seed=int(seed))
     gen = sim.generate
 
-    for _ in range(cfg.warmup_steps):
+    for _ in range(cfg.warmup_steps + draws.warmup_offset):
         gen()
 
-    T = cfg.keep_steps
-    bg_obs = np.empty(T, np.float32)
-    carb = np.empty(T, np.float32)
-    ins = np.empty(T, np.float32)
-    ir = np.empty(T, np.float32)
-    hgo = np.empty(T, np.float32)
-    hod = np.empty(T, np.float32)
-    day = np.empty(T, np.int32)
+    T = cfg.context_steps
+    names = channel_names(cfg.events)
+    channels = {n: np.empty(T, CHANNEL_DTYPES[n]) for n in names}
     basal = np.empty(T, np.float32)   # not cached; only for the basal:bolus split
     bolus = np.empty(T, np.float32)
-    events = {c: np.empty(T, np.float32) for c in EVENT_CHANNELS} if cfg.events else {}
 
     for i in range(T):
         s = gen()
-        for c, arr in events.items():
-            arr[i] = s[c]
-        bg_obs[i] = s['bg_observed']
-        carb[i] = s['total_carb']  # logged; `total_carb_true` is the curve BG runs on
-        ins[i] = s['total_insulin']
-        ir[i] = s['insulin_resistance']
-        hgo[i] = s['hgo']
-        hod[i] = s['hour_of_day']
-        day[i] = s['day']
+        for n in names:
+            channels[n][i] = s[n]
         basal[i] = s['basal_insulin']
         bolus[i] = s['bolus_insulin']
 
-    channels = {
-        'bg_observed': bg_obs,
-        'total_carb': carb,
-        'total_insulin': ins,
-        'insulin_resistance': ir,
-        'hgo': hgo,
-        'hour_of_day': hod,
-        'day': day,
-        **events,
-    }
-
+    bg_obs = channels['bg_observed']
+    carb = channels['total_carb']  # logged; `total_carb_true` is the curve BG runs on
+    ins = channels['total_insulin']
     ref = cfg.event_refractory_steps
     below54 = int((bg_obs < BG_SEVERE_LOW).sum())
     below70 = int((bg_obs < BG_LOW).sum())
     above180 = int((bg_obs > BG_HIGH).sum())
     above250 = int((bg_obs > BG_VERY_HIGH).sum())
     in_range = T - below70 - above180
+    p = sim.patient
 
     stats: dict[str, Any] = {
-        'icr': float(sim.patient.icr),
+        'icr': float(p.icr),
+        'skills': np.array([getattr(p, n) for n in SKILL_NAMES], dtype=np.float32),
+        'warmup_offset': draws.warmup_offset,
         'sum_carb': float(carb.sum(dtype=np.float64)),
         'sum_insulin': float(ins.sum(dtype=np.float64)),
         'sum_basal': float(basal.sum(dtype=np.float64)),
@@ -374,11 +495,56 @@ def _simulate_patient(
         'above250': above250,
         'n_meals': _count_crossings(carb, MEAL_CARB_THRESHOLD_G, ref),
         'n_boluses': _count_crossings(bolus, BOLUS_EVENT_THRESHOLD_U, ref),
-        # Fraction of time below the configurable hypo cutoff, used only for the
-        # oversampling criterion (the class ratios below always use the fixed 70).
+        # Fraction of time below the hypo cutoff, the oversampling criterion alone.
         'frac_below_hypo': float((bg_obs < cfg.hypo_threshold).mean()),
     }
-    return channels, stats
+    return sim, channels, stats, draws
+
+
+def tail_report_indices(tail_steps: int) -> tuple[int, ...]:
+    """Tail index of each TAIL_REPORT_OFFSETS_MIN offset; step i lands at +5(i+1) min."""
+    return tuple(min(tail_steps - 1, int(m / DT_MINUTES) - 1)
+                 for m in TAIL_REPORT_OFFSETS_MIN)
+
+
+def simulate_row(seed: int,
+                 cfg: RowConfig) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    """Build one cached row: context channels, ``tail_`` arms, boundary doses, stats.
+
+    The single row builder; T1DMAI's on-the-fly path calls it rather than
+    reimplementing the geometry. Keys match the staged names of ``array_specs``."""
+    sim, channels, stats, draws = simulate_to_boundary(seed, cfg)
+    dose = boundary_dose(sim, draws)
+    tails = run_tails(sim, dose, cfg)
+
+    arrays: dict[str, np.ndarray] = dict(channels)
+    for name, arr in tails.items():
+        arrays[f'tail_{name}'] = arr
+    if cfg.events:
+        for name in EVENT_CHANNELS:
+            arrays[f'tail_dose_{name}'] = tails[name][:, 0].copy()
+
+    report_at = list(tail_report_indices(cfg.tail_steps))
+    stats['tail_bg'] = tails['bg_observed'][:, report_at].astype(np.float64)
+    stats['dose_bolus_u'] = dose.bolus_u
+    stats['dose_carb_g'] = dose.carb_g
+    stats['dose_carb_gi'] = dose.carb_gi
+    stats['dose_site_factor'] = dose.site_factor
+    return arrays, stats
+
+
+def array_specs(cfg: RowConfig, pool_size: int) -> dict[str, tuple[tuple[int, ...], Any]]:
+    """Every staged and published array: name -> (shape, dtype), in write order."""
+    specs: dict[str, tuple[tuple[int, ...], Any]] = {
+        n: ((pool_size, cfg.context_steps), CHANNEL_DTYPES[n])
+        for n in channel_names(cfg.events)
+    }
+    for n in tail_channel_names(cfg.events):
+        specs[f'tail_{n}'] = ((pool_size, N_TAIL_ARMS, cfg.tail_steps), CHANNEL_DTYPES[n])
+    if cfg.events:
+        for n in EVENT_CHANNELS:
+            specs[f'tail_dose_{n}'] = ((pool_size, N_TAIL_ARMS), CHANNEL_DTYPES[n])
+    return specs
 
 
 def _finish(
@@ -393,20 +559,11 @@ def _finish(
 
 
 def _resolve_row(cache_idx: int, cfg: RowConfig) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    """
-    Rejection-sample the trajectory stored at ``cache_idx``.
+    """Rejection-sample the row at ``cache_idx``; both gates read the CONTEXT alone.
 
-    Rail-validity (no bg_observed touching the clamp rails) is a HARD gate: an
-    invalid trajectory is never a stored candidate. Seeds are redrawn until a
-    valid one is found, and -- for a hypo-designated row -- a valid trajectory
-    that also spends at least ``hypo_min_frac`` of its time below
-    ``hypo_threshold`` is preferred. The hypo target is the only *soft* one: if
-    it cannot be met within ``max_attempts``, the hypo-richest *valid* trajectory
-    is kept (``accepted=False``). Validity is pursued for up to
-    ``max_attempts + _VALIDITY_HARD_EXTRA`` draws before giving up; exhausting
-    that without a single valid trajectory raises rather than store a rail-hitter
-    (only reachable with a degenerate rail band).
-    """
+    A rail-hitting context is never stored; a hypo row prefers ``hypo_min_frac``
+    below ``hypo_threshold`` and past ``max_attempts`` keeps the hypo-richest valid
+    one (``accepted=False``). A tail is never rejected. No valid context: raise."""
     is_hypo = _is_hypo_row(cache_idx, cfg.hypo_prob, cfg.seed_salt)
     hard_cap = cfg.max_attempts + _VALIDITY_HARD_EXTRA
     best_valid: tuple[dict[str, np.ndarray], dict[str, Any]] | None = None
@@ -415,11 +572,11 @@ def _resolve_row(cache_idx: int, cfg: RowConfig) -> tuple[dict[str, np.ndarray],
 
     for attempt in range(hard_cap):
         seed = _row_seed(cache_idx, attempt, cfg.seed_salt)
-        channels, stats = _simulate_patient(seed, cfg)
+        channels, stats = simulate_row(seed, cfg)
         n_sims += 1
 
         if not (stats['bg_max'] < cfg.rail_high and stats['bg_min'] > cfg.rail_low):
-            continue  # rail-hitting: never a stored candidate
+            continue  # rail-hitting context: never a stored candidate
 
         if not is_hypo:
             return _finish(channels, stats, cache_idx, n_sims, is_hypo, accepted=True)
@@ -439,7 +596,7 @@ def _resolve_row(cache_idx: int, cfg: RowConfig) -> tuple[dict[str, np.ndarray],
         ch, st = best_valid
         return _finish(ch, st, cache_idx, n_sims, is_hypo, accepted=False)
     raise RuntimeError(
-        f'row {cache_idx}: no rail-valid trajectory (bg_observed in '
+        f'row {cache_idx}: no rail-valid context (bg_observed in '
         f'({cfg.rail_low}, {cfg.rail_high})) found in {hard_cap} attempts; '
         f'check --rail-low / --rail-high.'
     )
@@ -452,12 +609,13 @@ def _resolve_row(cache_idx: int, cfg: RowConfig) -> tuple[dict[str, np.ndarray],
 _WORKER: dict[str, Any] = {}
 
 
-def _worker_init(partial_dir: str, cfg: RowConfig) -> None:
-    """Open the per-channel staging memmaps (r+) and stash the row config."""
+def _worker_init(partial_dir: str, cfg: RowConfig, names: tuple[str, ...]) -> None:
+    """Open the per-array staging memmaps (r+) and stash the row config."""
     _WORKER['cfg'] = cfg
+    _WORKER['names'] = names
     _WORKER['mm'] = {
         name: np.lib.format.open_memmap(os.path.join(partial_dir, f'{name}.npy'), mode='r+')
-        for name in channel_names(cfg.events)
+        for name in names
     }
 
 
@@ -465,9 +623,9 @@ def _worker(cache_idx: int) -> dict[str, Any]:
     """Resolve one row, write it straight into the staging memmaps, return stats."""
     cfg: RowConfig = _WORKER['cfg']
     mm = _WORKER['mm']
-    channels, stats = _resolve_row(cache_idx, cfg)
-    for name in channel_names(cfg.events):
-        mm[name][cache_idx] = channels[name]
+    arrays, stats = _resolve_row(cache_idx, cfg)
+    for name in _WORKER['names']:
+        mm[name][cache_idx] = arrays[name]
     return stats
 
 
@@ -486,6 +644,7 @@ class StatAccumulator:
         'below54', 'below70', 'in_range', 'above180', 'above250',
         'n_meals', 'n_boluses',
     )
+    _DOSE_KEYS = ('dose_bolus_u', 'dose_carb_g', 'dose_carb_gi', 'dose_site_factor')
 
     def __init__(self) -> None:
         self.n_rows = 0
@@ -499,6 +658,10 @@ class StatAccumulator:
         self.n_fallback = 0
         self.n_hypo_rows = 0
         self.n_hypo_qualified = 0
+        self.tail_bg_sum = np.zeros((N_TAIL_ARMS, len(TAIL_REPORT_OFFSETS_MIN)), np.float64)
+        self.dose_sum = {k: 0.0 for k in self._DOSE_KEYS}
+        self.dose_min = {k: math.inf for k in self._DOSE_KEYS}
+        self.dose_max = {k: -math.inf for k in self._DOSE_KEYS}
 
     def add(self, stats: dict[str, Any]) -> None:
         self.n_rows += 1
@@ -510,6 +673,12 @@ class StatAccumulator:
         self.icr_max = max(self.icr_max, icr)
         self.bg_min = min(self.bg_min, stats['bg_min'])
         self.bg_max = max(self.bg_max, stats['bg_max'])
+        self.tail_bg_sum += stats['tail_bg']
+        for k in self._DOSE_KEYS:
+            v = float(stats[k])
+            self.dose_sum[k] += v
+            self.dose_min[k] = min(self.dose_min[k], v)
+            self.dose_max[k] = max(self.dose_max[k], v)
         self.total_attempts += stats['attempts']
         if not stats['accepted']:
             self.n_fallback += 1
@@ -563,18 +732,18 @@ def _fsync_dir(path: str) -> None:
 
 
 def _transcode_to_blosc2(
-    partial_dir: str, pool_size: int, n_timesteps: int,
+    partial_dir: str, specs: dict[str, tuple[tuple[int, ...], Any]],
     rows_per_chunk: int, clevel: int, nthreads: int, events: bool = False,
-) -> tuple[dict[str, dict[str, int]], dict[str, Any], dict[str, dict[str, float]]]:
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, dict[str, float]]]:
     """Convert each staging ``.npy`` to a compressed ``.b2nd`` and delete the source.
 
-    Returns ``(inventory, bg_dist, norm_acc)``: per-channel byte counts, the pooled
-    ``bg_observed`` aggregates, and the power sums of the forward-transformed
-    NORM_CHANNEL_SOURCES channels, accumulated block-by-block during the read."""
+    Returns ``(inventory, bg_dist, norm_acc)``: per-array byte counts, the pooled
+    CONTEXT ``bg_observed`` aggregates, and the power sums of the forward-transformed
+    normalization channels over the context and all four tails."""
     bg_hist = np.zeros(len(BG_HIST_EDGES) - 1, dtype=np.float64)
     bg_dist = {'sum': 0.0, 'sum_sq': 0.0, 'sum_cube': 0.0,
                'sum_rl': 0.0, 'sum_rh': 0.0, 'n': 0}
-    norm_sources = NORM_CHANNEL_SOURCES | ({c: c for c in NORM_EVENT_DOSES} if events else {})
+    norm_sources = _norm_sources(events)
     norm_acc: dict[str, dict[str, float]] = {
         norm: {'sum': 0.0, 'sum_sq': 0.0, 'n': 0, 'max': 0.0}
         for norm in norm_sources.values()
@@ -585,41 +754,36 @@ def _transcode_to_blosc2(
         filters=[blosc2.Filter.SHUFFLE],
         nthreads=max(1, nthreads),
     )
-    max_itemsize = max(np.dtype(d).itemsize for d in CHANNEL_DTYPES.values())
-    # Round the RAM-bounded block down to a whole number of chunks (>= 1 chunk)
-    # so block edges land on chunk boundaries and blosc2 recompresses nothing.
-    rows_per_block = max(
-        rows_per_chunk,
-        (_TRANSCODE_BLOCK_BYTES // (n_timesteps * max_itemsize) // rows_per_chunk) * rows_per_chunk,
-    )
-    inventory: dict[str, dict[str, int]] = {}
+    inventory: dict[str, dict[str, Any]] = {}
 
-    for name in channel_names(events):
+    for name, (shape, dtype) in specs.items():
         src_path = os.path.join(partial_dir, f'{name}.npy')
         dst_path = os.path.join(partial_dir, f'{name}.b2nd')
-        dtype = CHANNEL_DTYPES[name]
+        pool_size = shape[0]
+        row_bytes = int(np.prod(shape[1:])) * np.dtype(dtype).itemsize
+        # Round the RAM-bounded block down to whole chunks so blosc2 recompresses nothing.
+        rows_per_block = max(
+            rows_per_chunk,
+            (_TRANSCODE_BLOCK_BYTES // row_bytes // rows_per_chunk) * rows_per_chunk,
+        )
 
         src = np.load(src_path, mmap_mode='r')
-        assert src.shape == (pool_size, n_timesteps), (
-            f'staged {name!r} has shape {src.shape}, expected {(pool_size, n_timesteps)}'
+        assert src.shape == shape, (
+            f'staged {name!r} has shape {src.shape}, expected {shape}'
         )
 
         dst = None
         reopened = None
         try:
             dst = blosc2.empty(
-                shape=(pool_size, n_timesteps),
-                chunks=(rows_per_chunk, n_timesteps),
+                shape=shape,
+                chunks=(rows_per_chunk,) + shape[1:],
                 dtype=dtype,
                 urlpath=dst_path,
                 mode='w',
                 cparams=cparams,
             )
-            # Block-wise assignment bounds peak RAM at one block rather than a
-            # whole channel. blosc2 parallelizes compression across the *blocks
-            # within a chunk*, so throughput scales with rows_per_chunk (a small
-            # chunk is a single block and transcodes single-threaded regardless
-            # of nthreads) -- see the rows_per_chunk help for the read tradeoff.
+            # Throughput scales with rows_per_chunk: a one-block chunk is single-threaded.
             for r0 in range(0, pool_size, rows_per_block):
                 r1 = min(r0 + rows_per_block, pool_size)
                 block = np.asarray(src[r0:r1])
@@ -659,10 +823,11 @@ def _transcode_to_blosc2(
         del src
         os.remove(src_path)
         cbytes = int(os.path.getsize(dst_path))
-        inventory[name] = {'raw_bytes': raw_bytes, 'compressed_bytes': cbytes}
+        inventory[name] = {'raw_bytes': raw_bytes, 'compressed_bytes': cbytes,
+                           'dtype': np.dtype(dtype).name, 'shape': list(shape)}
         ratio = raw_bytes / max(cbytes, 1)
         print(
-            f'  transcoded {name:<20} {raw_bytes / 1e6:8.2f} MB -> '
+            f'  transcoded {name:<24} {raw_bytes / 1e6:8.2f} MB -> '
             f'{cbytes / 1e6:8.2f} MB ({ratio:.2f}x)',
             flush=True,
         )
@@ -744,8 +909,8 @@ def _load_baseline_stats(path: str) -> dict[str, Any] | None:
 def _finalize_report(
     acc: StatAccumulator,
     params: dict[str, Any],
-    inventory: dict[str, dict[str, int]],
-    icr_bytes: int,
+    inventory: dict[str, dict[str, Any]],
+    side_bytes: dict[str, int],
     bg_dist: dict[str, Any],
     baseline: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -755,6 +920,7 @@ def _finalize_report(
     total_steps = n * T
     keep_hours = T * DT_MINUTES / 60.0
     days_per_patient = keep_hours / 24.0
+    icr_bytes = side_bytes['icr']
 
     sums = acc.sums
     total_carb_g = sums['sum_carb']
@@ -767,9 +933,8 @@ def _finalize_report(
 
     compressed_total = sum(c['compressed_bytes'] for c in inventory.values())
     raw_total = sum(c['raw_bytes'] for c in inventory.values())
-    # meta.json is a few KB (negligible vs the channels) and its size is
-    # self-referential to record, so it is excluded from the footprint total.
-    disk_total = compressed_total + icr_bytes
+    # meta.json's own size is self-referential to record, so it stays out of the total.
+    disk_total = compressed_total + sum(side_bytes.values())
 
     return {
         'schema': 'dataset-report-v1',
@@ -789,6 +954,11 @@ def _finalize_report(
         'cache_format': params['cache_format'],
         'rows_per_chunk': params['rows_per_chunk'],
         'zstd_clevel': params['zstd_clevel'],
+        # The geometry a consumer gates on, in place of a simulated-hours scalar.
+        'context_steps': params['context_steps'],
+        'tail_steps': params['tail_steps'],
+        'tail_arms': params['tail_arms'],
+        'tail_channels': params['tail_channels'],
         'corpus': {
             'n_patients': n,
             'n_timesteps': T,
@@ -839,6 +1009,18 @@ def _finalize_report(
             'min': acc.icr_min if n else 0.0,
             'max': acc.icr_max if n else 0.0,
         },
+        'tails': {
+            'arms': list(TAIL_ARMS),
+            'tail_steps': params['tail_steps'],
+            'offsets_min': list(TAIL_REPORT_OFFSETS_MIN),
+            'bg_mean': (acc.tail_bg_sum / n).tolist() if n else [],
+            'dose': {
+                k: {'mean': acc.dose_sum[k] / n if n else 0.0,
+                    'min': acc.dose_min[k] if n else 0.0,
+                    'max': acc.dose_max[k] if n else 0.0}
+                for k in acc.dose_sum
+            },
+        },
         'sampling': {
             'total_simulations': acc.total_attempts,
             'accept_rate': n / acc.total_attempts if acc.total_attempts else 0.0,
@@ -852,6 +1034,7 @@ def _finalize_report(
             'raw_channel_bytes': raw_total,
             'compressed_channel_bytes': compressed_total,
             'icr_bytes': icr_bytes,
+            'side_bytes': side_bytes,
             'disk_total_bytes': disk_total,
             'compression_ratio': raw_total / max(compressed_total, 1),
         },
@@ -937,6 +1120,35 @@ def _render_comparison(report: dict[str, Any]) -> list[str]:
     return L
 
 
+def _render_tails(report: dict[str, Any]) -> list[str]:
+    """Render the counterfactual-tail section: per-arm mean BG and the dose draws."""
+    t = report.get('tails') or {}
+    if not t.get('bg_mean'):
+        return []
+    offsets = t['offsets_min']
+    L = ['## Counterfactual tails', '']
+    L.append(f'Four paired {t["tail_steps"]}-step continuations per row, behaviour off, '
+             'the arm\'s dose injected at the first step after the context.')
+    L.append('')
+    L.append('| Arm | ' + ' | '.join(f'+{m} min' for m in offsets) + ' |')
+    L.append('|---' * (len(offsets) + 1) + '|')
+    for arm, name in enumerate(t['arms']):
+        cells = ' | '.join(f'{v:.1f}' for v in t['bg_mean'][arm])
+        L.append(f'| `{name}` | {cells} |')
+    L.append('')
+    L.append('Mean `bg_observed` in mg/dL over the pool.')
+    L.append('')
+    L.append('| Boundary draw | Mean | Min | Max |')
+    L.append('|---|---|---|---|')
+    labels = (('dose_bolus_u', 'Bolus (U, intended)'), ('dose_carb_g', 'Carbohydrate (g, true)'),
+              ('dose_carb_gi', 'Glycaemic index'), ('dose_site_factor', 'Site-quality factor'))
+    for key, label in labels:
+        d = t['dose'][key]
+        L.append(f'| {label} | {d["mean"]:.2f} | {d["min"]:.2f} | {d["max"]:.2f} |')
+    L.append('')
+    return L
+
+
 def _render_dataset_md(report: dict[str, Any]) -> str:
     """Render DATASET.md from the finalized report (neutral, observational)."""
     c = report['corpus']
@@ -946,6 +1158,7 @@ def _render_dataset_md(report: dict[str, Any]) -> str:
     smp = report['sampling']
     st = report['storage']
     p = report['params']
+    tails = report['tails']
 
     def pct(x: float) -> str:
         return f'{100.0 * x:.2f}%'
@@ -956,12 +1169,13 @@ def _render_dataset_md(report: dict[str, Any]) -> str:
     lines.append('| Quantity | Value | Basis |')
     lines.append('|---|---|---|')
     lines.append(f'| **Patients (trajectories)** | **{c["n_patients"]:,}** | exact (`meta.json`) |')
-    lines.append(f'| Timesteps / patient | {c["n_timesteps"]} @ {int(c["dt_minutes"])} min | exact |')
-    lines.append(f'| Duration / patient | {c["keep_hours"]:.1f} h ≈ {c["days_per_patient"]:.2f} days | exact |')
+    lines.append(f'| Context steps / patient | {c["n_timesteps"]} @ {int(c["dt_minutes"])} min | exact |')
+    lines.append(f'| Context duration / patient | {c["keep_hours"]:.1f} h ≈ {c["days_per_patient"]:.2f} days | exact |')
+    lines.append(f'| Counterfactual tails / patient | {len(tails["arms"])} × {tails["tail_steps"]} steps | exact (`{"`, `".join(tails["arms"])}`) |')
     lines.append(f'| **Total CGM readings** | **{c["total_readings"]:,}** | exact ({c["n_patients"]:,} × {c["n_timesteps"]}) |')
     lines.append(f'| **Total CGM hours** | **{c["total_cgm_hours"]:,.0f} h** | exact |')
     lines.append(f'| **Total CGM years** | **≈ {_fmt_years(c["total_cgm_years"])}** | exact (= patient-years) |')
-    lines.append(f'| **Disk footprint** | **{_fmt_bytes(st["disk_total_bytes"])}** | exact (compressed `.b2nd` + `icr.npy`) |')
+    lines.append(f'| **Disk footprint** | **{_fmt_bytes(st["disk_total_bytes"])}** | exact (compressed `.b2nd` + `icr.npy` + `skills.npy`) |')
     lines.append(f'| Uncompressed channels | {_fmt_bytes(st["raw_channel_bytes"])} | exact ({st["compression_ratio"]:.2f}× ratio) |')
     lines.append(f'| **Carbs logged** | **{_fmt_mass_g(cons["carb_total_g"])}** | integral of the logged carb-appearance curve, incl. hypo rescue ({cons["carb_per_patient_g"]:.0f} g/patient, {cons["carb_per_day_g"]:.1f} g/day) |')
     lines.append(f'| **Logged carb events** | **{cons["meals_total"]:,}** | upward crossings of the logged curve, incl. hypo rescue ({cons["meals_per_patient"]:.2f}/patient, {cons["meals_per_day"]:.2f}/day) |')
@@ -985,26 +1199,29 @@ def _render_dataset_md(report: dict[str, Any]) -> str:
     lines.append('')
 
     lines.extend(_render_comparison(report))
+    lines.extend(_render_tails(report))
 
-    lines.append('## Per-channel inventory')
+    lines.append('## Per-array inventory')
     lines.append('')
-    lines.append('| Channel | dtype | Uncompressed | Compressed | Ratio |')
+    lines.append('| Array | dtype | Uncompressed | Compressed | Ratio |')
     lines.append('|---|---|---|---|---|')
     for name, inv in st['inventory'].items():
         r = inv['raw_bytes'] / max(inv['compressed_bytes'], 1)
         lines.append(
-            f'| `{name}` | {np.dtype(CHANNEL_DTYPES[name]).name} | '
+            f'| `{name}` | {inv["dtype"]} | '
             f'{_fmt_bytes(inv["raw_bytes"])} | {_fmt_bytes(inv["compressed_bytes"])} | {r:.2f}× |'
         )
-    lines.append(f'| `icr` | float32 | {_fmt_bytes(st["icr_bytes"])} | {_fmt_bytes(st["icr_bytes"])} | 1.00× (raw) |')
+    for name, nbytes in st.get('side_bytes', {'icr': st['icr_bytes']}).items():
+        lines.append(f'| `{name}` | float32 | {_fmt_bytes(nbytes)} | {_fmt_bytes(nbytes)} | 1.00× (raw) |')
     lines.append('')
 
     lines.append('## Generation parameters')
     lines.append('')
     lines.append('| Parameter | Value |')
     lines.append('|---|---|')
-    lines.append(f'| Post-warmup window | {p["sim_hours"]:.1f} h ({c["n_timesteps"]} steps) |')
-    lines.append(f'| Warmup discarded | {p["warmup_hours"]:.1f} h |')
+    lines.append(f'| Context | {c["n_timesteps"]} steps ({p["sim_hours"]:.1f} h), behaviour on |')
+    lines.append(f'| Tails | {len(tails["arms"])} arms × {tails["tail_steps"]} steps, behaviour off |')
+    lines.append(f'| Warmup discarded | {p["warmup_hours"]:.1f} h + U{{0..{p["warmup_offset_steps"] - 1}}} steps |')
     lines.append(f'| Seed salt | {p["seed_salt"]} |')
     lines.append(f'| Rail filter | discard bg_observed ≥ {p["rail_high"]:.0f} or ≤ {p["rail_low"]:.0f} mg/dL |')
     lines.append(f'| Hypo oversampling | prob {p["hypo_oversample"]:.3g}, ≥ {pct(p["hypo_min_frac"])} of time < {p["hypo_threshold"]:.0f} mg/dL |')
@@ -1030,9 +1247,11 @@ def _render_dataset_md(report: dict[str, Any]) -> str:
 def build_cache(
     out_dir: str,
     pool_size: int,
-    sim_hours: float,
-    warmup_hours: float,
     n_jobs: int,
+    context_steps: int = DEFAULT_CONTEXT_STEPS,
+    tail_steps: int = DEFAULT_TAIL_STEPS,
+    warmup_hours: float = DEFAULT_WARMUP_HOURS,
+    warmup_offset_steps: int = DEFAULT_WARMUP_OFFSET_STEPS,
     rows_per_chunk: int = DEFAULT_ROWS_PER_CHUNK,
     zstd_clevel: int = DEFAULT_ZSTD_CLEVEL,
     hypo_oversample: float = 0.0,
@@ -1070,15 +1289,17 @@ def build_cache(
         shutil.rmtree(partial_dir)
     os.makedirs(partial_dir)
 
+    if context_steps < 1:
+        raise ValueError(f'context_steps must be >= 1, got {context_steps}')
+    if tail_steps < 1:
+        raise ValueError(f'tail_steps must be >= 1, got {tail_steps}')
     warmup_steps = _steps_for_hours(warmup_hours)
-    keep_steps = _steps_for_hours(sim_hours)
-    if keep_steps < 1:
-        raise ValueError(f'sim_hours={sim_hours} yields {keep_steps} steps; need >= 1')
-    effective_rpc = _resolve_rows_per_chunk(rows_per_chunk, pool_size, keep_steps)
+    sim_hours = context_steps * DT_MINUTES / 60.0
+    effective_rpc = _resolve_rows_per_chunk(rows_per_chunk, pool_size, context_steps)
 
     cfg = RowConfig(
         warmup_steps=warmup_steps,
-        keep_steps=keep_steps,
+        context_steps=context_steps,
         max_attempts=max_attempts,
         rail_high=rail_high,
         rail_low=rail_low,
@@ -1088,11 +1309,15 @@ def build_cache(
         seed_salt=seed_salt,
         event_refractory_steps=max(1, int(round(EVENT_REFRACTORY_MIN / DT_MINUTES))),
         events=events,
+        tail_steps=tail_steps,
+        warmup_offset_steps=warmup_offset_steps,
     )
+    specs = array_specs(cfg, pool_size)
 
     print(f'Pool size:          {pool_size:,}')
-    print(f'Post-warmup window: {sim_hours} h ({keep_steps} steps/patient)')
-    print(f'Warmup discarded:   {warmup_hours} h ({warmup_steps} steps)')
+    print(f'Context:            {sim_hours} h ({context_steps} steps/patient)')
+    print(f'Tails:              {N_TAIL_ARMS} arms x {tail_steps} steps ({", ".join(TAIL_ARMS)})')
+    print(f'Warmup discarded:   {warmup_hours} h ({warmup_steps} steps) + U{{0..{warmup_offset_steps - 1}}}')
     print(f'Rail filter:        discard bg_observed >= {rail_high} or <= {rail_low} mg/dL')
     print(f'Hypo oversampling:  prob {hypo_oversample} (>= {hypo_min_frac} of time < {hypo_threshold:g} mg/dL)')
     print(f'Rejection cap:      {max_attempts} attempts/row (soft; hypo target)')
@@ -1103,16 +1328,15 @@ def build_cache(
 
     acc = StatAccumulator()
     icr_arr = np.zeros(pool_size, dtype=np.float32)
+    skills_arr = np.zeros((pool_size, len(SKILL_NAMES)), dtype=np.float32)
     t0 = time.time()
 
     try:
-        # Create the staging memmaps (writes .npy headers, sparse-allocates the
-        # body), then drop the parent handles before forking workers so the huge
-        # mappings are not inherited -- each worker opens its own r+ handle.
-        for name in channel_names(events):
+        # Parent handles are dropped before the fork so workers inherit no mapping.
+        for name, (shape, dtype) in specs.items():
             np.lib.format.open_memmap(
                 os.path.join(partial_dir, f'{name}.npy'),
-                mode='w+', dtype=CHANNEL_DTYPES[name], shape=(pool_size, keep_steps),
+                mode='w+', dtype=dtype, shape=shape,
             )
         gc.collect()
 
@@ -1122,6 +1346,7 @@ def build_cache(
             nonlocal completed
             acc.add(stats)
             icr_arr[stats['idx']] = stats['icr']
+            skills_arr[stats['idx']] = stats['skills']
             completed += 1
             if completed == 1 or completed % 100 == 0 or completed == pool_size:
                 elapsed = time.time() - t0
@@ -1133,15 +1358,17 @@ def build_cache(
                     flush=True,
                 )
 
+        staged = tuple(specs)
         if n_jobs <= 1:
-            _worker_init(partial_dir, cfg)
+            _worker_init(partial_dir, cfg, staged)
             for i in range(pool_size):
                 _store(_worker(i))
         else:
             ctx = mp.get_context('fork' if 'fork' in mp.get_all_start_methods() else 'spawn')
             chunksize = max(1, min(16, pool_size // (n_jobs * 4) or 1))
             with ctx.Pool(
-                processes=n_jobs, initializer=_worker_init, initargs=(partial_dir, cfg),
+                processes=n_jobs, initializer=_worker_init,
+                initargs=(partial_dir, cfg, staged),
             ) as pool:
                 for stats in pool.imap_unordered(_worker, range(pool_size), chunksize=chunksize):
                     _store(stats)
@@ -1151,18 +1378,15 @@ def build_cache(
         print(f'All {pool_size:,} rows generated in {gen_secs:.1f}s '
               f'({pool_size / max(gen_secs, 1e-9):.1f} patients/s).')
 
-        # Drop any staging memmap handles the single-threaded path left open in
-        # this process (the MP path's handles die with the workers). A live mmap
-        # pins the inode after os.remove, so peak disk would otherwise be
-        # raw + compressed instead of ~max(raw, compressed).
+        # A live mmap pins the inode after os.remove, doubling peak disk.
         _WORKER.clear()
         gc.collect()
 
-        print(f'Transcoding {len(CHANNEL_NAMES)} channels to blosc2 (rows/chunk={effective_rpc})...', flush=True)
+        print(f'Transcoding {len(specs)} arrays to blosc2 (rows/chunk={effective_rpc})...', flush=True)
 
         t_trans = time.time()
         inventory, bg_dist, norm_acc = _transcode_to_blosc2(
-            partial_dir, pool_size, keep_steps, effective_rpc, zstd_clevel, n_jobs, events
+            partial_dir, specs, effective_rpc, zstd_clevel, n_jobs, events
         )
         print(f'Transcode finished in {time.time() - t_trans:.1f}s.')
 
@@ -1170,17 +1394,20 @@ def build_cache(
         if baseline_stats and baseline is None:
             print(f'  (baseline comparison skipped: {baseline_stats} unavailable)', flush=True)
 
-        icr_path = os.path.join(partial_dir, 'icr.npy')
-        np.save(icr_path, icr_arr)
-        _fsync_file(icr_path)
-        icr_bytes = os.path.getsize(icr_path)
+        side_bytes: dict[str, int] = {}
+        for fname, arr in (('icr.npy', icr_arr), (SKILLS_FILE, skills_arr)):
+            path = os.path.join(partial_dir, fname)
+            np.save(path, arr)
+            _fsync_file(path)
+            side_bytes[os.path.splitext(fname)[0]] = os.path.getsize(path)
 
         params = {
             'out_dir': out_dir,
             'pool_size': int(pool_size),
-            'n_timesteps': int(keep_steps),
+            'n_timesteps': int(context_steps),
             'sim_hours': float(sim_hours),
             'warmup_hours': float(warmup_hours),
+            'warmup_offset_steps': int(warmup_offset_steps),
             'dt_minutes': float(DT_MINUTES),
             'hypo_oversample': float(hypo_oversample),
             'hypo_min_frac': float(hypo_min_frac),
@@ -1192,10 +1419,15 @@ def build_cache(
             'rows_per_chunk': int(effective_rpc),
             'zstd_clevel': int(zstd_clevel),
             'channels': list(channel_names(events)),
+            'context_steps': int(context_steps),
+            'tail_steps': int(tail_steps),
+            'tail_arms': list(TAIL_ARMS),
+            'tail_channels': list(tail_channel_names(events)),
+            'skills': list(SKILL_NAMES),
             'cache_format': CACHE_FORMAT_VERSION,
             'baseline_stats': baseline['source'] if baseline else None,
         }
-        report = _finalize_report(acc, params, inventory, icr_bytes, bg_dist, baseline)
+        report = _finalize_report(acc, params, inventory, side_bytes, bg_dist, baseline)
         # The stats files land before the meta.json sentinel, fsync'd in the same flow.
         curves_acc, events_acc = _split_norm_acc(norm_acc)
         for fname, acc_part in ((NORM_STATS_FILE, curves_acc),
@@ -1255,10 +1487,15 @@ def main() -> int:
                         help='Output directory for the cached arrays.')
     parser.add_argument('--pool-size', type=int, default=50000,
                         help='Number of patient trajectories to generate.')
-    parser.add_argument('--sim-hours', type=float, default=DEFAULT_SIM_HOURS,
-                        help='Post-warmup hours kept per patient.')
+    parser.add_argument('--context-steps', type=int, default=DEFAULT_CONTEXT_STEPS,
+                        help='Steps of behaviour-on context kept per patient. The '
+                             'default is the contract (SPEC/cache.md).')
+    parser.add_argument('--tail-steps', type=int, default=DEFAULT_TAIL_STEPS,
+                        help='Steps of each behaviour-off counterfactual tail. The '
+                             'default is the contract (SPEC/cache.md).')
     parser.add_argument('--warmup-hours', type=float, default=DEFAULT_WARMUP_HOURS,
-                        help='Hours discarded from the start of every run.')
+                        help='Fixed hours discarded from the start of every run, '
+                             'before the row\'s own uniform offset.')
     parser.add_argument('--jobs', type=int, default=max(1, (os.cpu_count() or 2) - 1),
                         help='Worker processes (1 disables multiprocessing).')
     parser.add_argument('--rows-per-chunk', type=int, default=DEFAULT_ROWS_PER_CHUNK,
@@ -1316,7 +1553,8 @@ def main() -> int:
     report = build_cache(
         out_dir=args.out_dir,
         pool_size=args.pool_size,
-        sim_hours=args.sim_hours,
+        context_steps=args.context_steps,
+        tail_steps=args.tail_steps,
         warmup_hours=args.warmup_hours,
         n_jobs=args.jobs,
         rows_per_chunk=args.rows_per_chunk,
