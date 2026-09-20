@@ -320,10 +320,15 @@ class BoundaryDose:
 
 
 def _log_uniform(rng: np.random.Generator, lo: float, hi: float) -> float:
-    """Log-uniform draw on ``[lo, hi]``; a degenerate range returns ``lo``."""
+    """Log-uniform draw on ``[lo, hi]``, one uniform deep.
+
+    A degenerate range returns ``lo`` and still spends its draw, so pinning a range
+    leaves every later draw of the frozen order where production puts it.
+    """
+    u = float(rng.uniform(0.0, 1.0))
     if hi <= lo:
         return float(lo)
-    return float(np.exp(rng.uniform(math.log(lo), math.log(hi))))
+    return float(np.exp(math.log(lo) + u * (math.log(hi) - math.log(lo))))
 
 
 def row_draws(seed: int, cfg: RowConfig) -> RowDraws:

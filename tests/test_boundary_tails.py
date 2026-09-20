@@ -213,7 +213,9 @@ def test_no_tail_is_ever_rejected(tmp_path, monkeypatch):
     rail_low = report['params']['rail_low']
     assert ctx_bg.min() > rail_low, 'every stored context clears the rail'
     assert tail_bg.min() <= rail_low, 'a 20 U tail crosses the rail and is kept'
-    assert tail_bg.min() == pytest.approx(BG_CLAMP_MIN, abs=1e-3)
+    assert tail_bg.min() >= BG_CLAMP_MIN, 'the clamp is the only floor under it'
+    assert tail_bg[:, 1].min() <= rail_low and tail_bg[:, 3].min() <= rail_low
+    assert tail_bg[:, 0].min() > rail_low, 'the dose is what took it there'
 
 
 def test_tail_dose_arrays_are_the_boundary_step(tmp_path):
@@ -280,6 +282,18 @@ def test_row_rebuild_is_deterministic():
         assert np.array_equal(a[name], b[name]), name
     for key in ('dose_bolus_u', 'dose_carb_g', 'dose_carb_gi', 'dose_site_factor'):
         assert sa[key] == sb[key]
+
+
+def test_pinning_a_dose_range_leaves_the_later_draws_in_place(monkeypatch):
+    """A test that pins a range must still exercise production's draw sequence."""
+    cfg = _cfg()
+    free = cs.row_draws(78, cfg)
+    monkeypatch.setattr(cs, 'TAIL_BOLUS_U_RANGE', (20.0, 20.0))
+    pinned = cs.row_draws(78, cfg)
+    assert pinned.bolus_u == 20.0
+    assert pinned.warmup_offset == free.warmup_offset
+    assert (pinned.analogue, pinned.carb_g, pinned.carb_gi) == (
+        free.analogue, free.carb_g, free.carb_gi)
 
 
 def test_dose_stream_is_independent_of_the_simulator():
