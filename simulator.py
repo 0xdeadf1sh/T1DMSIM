@@ -1,16 +1,8 @@
-"""
-T1DM Patient Behavior Simulator
-================================
-Generates synthetic factor curves (carb intake, insulin, sensitivity, exercise)
-and computes blood sugar deltas. Designed for training transformer models on
-patient behavior patterns.
+"""T1DM patient behaviour simulator.
 
-Architecture:
-- Patient profile is sampled from a multivariate normal (4 skill dimensions)
-- All behavioral parameters are derived from the skill profile
-- Output is factor curves + BG trace at 5-minute resolution
-- Seed-driven PRNG for reproducibility
-"""
+A patient profile is sampled from a 4-dimensional skill multinormal and every
+behavioural parameter derives from it; one seed reproduces the whole run. Output
+is carb, insulin and sensitivity curves plus a BG trace on a 5-min grid."""
 
 import numpy as np
 from dataclasses import dataclass, field
@@ -298,33 +290,6 @@ HYPO_PANIC_FACTOR_BASE = 1.0  # How much extra is eaten, scaled by 1/s3
 HYPO_DETECTION_AWAKE_MINUTES = 5.0  # Detection delay awake
 HYPO_DETECTION_ASLEEP_LAMBDA = 30.0  # Exponential mean for detection delay asleep (severe hypo bypasses this)
 
-# Exercise
-EXERCISE_PROBABILITY_BASE = 0.0  # Base daily probability
-EXERCISE_SKILL_BONUS = 0.0  # Added probability from s4
-EXERCISE_TIME_MEAN_OFFSET_HOURS = 11.0  # Typical time: wake + 11h. For the 7:30 wake population this lands the
-                                        # average session around 18:30 (after-work / pre-dinner). Earlier values
-                                        # (9.0 → ~16:30) clustered with the old 16:30 dinner; with dinner now at
-                                        # 19:30 the exercise offset is shifted in step so the two events stay
-                                        # ordered (exercise → dinner) rather than overlapping.
-EXERCISE_TIME_SIGMA_HOURS = 4.0  # [HIVAR] 2→4 — wider exercise-timing scatter.
-EXERCISE_DURATION_MEAN_MIN = 75.0       # Population-mean session length. Real OhioT1DM mean ≈ 86 min,
-                                        # σ across patients ≈ 57; the previous 40-min mean represented
-                                        # only short walkers. Each patient now samples their own mean
-                                        # from N(75, 45) so the population spans walkers to cyclists.
-EXERCISE_DURATION_MEAN_SIGMA_MIN = 90.0  # [HIVAR] 45→90 — wider across-patient session-length spread.
-EXERCISE_DURATION_MEAN_MIN_CLAMP = (12.0, 225.0)  # [HIVAR 2x] (15.0, 200.0)→(12.0, 225.0) — session-length clamp
-EXERCISE_DURATION_SIGMA_MIN = 40.0  # [HIVAR 2x] 20.0→40.0 — within-patient session-length noise
-EXERCISE_CARB_EQUIV_PER_MIN = 0.5  # Negative carb equivalent per minute of exercise
-# [CF] A session is planned hours ahead but only starts if BG allows it. Blocked
-# below hypo_threshold + this margin: exercise is negative food, so starting a
-# workout already low drives BG straight down, and nobody sets off on a run at a
-# BG they would treat at rest. The margin sits above the rest-state threshold
-# because the bar for starting exercise is higher than the bar for eating —
-# clinical guidance is to top up with carbs below ~90 mg/dL before activity.
-EXERCISE_HYPO_MARGIN = 20.0
-EXERCISE_GAMMA_K = 3.0
-EXERCISE_GAMMA_THETA = 15.0
-
 # Hepatic glucose output (insulin-suppressed via Hill function)
 # At zero insulin, HGO runs near UNSUPPRESSED; as plasma insulin rises it saturates toward the
 # SUPPRESSED floor. Liver output sets the basal share of daily insulin: ~47% at these values.
@@ -607,19 +572,10 @@ WEEKEND_WAKE_DELAY_HOURS_MIN = 1.0     # Min extra hours slept in on weekends/ho
 WEEKEND_WAKE_DELAY_HOURS_MAX = 2.0     # Max extra hours slept in on weekends/holidays
 WEEKEND_MEAL_JITTER_MULTIPLIER = 1.5   # Meal timing variability multiplier on weekends
 WEEKEND_CARB_INCREASE_FRACTION = 0.15  # Fraction by which carb amounts can increase on weekends
-WEEKEND_EXERCISE_PROB_MULTIPLIER = 0.8 # Exercise probability multiplier on weekends
 
 # Public holidays (non-weekend working days treated as weekend for behavior)
 PUBLIC_HOLIDAYS_PER_YEAR_MIN = 10      # Minimum number of public holidays per year
 PUBLIC_HOLIDAYS_PER_YEAR_MAX = 20      # Maximum number of public holidays per year
-
-# ============================================================================
-# EXERCISE: DELAYED INSULIN SENSITIVITY EFFECT
-# ============================================================================
-
-EXERCISE_IS_REDUCTION = 0.10           # IS reduction fraction post-exercise (10% more sensitive)
-EXERCISE_IS_DURATION_HOURS = 6.0       # Duration of post-exercise IS boost (hours). Long enough to model the well-known evening-hypo pattern after morning exercise, but short enough not to contribute to a half-day BG ACF tail.
-EXERCISE_IS_RAMP_HOURS = 1.0           # Trapezoidal ramp up/down for the IS boost envelope
 
 # ============================================================================
 # TREND-BASED ANTICIPATORY CORRECTIONS
@@ -725,7 +681,6 @@ class PatientProfile:
     dawn_hgo_amplitude: float = DAWN_HGO_AMPLITUDE_MEAN
     night_hgo_dip_amplitude: float = NIGHT_HGO_DIP_AMPLITUDE_MEAN
     ge_dawn_amplitude: float = GE_EQ_DAWN_AMPLITUDE_MEAN
-    exercise_duration_mean_min: float = EXERCISE_DURATION_MEAN_MIN
 
     # Derived behavioral parameters
     wake_time_hours: float = 8.0
@@ -738,7 +693,6 @@ class PatientProfile:
     gi_guess_sigma: float = GI_GUESS_SIGMA_BASE  # SD of the GI this patient writes down
     bolus_timing_mean: float = 0.0
     bolus_timing_sigma: float = 10.0
-    exercise_probability: float = 0.5
     panic_factor: float = 1.0
     basal_miss_prob: float = 0.01
     meal_jitter_sigma_min: float = 30.0
@@ -749,7 +703,7 @@ class ActiveCurve:
     """A time-domain curve (carb absorption, insulin action, etc.)."""
     start_time_idx: int  # Start index in global timeline
     values: np.ndarray  # Curve values at each DT step
-    curve_type: str  # 'carb', 'insulin', 'exercise', 'hgo', 'correction_carb'
+    curve_type: str  # 'carb', 'insulin', 'hgo', 'correction_carb'
     label: str = ""  # Human-readable label
 
 
@@ -765,7 +719,6 @@ class SimulatorState:
     carb_curve_history: list = field(default_factory=list)
     insulin_curve_history: list = field(default_factory=list)
     resistance_history: list = field(default_factory=list)
-    exercise_curve_history: list = field(default_factory=list)
     hgo_history: list = field(default_factory=list)
     delta_history: list = field(default_factory=list)
     is_sick: bool = False
@@ -786,7 +739,6 @@ class SimulatorState:
     day_of_week: int = 0               # 0=Monday ... 6=Sunday
     is_holiday: bool = False           # Whether today is a public holiday
     # Time-limited physiological effects
-    exercise_is_effects: list = field(default_factory=list)  # (start_idx, end_idx, reduction)
     alcohol_effects: list = field(default_factory=list)      # (start_idx, end_idx, hgo_factor)
     stress_effects: list = field(default_factory=list)       # (start_idx, end_idx, is_factor)
     meal_hgo_effects: list = field(default_factory=list)     # (start_idx, end_idx, magnitude_g_per_hr)
@@ -915,12 +867,11 @@ def bateman_peak_min(ka_per_hour: float, ke_per_hour: float) -> float:
     return 60.0 * float(np.log(ka_per_hour / ke_per_hour)) / (ka_per_hour - ke_per_hour)
 
 
-# Point doses per step, FROZEN order: g, GI, U, min, h, U, min, h, session minutes.
+# Point doses per step, FROZEN order: g, GI, U, min, h, U, min, h.
 EVENT_CHANNELS = (
     'carb_g', 'carb_gi',
     'bolus_u', 'bolus_peak_min', 'bolus_dur_h',
     'basal_u', 'basal_peak_min', 'basal_dur_h',
-    'exercise_min',
 )
 _EVENT_KINDS = {
     'carb': ('carb_g', {'gi': 'carb_gi'}),
@@ -928,7 +879,6 @@ _EVENT_KINDS = {
     'bolus': ('bolus_u', {'peak_min': 'bolus_peak_min', 'dur_h': 'bolus_dur_h'}),
     'insulin': ('bolus_u', {'peak_min': 'bolus_peak_min', 'dur_h': 'bolus_dur_h'}),
     'basal': ('basal_u', {'peak_min': 'basal_peak_min', 'dur_h': 'basal_dur_h'}),
-    'exercise': ('exercise_min', {}),
 }
 
 
@@ -998,13 +948,10 @@ def ge_diurnal_profile(hour_of_day: float) -> float:
 
 def envelope_intensity(time_idx: int, start_idx: int, end_idx: int,
                        ramp_up_steps: int, ramp_down_steps: int) -> float:
-    """Trapezoidal envelope for time-bounded effects.
-
-    Returns 0 outside [start_idx, end_idx). Inside, ramps linearly from 0 to 1
-    over ramp_up_steps, plateaus at 1, then ramps back to 0 over ramp_down_steps.
-    Used to soften on/off transitions of exercise/stress IS effects and alcohol
-    HGO suppression so the BG curves don't show step-function discontinuities.
-    """
+    """Trapezoidal envelope for time-bounded effects: 0 outside [start_idx, end_idx),
+    inside ramping 0->1 over ramp_up_steps, plateauing at 1, then 1->0 over
+    ramp_down_steps. Softens the on/off edges of the stress IS effect and alcohol HGO
+    suppression so the BG curve shows no step discontinuity."""
     if time_idx < start_idx or time_idx >= end_idx:
         return 0.0
     progress = time_idx - start_idx
@@ -1107,9 +1054,6 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     dawn_factor = (min(2.0, profile.dawn_hgo_amplitude / DAWN_HGO_AMPLITUDE_MEAN)
                    if DAWN_HGO_AMPLITUDE_MEAN > 0 else 0.0)
     profile.ge_dawn_amplitude = GE_EQ_DAWN_AMPLITUDE_MEAN * dawn_factor
-    profile.exercise_duration_mean_min = float(np.clip(
-        rng.normal(EXERCISE_DURATION_MEAN_MIN, EXERCISE_DURATION_MEAN_SIGMA_MIN),
-        *EXERCISE_DURATION_MEAN_MIN_CLAMP))
 
     # Ideal basal balances 24h of HGO at the patient's own insulin sensitivity:
     # at steady state, glucose_out = total_insulin * ICR / IS must equal HGO,
@@ -1167,7 +1111,6 @@ def generate_patient(rng: np.random.Generator) -> PatientProfile:
     profile.bolus_timing_mean = (BOLUS_TIMING_COMPETENT_MEAN * s3 +
                                   BOLUS_TIMING_INCOMPETENT_MEAN * (1 - s3))
     profile.bolus_timing_sigma = BOLUS_TIMING_SIGMA_BASE / (0.3 + 0.7 * s3)
-    profile.exercise_probability = EXERCISE_PROBABILITY_BASE + EXERCISE_SKILL_BONUS * s4
     profile.panic_factor = HYPO_PANIC_FACTOR_BASE * (1.2 - s3)
     profile.basal_miss_prob = BASAL_MISS_PROB_BASE * np.exp(BASAL_MISS_SKILL_SCALE * (0.5 - s2))
     profile.meal_jitter_sigma_min = MEAL_TIME_JITTER_BASE_MIN / (0.2 + 0.8 * s4)
@@ -1225,7 +1168,6 @@ class T1DMSimulator:
         self._carb_totals: np.ndarray = np.zeros(_init_len)
         self._basal_totals: np.ndarray = np.zeros(_init_len)
         self._bolus_totals: np.ndarray = np.zeros(_init_len)
-        self._exercise_totals: np.ndarray = np.zeros(_init_len)
         self._rescue_totals: np.ndarray = np.zeros(_init_len)  # correction_carb only, for the rule-of-15 recheck
         self._logged_carb_totals: np.ndarray = np.zeros(_init_len)  # what the patient wrote down
         self._logged_basal_totals: np.ndarray = np.zeros(_init_len)  # intended, before site quality
@@ -1286,7 +1228,6 @@ class T1DMSimulator:
         self._carb_totals = np.zeros(_init_len)
         self._basal_totals = np.zeros(_init_len)
         self._bolus_totals = np.zeros(_init_len)
-        self._exercise_totals = np.zeros(_init_len)
         self._rescue_totals = np.zeros(_init_len)  # correction_carb only, for the rule-of-15 recheck
         self._logged_carb_totals = np.zeros(_init_len)  # what the patient wrote down
         self._logged_basal_totals = np.zeros(_init_len)  # intended, before site quality
@@ -1329,7 +1270,6 @@ class T1DMSimulator:
             self._carb_totals = np.concatenate([self._carb_totals, np.zeros(extra)])
             self._basal_totals = np.concatenate([self._basal_totals, np.zeros(extra)])
             self._bolus_totals = np.concatenate([self._bolus_totals, np.zeros(extra)])
-            self._exercise_totals = np.concatenate([self._exercise_totals, np.zeros(extra)])
             self._rescue_totals = np.concatenate([self._rescue_totals, np.zeros(extra)])
             self._logged_carb_totals = np.concatenate(
                 [self._logged_carb_totals, np.zeros(extra)])
@@ -1358,8 +1298,6 @@ class T1DMSimulator:
             self._basal_totals[start_idx:end] += curve
         elif curve_type in ('bolus', 'insulin'):
             self._bolus_totals[start_idx:end] += curve
-        elif curve_type == 'exercise':
-            self._exercise_totals[start_idx:end] += curve
 
     def inject_curve(self, values: np.ndarray, start_idx: int,
                      curve_type: str, label: str = '',
@@ -1755,28 +1693,6 @@ class T1DMSimulator:
                               'dur_h': bolus_duration / 60.0},
                 }))
 
-        # --- Exercise ---
-        ex_prob = EXERCISE_PROBABILITY_BASE + EXERCISE_SKILL_BONUS * eff_s4
-        if s.is_rare_event_day:
-            ex_prob *= 0.3
-        if is_special_day:
-            ex_prob *= WEEKEND_EXERCISE_PROB_MULTIPLIER
-
-        if self.rng.random() < ex_prob:
-            ex_offset = self.rng.normal(EXERCISE_TIME_MEAN_OFFSET_HOURS, EXERCISE_TIME_SIGMA_HOURS)
-            ex_time = today_wake + ex_offset
-            ex_idx = max(self.state.current_idx, day_start_idx + int(ex_time * 60 / DT_MINUTES))
-            ex_duration = max(10.0, self.rng.normal(p.exercise_duration_mean_min, EXERCISE_DURATION_SIGMA_MIN))
-            ex_magnitude = ex_duration * EXERCISE_CARB_EQUIV_PER_MIN
-            ex_curve_duration = ex_duration + 90
-            ex_curve = gamma_curve(ex_magnitude, EXERCISE_GAMMA_K, EXERCISE_GAMMA_THETA, ex_curve_duration)
-            self._pending_events.append((ex_idx, 'exercise', {
-                'curve': ex_curve,
-                'label': f'Exercise {ex_duration:.0f}min',
-                'duration_min': ex_duration,  # stored for IS effect scheduling
-                'event': {'dose': float(ex_duration)},
-            }))
-
         # --- Alcohol event (suppresses HGO, causing delayed lows) ---
         if is_special_day:
             alcohol_prob = ALCOHOL_PROBABILITY_HOLIDAY if s.is_holiday else ALCOHOL_PROBABILITY_WEEKEND
@@ -1833,12 +1749,9 @@ class T1DMSimulator:
                              SITE_QUALITY_MIN, SITE_QUALITY_MAX))
 
     def _compute_insulin_resistance(self, time_idx: int, active_carb: float = 0.0) -> float:
-        """Compute insulin resistance factor at a given time index.
-
-        Includes diurnal pattern, daily drift (smoothed across midnight), illness
-        factor, exercise/stress envelopes, glucotoxic IR, postprandial insulin
-        resistance, and per-step noise.
-        """
+        """Insulin resistance factor at a time index: diurnal pattern, daily drift
+        (smoothed across midnight), illness factor, stress envelope, glucotoxic IR,
+        postprandial insulin resistance and per-step noise."""
         s = self.state
 
         # Time of day in hours
@@ -1872,22 +1785,6 @@ class T1DMSimulator:
         # ramps smoothly toward 1.0 after recovery (and away from 1.0 at onset),
         # so IS doesn't step at midnight when is_sick toggles.
         is_val *= s.illness_is_factor
-
-        # Post-exercise IS reduction (aerobic exercise increases insulin sensitivity for hours).
-        # Trapezoidal envelope softens the on/off edges so IS doesn't step.
-        ex_ramp_steps = int(EXERCISE_IS_RAMP_HOURS * 60 / DT_MINUTES)
-        exercise_reduction = 0.0
-        active_ex_effects = []
-        for (start_idx, end_idx, reduction) in s.exercise_is_effects:
-            if time_idx < end_idx:
-                active_ex_effects.append((start_idx, end_idx, reduction))
-                intensity = envelope_intensity(time_idx, start_idx, end_idx,
-                                                ex_ramp_steps, ex_ramp_steps)
-                if intensity > 0:
-                    exercise_reduction += reduction * intensity
-        s.exercise_is_effects = active_ex_effects
-        if exercise_reduction > 0:
-            is_val *= (1.0 - min(0.30, exercise_reduction))
 
         # Stress IS effect (transient insulin resistance from cortisol/adrenaline).
         # Envelope blends the factor in/out around 1.0 (no effect).
@@ -2236,25 +2133,8 @@ class T1DMSimulator:
                         if event is not None:
                             event = event | {'dose': event['dose'] * scale}
 
-            # Same glance at the CGM before a planned session. Unconditional
-            # rather than probabilistic like the bolus: setting off on a workout
-            # is a deliberate act with preparation around it, not the habitual
-            # reflex a mealtime dose is. Skipping here also skips the
-            # post-exercise IS boost below, which is correct — no session, no
-            # sensitivity tail.
-            elif event_type == 'exercise':
-                if s.bg_observed < p.hypo_threshold + EXERCISE_HYPO_MARGIN:
-                    continue
-
             self.inject_curve(curve, event_time, event_type, label=label, event=event,
                               logged=logged)
-            # Schedule post-exercise IS sensitivity boost
-            if event_type == 'exercise':
-                ex_dur = event_data.get('duration_min', EXERCISE_DURATION_MEAN_MIN)
-                effect_start = event_time + int(ex_dur / DT_MINUTES)
-                effect_end = effect_start + int(EXERCISE_IS_DURATION_HOURS * 60 / DT_MINUTES)
-                reduction = min(0.30, EXERCISE_IS_REDUCTION * (ex_dur / EXERCISE_DURATION_MEAN_MIN))
-                s.exercise_is_effects.append((effect_start, effect_end, reduction))
 
         # --- Read per-step contributions from pre-computed accumulation arrays (O(1)) ---
         total_carb = float(self._carb_totals[idx]) if idx < len(self._carb_totals) else 0.0
@@ -2286,7 +2166,6 @@ class T1DMSimulator:
                         if idx < len(self._logged_basal_totals) else 0.0)
         logged_bolus = (float(self._logged_bolus_totals[idx])
                         if idx < len(self._logged_bolus_totals) else 0.0)
-        total_exercise = float(self._exercise_totals[idx]) if idx < len(self._exercise_totals) else 0.0
 
         # Per-step absorption noise via AR(1) (smooth, correlated — gut motility
         # and SC depot uptake don't reset every 5 min). Stationary σ matches the
@@ -2398,7 +2277,7 @@ class T1DMSimulator:
         # --- Compute BG delta ---
         # IS now divides insulin's effect: resistant patients (IR>1) clear less
         # glucose per unit insulin; sensitive patients (IR<1) clear more.
-        glucose_in = total_carb + hgo_value - total_exercise
+        glucose_in = total_carb + hgo_value
         glucose_out = total_insulin * p.icr / insulin_resistance_factor
         bg_delta = BG_SCALE_FACTOR * (glucose_in - glucose_out)
 
@@ -2469,7 +2348,6 @@ class T1DMSimulator:
         s.carb_curve_history.append(total_carb)
         s.insulin_curve_history.append(total_insulin)
         s.resistance_history.append(insulin_resistance_factor)
-        s.exercise_curve_history.append(total_exercise)
         s.hgo_history.append(hgo_value)
         s.delta_history.append(bg_delta)
 
@@ -2496,7 +2374,6 @@ class T1DMSimulator:
             'total_insulin_true': total_insulin,
             'basal_insulin_true': basal_step,
             'bolus_insulin_true': bolus_step,
-            'total_exercise': total_exercise,
             'insulin_resistance': insulin_resistance_factor,
             'hgo': hgo_value,
             'glucose_in': glucose_in,
@@ -2518,7 +2395,7 @@ class T1DMSimulator:
             'bg': [], 'bg_observed': [], 'bg_delta': [],
             'total_carb': [], 'total_carb_true': [], 'total_insulin': [], 'basal_insulin': [],
             'bolus_insulin': [], 'total_insulin_true': [], 'basal_insulin_true': [],
-            'bolus_insulin_true': [], 'total_exercise': [],
+            'bolus_insulin_true': [],
             'insulin_resistance': [], 'hgo': [], 'glucose_in': [], 'glucose_out': [],
             'is_sick': [], 'is_rare_day': [], 'is_weekend': [], 'is_holiday': [],
             'alcohol_hgo_factor': [],
@@ -2546,7 +2423,6 @@ class T1DMSimulator:
             'basal_duration': f'{p.basal_duration_hours:.1f}h',
             'cgm_check_interval': f'{p.cgm_check_interval_min:.0f}min',
             'patience_time': f'{p.patience_time_min:.0f}min',
-            'exercise_prob': f'{p.exercise_probability:.2f}',
             'basal_miss_prob': f'{p.basal_miss_prob:.4f}',
             'meal_gi_mean': f'{p.meal_gi_mean:.0f}',
             'panic_factor': f'{p.panic_factor:.2f}',

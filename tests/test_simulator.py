@@ -295,9 +295,7 @@ class TestSevereHypoRefractory:
         # Ensure awake — wake at start, sleep far in the future
         sim._today_wake_idx = 0
         sim._today_sleep_idx = idx + STEPS_PER_DAY
-        # Clear carbs-on-board so these tests exercise the refractory TIMER
-        # alone. Otherwise the rule-of-15 recheck blocks the follow-up rescue
-        # for its own (correct) reason and the timer is never reached.
+        # Clear carbs-on-board so the refractory TIMER alone gates the rescue.
         sim._rescue_totals[:] = 0.0
 
     def test_severe_hypo_refractory_blocks_back_to_back(self):
@@ -686,7 +684,7 @@ class TestBasalInjectionCadence:
 class TestInjectCurveUpdatesTotals:
     """CLAUDE.md: 'Use inject_curve() (not state.active_curves.append) whenever
     inserting curves from outside generate().' Raw append leaves the
-    pre-accumulated _carb/_basal/_bolus/_exercise totals stale, so per-step
+    pre-accumulated _carb/_basal/_bolus totals stale, so per-step
     reads silently drop the contribution. This test pins that contract."""
 
     def test_inject_curve_changes_bg_response(self):

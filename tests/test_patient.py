@@ -140,11 +140,6 @@ class TestBehavioralParameters:
             assert np.mean(low_skill_intervals) > np.mean(high_skill_intervals), (
                 "Less attentive patients should check CGM less frequently")
 
-    def test_exercise_probability_positive(self):
-        for seed in range(30):
-            p = make_patient(seed)
-            assert 0.0 <= p.exercise_probability <= 1.0
-
     def test_meal_gi_skill_relationship(self):
         """More dietary discipline → lower mean meal GI."""
         patients = [make_patient(s) for s in range(200)]
