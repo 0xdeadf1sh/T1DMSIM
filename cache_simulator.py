@@ -272,7 +272,7 @@ def _finalize_norm_stats(
                 f"normalization channel {name!r} fitted std={std!r} over n={n} "
                 f"values: the built window contains no variation in it at all. "
                 f"A sparse channel needs a pool long enough to hold its events "
-                f"-- raise --sim-hours or --pool-size. T1DMAI rejects a stats "
+                f"-- raise --context-steps or --pool-size. T1DMAI rejects a stats "
                 f"file with a non-positive std, so this cache would not load."
             )
         stats[name] = {'mean': float(mean), 'std': std}
@@ -1128,8 +1128,8 @@ def _render_comparison(report: dict[str, Any]) -> list[str]:
 
 def _render_tails(report: dict[str, Any]) -> list[str]:
     """Render the counterfactual-tail section: per-arm mean BG and the dose draws."""
-    t = report.get('tails') or {}
-    if not t.get('bg_mean'):
+    t = report['tails']
+    if not t['bg_mean']:
         return []
     offsets = t['offsets_min']
     L = ['## Counterfactual tails', '']
@@ -1549,6 +1549,12 @@ def main() -> int:
         meta_path = os.path.join(args.rerender_report, 'meta.json')
         with open(meta_path) as f:
             report = json.load(f)
+        got = report.get('cache_format')
+        if got != CACHE_FORMAT_VERSION:
+            print(f'{meta_path}: cache_format {got!r}, not {CACHE_FORMAT_VERSION!r}. '
+                  f'Rebuild the cache; its report cannot be rendered from here.',
+                  file=sys.stderr)
+            return 2
         md_path = os.path.join(args.rerender_report, args.dataset_md)
         with open(md_path, 'w') as f:
             f.write(_render_dataset_md(report))

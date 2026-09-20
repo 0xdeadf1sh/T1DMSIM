@@ -56,6 +56,18 @@ def test_meta_carries_flat_compat_keys(tmp_path):
     assert tuple(meta['tail_channels']) == cs.TAIL_CHANNEL_NAMES
 
 
+def test_rerender_refuses_a_foreign_cache_format(tmp_path, monkeypatch, capsys):
+    cache = tmp_path / 'old'
+    cache.mkdir()
+    (cache / 'meta.json').write_text(json.dumps({'cache_format': 'blosc2-ndarray-v2'}))
+    monkeypatch.setattr(sys, 'argv',
+                        ['cache_simulator.py', '--rerender-report', str(cache)])
+    assert cs.main() == 2
+    err = capsys.readouterr().err
+    assert 'blosc2-ndarray-v2' in err and cs.CACHE_FORMAT_VERSION in err
+    assert not (cache / 'DATASET.md').exists()
+
+
 def test_contract_geometry_is_the_default():
     # SPEC/cache.md fixes both; a cache built to other arithmetic cannot train.
     assert cs.DEFAULT_CONTEXT_STEPS == cs.MAX_CONTEXT_PATCHES * cs.PATCH_SIZE == 2016
