@@ -218,7 +218,7 @@ BASAL_VARIANTS = {
     "glargine_u300": {"ka": 0.156, "ke": 0.0377, "action_hours": 101.0},
     "degludec": {"ka": 0.187, "ke": 0.0277, "action_hours": 133.0},
 }
-BASAL_DOSE_INTERVAL_HOURS = 24.0  # Both analogues are injected once daily.
+BASAL_DOSE_INTERVAL_HOURS = 24.0  # every analogue is injected once daily
 
 # Carb counting error — relative SD around the true carb amount. A high
 # sigma is the dominant source of meal-bolus crashes that push TBR1 well
@@ -248,9 +248,7 @@ PATIENCE_TIME_COMPETENT = 240 # Minutes before re-correcting (competent)
 PATIENCE_TIME_INCOMPETENT = 80 # Minutes before re-correcting (incompetent)
 CORRECTION_FACTOR_MEAN = 40.0  # mg/dL drop per unit of insulin
 CORRECTION_FACTOR_SIGMA = 20.0  # [HIVAR 2x] 10.0→20.0 — correction-factor scatter
-BG_TARGET = 120.0  # Target BG for corrections. Aims near the real-cohort median (155–157) — corrections targeting lower routinely overshoot into hypo because absorbed insulin keeps acting after BG arrives at target. Sits well above the ATTD ideal (~110) — sim correction
-                   # kinetics + delivery lag tend to overshoot, so a higher target keeps median BG
-                   # near the real OhioT1DM ~157 and TBR1 near real's ~3% rather than runaway hypo.
+BG_TARGET = 120.0  # mg/dL correction target; the population median lands at 123 mg/dL
 BG_HIGH_THRESHOLD = 200.0 # mg/dL, threshold to trigger a correction
 BG_LOW_THRESHOLD = 40.0  # Floor of the hypo band; the acting trigger is the per-patient PatientProfile.hypo_threshold below.
 # [CF] Per-patient "what I treat as low", centred on HYPO_THRESHOLD_MEDIAN and
@@ -397,8 +395,8 @@ INSULIN_ABSORPTION_NOISE_SIGMA = 0.0  # [MINNOISE] per-step insulin-absorption n
 
 # BG computation
 BG_SCALE_FACTOR = 3.65  # mg/dL per net gram of flux; co-tuned with GE_RATE
-BG_CLAMP_MIN = 1.0  # [CF] 40→10 — the 40 floor was the real CGM device floor, but a device that stops REPORTING at 40 does not stop the patient falling. Pinning the dynamics there taught every downstream model that a descent tapers out near 40 and that a dangerous low is unreachable. 10 mg/dL is below survivable, so it never binds physiologically; it exists only to keep the Kovatchev log transform defined (f is -inf at 0, NaN below 1). Risk space is now asymmetric, f(10) = -6.82 vs f(400) = +3.16, which correctly prices a deep low above a high.
-BG_CLAMP_MAX = 400.0  # [HIVAR] 500→400 — match real CGM device ceiling (Ohio/AZT1D max = 400).
+BG_CLAMP_MIN = 1.0  # keeps the Kovatchev log transform defined; never binds physiologically
+BG_CLAMP_MAX = 400.0  # real CGM device ceiling
 BG_INITIAL_MEAN = 120.0
 BG_INITIAL_SIGMA = 60.0  # [HIVAR] 30→60 — wider warmup start (washes out over the run).
 BG_INITIAL_FLOOR = 40.0  # [CF] a run starts at a plausible BG, not at the dynamics clamp. Clipping the N(mean, 60) draw with BG_CLAMP_MIN would start ~4% of patients pinned in severe hypo before a single step ran; the warmup washes it out, but the transient is longer now that Sg is weak.
