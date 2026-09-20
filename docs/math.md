@@ -387,7 +387,7 @@ Each arm is a `copy.deepcopy` of the simulator taken at the boundary, so all fou
     true_carb       = gamma_curve(grams, gi_gamma_params(GI))
     logged_carb     = gamma_curve(guessed_grams, gi_gamma_params(guessed_GI))
 
-`inject_bolus` and `inject_carbs` consume no randomness. The site factor comes from `_site_quality` and the carb guess from `_logged_carb`, both taken once on the parent before the copies, so the two bolus arms share one factor and the two carbohydrate arms share one guess.
+`inject_bolus` and `inject_carbs` consume no randomness. The site factor comes from `_site_quality` and the carb guess from `_logged_carb`, both taken once on a throwaway deep copy of the boundary simulator: the two bolus arms share one factor and the two carbohydrate arms share one guess, and the boundary simulator's own `rng` and `_log_rng` are left where the context ended, so arm 0 continues it exactly.
 
 
 ## Unit Conventions

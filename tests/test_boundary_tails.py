@@ -85,12 +85,23 @@ def test_behaviour_off_carries_the_wake_window_across_midnight():
 
 def test_arm0_matches_an_untouched_behaviour_off_continuation():
     cfg = _cfg()
-    sim, _, dose = _boundary(101, cfg)
-    ref = copy.deepcopy(sim)
+    sim, _, _, draws = cs.simulate_to_boundary(101, cfg)
+    ref = copy.deepcopy(sim)          # taken before the boundary draws, not after
     ref.behaviour_enabled = False
     ref_bg = np.array([ref.generate()['bg'] for _ in range(cfg.tail_steps)], np.float32)
-    tails = cs.run_tails(sim, dose, cfg)
+    tails = cs.run_tails(sim, cs.boundary_dose(sim, draws), cfg)
     assert np.array_equal(tails['bg'][0], ref_bg), 'arm 0 must be bit-identical'
+
+
+def test_boundary_dose_leaves_the_parent_streams_where_the_context_ended():
+    cfg = _cfg()
+    sim, _, _, draws = cs.simulate_to_boundary(106, cfg)
+    before = (sim.rng.bit_generator.state, sim._log_rng.bit_generator.state)
+    dose = cs.boundary_dose(sim, draws)
+    assert (sim.rng.bit_generator.state, sim._log_rng.bit_generator.state) == before
+    assert dose.site_factor != 1.0
+    assert dose.logged_carb_g != dose.carb_g
+    assert cs.boundary_dose(sim, draws) == dose, 'so the draws stay repeatable'
 
 
 def test_arms_differ_only_through_the_injected_dose():

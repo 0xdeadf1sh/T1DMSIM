@@ -338,13 +338,14 @@ def row_draws(seed: int, cfg: RowConfig) -> RowDraws:
 
 
 def boundary_dose(sim: T1DMSimulator, draws: RowDraws) -> BoundaryDose:
-    """Draw the site-quality factor and the carb guess on the PARENT simulator.
+    """Draw the site-quality factor and the carb guess once, on a throwaway copy.
 
-    Both come off the simulator's own streams once, before the arms are copied, so
-    every arm inherits the same state and the four tails stay in RNG lockstep.
+    The copy absorbs the draws, so ``sim``'s own streams stay where the context left
+    them and arm 0 continues it untouched, while every arm shares factor and guess.
     """
-    site_factor = float(sim._site_quality(sim.patient.lifestyle_consistency))
-    _, event = sim._logged_carb(draws.carb_g, draws.carb_gi)
+    scratch = copy.deepcopy(sim)
+    site_factor = float(scratch._site_quality(scratch.patient.lifestyle_consistency))
+    _, event = scratch._logged_carb(draws.carb_g, draws.carb_gi)
     return BoundaryDose(
         bolus_u=draws.bolus_u,
         analogue=draws.analogue,
