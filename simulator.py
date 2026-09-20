@@ -1130,6 +1130,7 @@ class T1DMSimulator:
         self.rng = np.random.default_rng(seed)
         self.patient = generate_patient(self.rng)
         self.state = SimulatorState()
+        self.behaviour_enabled: bool = True  # False: no day events, no activation, no correction
 
         # Set initial BG
         if initial_bg is not None:
@@ -1332,6 +1333,45 @@ class T1DMSimulator:
             return None, None
         return (gamma_curve(float(g), *gi_gamma_params(gi_guess)),
                 {'dose': float(g), 'gi': gi_guess})
+
+    def inject_bolus(self, intended_units: float, analogue: str, site_factor: float,
+                     start_idx: int | None = None) -> None:
+        """Inject a bolus delivering ``intended_units * site_factor`` from ``start_idx``.
+
+        The logged curve and the event carry the INTENDED dose; the delivered curve
+        alone drives BG. PK shape is ``bolus_pk_for_dose`` on the intended dose, as a
+        meal bolus. Draws no randomness: the caller owns the site factor."""
+        if intended_units <= 0.0 or site_factor <= 0.0:
+            return
+        av = BOLUS_VARIANTS[analogue]
+        k, theta, duration = bolus_pk_for_dose(
+            float(intended_units), av['gamma_k'], av['gamma_theta'], av['dia_base_hours'])
+        delivered = float(intended_units) * float(site_factor)
+        curve = gamma_curve(delivered, k, theta, duration)
+        idx = self.state.current_idx if start_idx is None else int(start_idx)
+        self.inject_curve(
+            curve, idx, 'bolus', label=f'Bolus {delivered:.1f}U',
+            event={'dose': float(intended_units), 'peak_min': gamma_peak_min(k, theta),
+                   'dur_h': duration / 60.0},
+            logged=curve * (float(intended_units) / delivered))
+
+    def inject_carbs(self, grams: float, gi: float, logged_grams: float,
+                     logged_gi: float, start_idx: int | None = None) -> None:
+        """Inject ``grams`` at ``gi`` from ``start_idx``, logged as the patient's guess.
+
+        The true curve drives BG; the logged curve and the event carry the guess. A
+        zero ``logged_grams`` injects carbohydrate the patient wrote down nowhere.
+        Draws no randomness: the caller owns the guess."""
+        if grams <= 0.0:
+            return
+        idx = self.state.current_idx if start_idx is None else int(start_idx)
+        curve = gamma_curve(float(grams), *gi_gamma_params(float(gi)))
+        logged = event = None
+        if logged_grams > 0.0:
+            logged = gamma_curve(float(logged_grams), *gi_gamma_params(float(logged_gi)))
+            event = {'dose': float(logged_grams), 'gi': float(logged_gi)}
+        self.inject_curve(curve, idx, 'carb', label=f'Carbs {grams:.0f}g',
+                          event=event, logged=logged)
 
     def _generate_year_holidays(self, year: int) -> None:
         """Generate and store public holidays for the given simulation year.
@@ -2080,10 +2120,16 @@ class T1DMSimulator:
         if idx > 0 and idx % STEPS_PER_DAY == 0:
             s.day_number += 1
             self._plan_day()
-            self._generate_day_events()
+            if self.behaviour_enabled:
+                self._generate_day_events()
+            else:
+                # Nobody re-derives them today, so carry yesterday's window forward.
+                self._today_wake_idx += STEPS_PER_DAY
+                self._today_sleep_idx += STEPS_PER_DAY
 
         # --- Activate pending events ---
-        while self._pending_events and self._pending_events[0][0] <= idx:
+        while (self.behaviour_enabled and self._pending_events
+               and self._pending_events[0][0] <= idx):
             event_time, event_type, event_data = self._pending_events.pop(0)
             curve = event_data['curve']
             label = event_data.get('label', '')
@@ -2316,7 +2362,8 @@ class T1DMSimulator:
         s.bg_observed = self._compute_cgm_observation(s.bg)
 
         # --- Patient behavior (check and correct) ---
-        self._check_and_correct(idx)
+        if self.behaviour_enabled:
+            self._check_and_correct(idx)
 
         # --- Record history ---
         s.bg_history.append(s.bg)
