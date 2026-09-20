@@ -1,38 +1,8 @@
 """Compare T1DMSIM against the UVA/Padova 2008 in-silico model (simglucose).
 
-Unlike the real-CGM comparisons under ``scripts/`` and ``diff/``, this harness
-pits our behaviour-driven engine against the field's reference *physiological*
-simulator, and does so under **identical inputs**: the meal times + grams,
-bolus times + units, and basal that T1DMSIM generates for a given seed are
-captured verbatim and replayed into a paired UVA/Padova virtual patient. We
-then compare the resulting BG curves, their distributions, and — an axis the
-other tooling ignores — raw generation speed.
-
-Identical-input protocol
--------------------------
-* Every patient input in T1DMSIM flows through ``T1DMSimulator.inject_curve``
-  (scheduled meals/boluses/basal plus reactive corrections and rescues). HGO is
-  endogenous and added per-step, never as a curve, so a monkeypatch on
-  ``inject_curve`` captures exactly the patient's behavioural inputs and nothing
-  hepatic — which is correct, since UVA/Padova models its own EGP.
-* Captured curve totals are aggregated onto the 1-minute grid: carbs
-  (``carb`` + ``correction_carb``) as gram impulses, boluses (``bolus``) as unit
-  impulses, and long-acting basal smeared to the equivalent continuous pump
-  rate (U/min) over each dose's nominal duration. Exercise, alcohol and stress
-  have no analogue in the base UVA/Padova model and are not replayed.
-* Both engines start from the paired patient's initial Gsub; the first
-  ``WARMUP_HOURS`` are discarded from every metric. Curves are compared
-  noise-free (our true ``bg`` vs UVA/Padova ``Gsub``) to isolate the metabolic
-  models from CGM-noise modelling.
-
-Writes ``uva_padova/stats.json``, ``uva_padova/figures/*.png`` and a
-regenerated ``uva_padova/README.md``.
-
-Run (after installing the reference engine without its RL extras):
-    pip install --no-deps simglucose>=0.2.11
-    venv/bin/python uva_padova/compare_uva_padova.py            # full run
-    venv/bin/python uva_padova/compare_uva_padova.py --quick    # fast smoke run
-"""
+A seed's meals, boluses and basal are captured from ``inject_curve`` and replayed on the
+1-minute grid into a paired virtual patient; alcohol and stress have no analogue there.
+Both start from one Gsub and compare noise-free after WARMUP_HOURS. Needs simglucose."""
 from __future__ import annotations
 
 import argparse
@@ -633,7 +603,7 @@ def main():
             "n_seeds": n_seeds, "days": days, "warmup_hours": WARMUP_HOURS,
             "dt_minutes": DT, "uva_group": GROUP, "engine": "simglucose T1DPatient (UVA/Padova 2008)",
             "compared_signals": "T1DMSIM true bg vs UVA/Padova Gsub (both noise-free)",
-            "excluded_from_replay": ["exercise", "alcohol", "stress", "CGM sensor noise"],
+            "excluded_from_replay": ["alcohol", "stress", "CGM sensor noise"],
         },
         "pooled_ours": clean(pooled_o),
         "pooled_uva": clean(pooled_u),

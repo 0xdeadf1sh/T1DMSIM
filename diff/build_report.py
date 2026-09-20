@@ -23,9 +23,6 @@ existing README comparison block:
   - AZT1D-only insulin / carb behaviour panel (basal-rate distribution, bolus
     type breakdown, correction-vs-meal split, carbs / boluses per day)
   - cohort summary tables in JSON keyed by metric
-
-The four datasets are read with the loaders in scripts/compare_all_datasets.py;
-the simulator is exercised with the same warm-up convention as that script.
 """
 from __future__ import annotations
 
@@ -480,13 +477,9 @@ def assemble_cohort(name, items, regularize_fn, step_min):
 def assemble_sim(n_seeds=30, days=70, warmup_h=24):
     """Run the simulator once per seed and capture every output channel.
 
-    Returns a tuple `(items, raw_runs)` where:
-      - `items` is the list of (seed_id, [(ts, bg_observed), ...]) tuples used
-        by `assemble_cohort` to produce all CGM-only statistics.
-      - `raw_runs` is the per-seed dict of `generate_hours()` output arrays
-        (`bg_observed`, `total_carb`, `basal_insulin`, `bolus_insulin`, ...),
-        used by `sim_event_summary` so the simulator is only exercised once.
-    """
+    Returns `(items, raw_runs)`: the (seed_id, [(ts, bg_observed), ...]) tuples
+    `assemble_cohort` reduces, and the per-seed `generate_hours()` arrays
+    `sim_event_summary` reads, so one run serves both."""
     print(f"Running T1DMSIM: {n_seeds} seeds × {days}d ({warmup_h}h warmup)…")
     items = []
     raw_runs = []
@@ -599,19 +592,15 @@ def azt1d_event_summary(events_by_subject):
         n_correction_events += int(is_corr_only.sum())
         carbs = ubdf.loc[is_meal, "CarbSize"].dropna().to_numpy()
         all_carbs.extend(carbs.tolist())
-        # Device mode minutes (each row covers 5 minutes). Several subjects'
-        # CSVs contain typos ("sleepsleep") or numeric-coerced placeholders
-        # ("0"); fold those into the canonical sleep/exercise/regular buckets.
+        # Device mode minutes, 5 per row; typos and numeric placeholders fold into regular.
         dm = df["DeviceMode"].fillna("regular").astype(str).str.strip().str.lower()
         dm = dm.replace({"": "regular", "nan": "regular", "0": "regular",
-                         "sleepsleep": "sleep", "exerciseexercise": "exercise"})
+                         "sleepsleep": "sleep"})
         for mode, cnt in dm.value_counts().items():
             key = str(mode)
             if "sleep" in key:
                 key = "sleep"
-            elif "exercise" in key:
-                key = "exercise"
-            elif key not in ("regular",):
+            else:
                 key = "regular"
             device_mode_minutes[key] += int(cnt) * 5
         # Per-subject summary — basal arr was already capped above; bolus
@@ -798,18 +787,13 @@ def fig_azt1d_events(az_stats, sim_stats, path):
     # (4) AZT1D device-mode time share
     ax = axes[1, 1]
     dm_pct = az_pool.get("device_mode_pct", {})
-    # Collapse anything that isn't sleep/exercise into "regular".
-    dm_norm = {"regular": 0.0, "sleep": 0.0, "exercise": 0.0}
+    # Collapse anything that isn't sleep into "regular".
+    dm_norm = {"regular": 0.0, "sleep": 0.0}
     for k, v in dm_pct.items():
-        if k == "sleep":
-            dm_norm["sleep"] += v
-        elif k == "exercise":
-            dm_norm["exercise"] += v
-        else:
-            dm_norm["regular"] += v
+        dm_norm["sleep" if k == "sleep" else "regular"] += v
     labels = list(dm_norm.keys())
     vals = list(dm_norm.values())
-    cs = ["#86C893", "#5B8DB8", "#E08550"]
+    cs = ["#86C893", "#5B8DB8"]
     x = np.arange(len(labels))
     bars = ax.bar(x, vals, color=cs, edgecolor="black", linewidth=0.5)
     for b, v in zip(bars, vals):
@@ -832,20 +816,15 @@ def fig_azt1d_events(az_stats, sim_stats, path):
 # ============================================================================
 # Unexplained-excursion analysis (§6.3)
 # ============================================================================
-# An excursion is a >= EXC_AMP mg/dL monotone swing (MAGE-style turning-point
-# detection on lightly smoothed CGM). It is "explained" if a logged meal
-# precedes a rise / a logged bolus or exercise precedes a fall; otherwise
-# "unexplained" — an unlogged event or a genuinely endogenous movement (dawn
-# phenomenon, post-hypo rebound, stress, illness, sensor artefact). The
-# simulator is held to the identical test, its meal / bolus / exercise events
-# taken as the rising edges of the corresponding factor channels.
+
+# A swing is explained by a logged meal before a rise or a logged bolus before a fall.
+
 EXC_AMP = 40.0          # mg/dL minimum excursion amplitude
 EXC_REVERSAL = 15.0     # mg/dL turning-point confirmation threshold
 EXC_CARB_MIN = 10.0     # g minimum logged carbs to count as a meal cause
 EXC_INS_MIN = 0.5       # U minimum logged bolus to count as an insulin cause
 EXC_RISE_PRE, EXC_RISE_POST = 60.0, 15.0   # min: meal window around a rise
 EXC_FALL_PRE, EXC_FALL_POST = 90.0, 15.0   # min: bolus window around a fall
-EXC_EX_PRE, EXC_EX_POST = 60.0, 15.0       # min: exercise window around a fall
 EXC_GREEN = "#1B5E20"
 EXC_CRIMSON = "#B0143C"
 EXC_GREY = "#8a8a8a"
@@ -914,21 +893,17 @@ def _exc_any_in(sorted_min, lo, hi):
         np.searchsorted(sorted_min, lo, "left")
 
 
-def _exc_attribute(onset_min, kind, meals, boluses, exers):
+def _exc_attribute(onset_min, kind, meals, boluses):
     if kind == "rise":
         return _exc_any_in(meals, onset_min - EXC_RISE_PRE,
                            onset_min + EXC_RISE_POST)
-    ok = _exc_any_in(boluses, onset_min - EXC_FALL_PRE,
-                     onset_min + EXC_FALL_POST)
-    if not ok and len(exers):
-        ok = _exc_any_in(exers, onset_min - EXC_EX_PRE,
-                         onset_min + EXC_EX_POST)
-    return ok
+    return _exc_any_in(boluses, onset_min - EXC_FALL_PRE,
+                       onset_min + EXC_FALL_POST)
 
 
 def load_ohio_events():
-    """{pid: (meals[(dt,carbs)], boluses[(dt,units)], exercise[dt])}."""
-    out = defaultdict(lambda: ([], [], []))
+    """{pid: (meals[(dt,carbs)], boluses[(dt,units)])}."""
+    out = defaultdict(lambda: ([], []))
     if not os.path.isdir(OHIO_DIR):
         return out
     for fn in os.listdir(OHIO_DIR):
@@ -939,8 +914,8 @@ def load_ohio_events():
             root = ET.parse(os.path.join(OHIO_DIR, fn)).getroot()
         except ET.ParseError:
             continue
-        m, b, e = out[pid]
-        for tag, lst in (("meal", m), ("bolus", b), ("exercise", e)):
+        m, b = out[pid]
+        for tag, lst in (("meal", m), ("bolus", b)):
             for node in root.iter(tag):
                 for ev in node.iter("event"):
                     ts = ev.get("ts") or ev.get("ts_begin")
@@ -954,18 +929,16 @@ def load_ohio_events():
                         c = float(ev.get("carbs") or 0)
                         if c >= EXC_CARB_MIN:
                             lst.append((dt, c))
-                    elif tag == "bolus":
+                    else:
                         d = float(ev.get("dose") or 0)
                         if d >= EXC_INS_MIN:
                             lst.append((dt, d))
-                    else:
-                        lst.append(dt)
-        out[pid] = (m, b, e)
+        out[pid] = (m, b)
     return out
 
 
 def azt1d_event_lists(df):
-    """(meals, boluses, exercise) lists from one AZT1D event DataFrame."""
+    """(meals, boluses) lists from one AZT1D event DataFrame."""
     meals, boluses = [], []
     t = df["EventDateTime"]
     carb = df.get("CarbSize")
@@ -985,7 +958,7 @@ def azt1d_event_lists(df):
             meals.append((ts, c))
         if bol is not None and not np.isnan(bol.iloc[i]) and bol.iloc[i] >= EXC_INS_MIN:
             boluses.append((ts, float(bol.iloc[i])))
-    return meals, boluses, []
+    return meals, boluses
 
 
 def _exc_onsets(channel, eps, refractory=4):
@@ -1009,20 +982,18 @@ def _exc_to_minutes(times):
     return np.array([(t - base).total_seconds() / 60.0 for t in times])
 
 
-def _exc_process_record(times, bg, meals, boluses, exers):
+def _exc_process_record(times, bg, meals, boluses):
     tmin = _exc_to_minutes(times)
     meal_min = np.array(sorted((m[0] - times[0]).total_seconds() / 60.0
                                for m in meals))
     bol_min = np.array(sorted((b[0] - times[0]).total_seconds() / 60.0
                               for b in boluses))
-    ex_min = np.array(sorted((e - times[0]).total_seconds() / 60.0
-                             for e in exers))
     recs = []
     for onset_i, peak_i, kind, amp in detect_excursions(bg):
         om = tmin[onset_i]
         recs.append({
             "onset_i": onset_i, "peak_i": peak_i, "kind": kind, "amp": amp,
-            "explained": _exc_attribute(om, kind, meal_min, bol_min, ex_min),
+            "explained": _exc_attribute(om, kind, meal_min, bol_min),
             "hour": times[onset_i].hour + times[onset_i].minute / 60.0,
         })
     return recs
@@ -1048,8 +1019,8 @@ def unexplained_cohort_real(name, cgm_items, events_fn, step_min=5):
         t, bg = regularize_bg(rows)
         if len(bg) < 200:
             continue
-        meals, boluses, exers = events_fn(rid)
-        excs = _exc_process_record(t, bg, meals, boluses, exers)
+        meals, boluses = events_fn(rid)
+        excs = _exc_process_record(t, bg, meals, boluses)
         for e in excs:
             e["rid"] = str(rid)
         excs_all.extend(excs)
@@ -1060,7 +1031,7 @@ def unexplained_cohort_real(name, cgm_items, events_fn, step_min=5):
 
 
 def unexplained_cohort_sim(raw_runs):
-    """Reuse assemble_sim's raw runs — the simulator is not re-exercised."""
+    """Reuse assemble_sim's raw runs — the simulator is not run again."""
     excs_all = []
     records = []
     base = datetime(2024, 1, 1)
@@ -1068,13 +1039,11 @@ def unexplained_cohort_sim(raw_runs):
         bg = np.asarray(d["bg_observed"], dtype=float)
         carb = np.asarray(d["total_carb_true"], dtype=float)
         bol = np.asarray(d["bolus_insulin"], dtype=float)
-        exe = np.asarray(d.get("total_exercise", []), dtype=float)
         n = len(bg)
         times = [base + timedelta(minutes=5 * i) for i in range(n)]
         meals = [(times[k], 0.0) for k in _exc_onsets(carb, 0.05)]
         boluses = [(times[k], 0.0) for k in _exc_onsets(bol, 0.005)]
-        exers = [times[k] for k in _exc_onsets(exe, 0.05)] if len(exe) else []
-        excs = _exc_process_record(times, bg, meals, boluses, exers)
+        excs = _exc_process_record(times, bg, meals, boluses)
         for e in excs:
             e["rid"] = f"seed{seed}"
         excs_all.extend(excs)
@@ -1134,7 +1103,7 @@ def fig_unexplained_summary(summ, real_pool, path):
     ax[0].bar(x - w / 2, [s["rise_unexpl_pct"] for s in summ], w,
               label="rises (no logged meal)", color="#c44e52")
     ax[0].bar(x + w / 2, [s["fall_unexpl_pct"] for s in summ], w,
-              label="falls (no logged insulin/exercise)", color="#4c72b0")
+              label="falls (no logged insulin)", color="#4c72b0")
     ax[0].set_xticks(x)
     ax[0].set_xticklabels(names)
     ax[0].set_ylabel("% of excursions unexplained")
@@ -2637,17 +2606,16 @@ def main():
     az_event_stats = azt1d_event_summary(az_events)
     sim_event_stats = sim_event_summary(sim_raw)
 
-    # Unexplained-excursion analysis (§6.3) — reuse the already-loaded CGM and
-    # event logs plus the sim raw runs (the simulator is not exercised again).
+    # Reuses the loaded CGM, the event logs and the sim raw runs (§6.3).
     print("Unexplained-excursion analysis…")
     ohio_ev = load_ohio_events()
     az_lists = {k: azt1d_event_lists(v) for k, v in az_events.items()}
     u_ohio = unexplained_cohort_real(
         "OhioT1DM", sorted(ohio_p.items()),
-        lambda pid: ohio_ev.get(pid, ([], [], [])))
+        lambda pid: ohio_ev.get(pid, ([], [])))
     u_az = unexplained_cohort_real(
         "AZT1D", sorted(az_p.items()),
-        lambda sid: az_lists.get(sid, ([], [], [])))
+        lambda sid: az_lists.get(sid, ([], [])))
     u_sim = unexplained_cohort_sim(sim_raw)
     unexpl_stats = {
         "Ohio": unexplained_summarize(u_ohio),
