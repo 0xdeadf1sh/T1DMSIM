@@ -517,8 +517,7 @@ def simulate_row(seed: int,
                  cfg: RowConfig) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     """Build one cached row: context channels, ``tail_`` arms, boundary doses, stats.
 
-    The single row builder; T1DMAI's on-the-fly path calls it rather than
-    reimplementing the geometry. Keys match the staged names of ``array_specs``."""
+    The single row builder SPEC/cache.md names; keys match ``array_specs``."""
     sim, channels, stats, draws = simulate_to_boundary(seed, cfg)
     dose = boundary_dose(sim, draws)
     tails = run_tails(sim, dose, cfg)

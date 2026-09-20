@@ -215,23 +215,20 @@ python cache_simulator.py --pool-size 50000 --hypo-oversample 0.25   # weight to
 python cache_simulator.py --pool-size 50000 --events                 # curves plus point events
 ```
 
-A row is a warm-up, a 2016-step context with patient behaviour on, and four
-24-step counterfactual continuations from the same boundary with behaviour off:
-nothing, a bolus, carbohydrate, both. `../T1DMCOMMON/SPEC/cache.md` is the
-contract — geometry, arm order, dose distributions, array names, `meta.json`
-keys — and `--context-steps` / `--tail-steps` exist to build smaller test pools,
-not to build a pool a model can train on.
+A row is a warm-up, a context with patient behaviour on, and four counterfactual
+continuations from the same boundary with behaviour off. `../T1DMCOMMON/SPEC/cache.md`
+is the contract — geometry, arm order, dose distributions, array names and shapes,
+what rejection reads, `meta.json` keys — and `--context-steps` / `--tail-steps`
+exist to build smaller test pools, not a pool a model can train on.
 
-On disk: one blosc2 array per context channel, a `tail_<channel>` array of shape
-`(pool_size, 4, 24)` per tail channel, `icr.npy`, `skills.npy`, a `meta.json`, a
+Beside the arrays that contract names, a build writes `icr.npy`, a `meta.json`, a
 `DATASET.md` and the `normalization_stats.json` T1DMAI trains under, fitted over
 the context and all four tails. `--events` appends the point-event channels, their
-`tail_dose_<channel>` boundary doses, and `normalization_stats_events.json`.
+boundary doses, and `normalization_stats_events.json`.
 
-Rail rejection and hypo oversampling read the context alone, so no tail is ever
-discarded for where it went. The cached `total_carb`, `carb_g` and `carb_gi` are
-the patient's log and `total_insulin` is the dose they meant to inject; the truth
-is not stored, so the fitted normalization statistics are the log's.
+The cached `total_carb`, `carb_g` and `carb_gi` are the patient's log and
+`total_insulin` is the dose they meant to inject; the truth is not stored, so the
+fitted normalization statistics are the log's.
 
 
 ## Visualizer Controls

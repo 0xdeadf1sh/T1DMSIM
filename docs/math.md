@@ -376,7 +376,7 @@ With per-day probability `RARE_EVENT_PROBABILITY`, three of the four skills — 
 
 ## Counterfactual tails
 
-`cache_simulator.py` cuts every cached row at a boundary and continues it four ways: no dose, a bolus, carbohydrate, both. The contract — geometry, arm order, dose distributions, array names — is `../T1DMCOMMON/SPEC/cache.md`. What follows is the mechanism inside the simulator.
+`cache_simulator.py` cuts every cached row at a boundary and continues it once per arm. The contract — geometry, arm order, dose distributions, array names — is `../T1DMCOMMON/SPEC/cache.md`. What follows is the mechanism inside the simulator.
 
 Setting `T1DMSimulator.behaviour_enabled = False` suppresses exactly three things in `generate()`: planning the day's events, activating pending ones, and `_check_and_correct`. Everything else runs unchanged — `_plan_day`, every curve already injected, HGO, the Sg pull toward `E(t)`, the guardrails, the CGM lag and its noise. The day still rolls over, so `_today_wake_idx` and `_today_sleep_idx` shift by `STEPS_PER_DAY` instead of being re-drawn.
 
