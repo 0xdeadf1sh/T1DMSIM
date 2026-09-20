@@ -1228,6 +1228,8 @@ class T1DMSimulator:
         self._exercise_totals: np.ndarray = np.zeros(_init_len)
         self._rescue_totals: np.ndarray = np.zeros(_init_len)  # correction_carb only, for the rule-of-15 recheck
         self._logged_carb_totals: np.ndarray = np.zeros(_init_len)  # what the patient wrote down
+        self._logged_basal_totals: np.ndarray = np.zeros(_init_len)  # intended, before site quality
+        self._logged_bolus_totals: np.ndarray = np.zeros(_init_len)
         self._events = EventLog()
         self._log_rng = np.random.default_rng([CARB_LOG_SEED_STREAM, seed])
 
@@ -1287,6 +1289,8 @@ class T1DMSimulator:
         self._exercise_totals = np.zeros(_init_len)
         self._rescue_totals = np.zeros(_init_len)  # correction_carb only, for the rule-of-15 recheck
         self._logged_carb_totals = np.zeros(_init_len)  # what the patient wrote down
+        self._logged_basal_totals = np.zeros(_init_len)  # intended, before site quality
+        self._logged_bolus_totals = np.zeros(_init_len)
         self._events = EventLog()
         self._log_rng = np.random.default_rng([CARB_LOG_SEED_STREAM, seed])
         self._smoothed_insulin_for_hgo = 0.0
@@ -1329,6 +1333,10 @@ class T1DMSimulator:
             self._rescue_totals = np.concatenate([self._rescue_totals, np.zeros(extra)])
             self._logged_carb_totals = np.concatenate(
                 [self._logged_carb_totals, np.zeros(extra)])
+            self._logged_basal_totals = np.concatenate(
+                [self._logged_basal_totals, np.zeros(extra)])
+            self._logged_bolus_totals = np.concatenate(
+                [self._logged_bolus_totals, np.zeros(extra)])
 
     def _add_to_totals(self, curve: np.ndarray, start_idx: int, curve_type: str) -> None:
         """Scatter-add a curve into the appropriate accumulation array.
@@ -1358,9 +1366,8 @@ class T1DMSimulator:
                      event: dict | None = None,
                      logged: np.ndarray | None = None) -> None:
         """Inject a curve: updates active_curves and the accumulation arrays.
-        External callers use this rather than appending to state.active_curves.
-        ``event`` is the dose row for EventLog; ``logged`` the logged carb curve,
-        accumulated apart from ``values``, which alone drives BG.
+        ``event`` is the dose row for EventLog; ``logged`` the curve the patient logged
+        (guessed carbs, intended insulin), kept apart from ``values``, which alone drives BG.
         """
         if event is not None:
             self._events.add(start_idx, curve_type, **event)
@@ -1374,7 +1381,12 @@ class T1DMSimulator:
         if logged is not None:
             end = start_idx + len(logged)
             self._ensure_totals_length(end)
-            self._logged_carb_totals[start_idx:end] += logged
+            if curve_type == 'basal':
+                self._logged_basal_totals[start_idx:end] += logged
+            elif curve_type in ('bolus', 'insulin'):
+                self._logged_bolus_totals[start_idx:end] += logged
+            else:
+                self._logged_carb_totals[start_idx:end] += logged
 
     def _logged_carb(self, grams: float, gi: float,
                      logged_grams: float | None = None) -> tuple:
@@ -1621,9 +1633,10 @@ class T1DMSimulator:
                                     ka_per_hour=p.basal_ka, ke_per_hour=p.basal_ke)
                 self._pending_events.append((dose_idx, 'basal', {
                     'curve': curve,
+                    'logged': curve / site_q,
                     'label': (f'Basal {actual_dose:.1f}U '
                               f'{p.basal_type} ({p.basal_duration_hours:.0f}h)'),
-                    'event': {'dose': float(actual_dose),
+                    'event': {'dose': float(actual_dose / site_q),
                               'peak_min': bateman_peak_min(p.basal_ka, p.basal_ke),
                               'dur_h': p.basal_duration_hours},
                 }))
@@ -1736,7 +1749,8 @@ class T1DMSimulator:
                 bolus_curve = gamma_curve(delivered_dose, bolus_k, bolus_theta, bolus_duration)
                 self._pending_events.append((bolus_idx, 'bolus', {
                     'curve': bolus_curve, 'label': f'Bolus {delivered_dose:.1f}U',
-                    'event': {'dose': float(delivered_dose),
+                    'logged': bolus_curve * (intended_dose / delivered_dose),
+                    'event': {'dose': float(intended_dose),
                               'peak_min': gamma_peak_min(bolus_k, bolus_theta),
                               'dur_h': bolus_duration / 60.0},
                 }))
@@ -2122,9 +2136,10 @@ class T1DMSimulator:
                     bolus_curve = gamma_curve(delivered_dose, base_k, base_theta, corr_duration)
                     self.inject_curve(bolus_curve, time_idx, 'bolus',
                                       f'Correction {delivered_dose:.1f}U',
-                                      event={'dose': float(delivered_dose),
+                                      event={'dose': float(correction_dose),
                                              'peak_min': gamma_peak_min(base_k, base_theta),
-                                             'dur_h': corr_duration / 60.0})
+                                             'dur_h': corr_duration / 60.0},
+                                      logged=bolus_curve * (correction_dose / delivered_dose))
                     s.last_correction_idx = time_idx
 
         # --- Trend-based anticipatory corrections ---
@@ -2150,9 +2165,10 @@ class T1DMSimulator:
                         bolus_curve = gamma_curve(delivered_dose, base_k, base_theta, corr_duration)
                         self.inject_curve(bolus_curve, time_idx, 'bolus',
                                           f'Trend corr {delivered_dose:.1f}U',
-                                          event={'dose': float(delivered_dose),
+                                          event={'dose': float(correction_dose),
                                                  'peak_min': gamma_peak_min(base_k, base_theta),
-                                                 'dur_h': corr_duration / 60.0})
+                                                 'dur_h': corr_duration / 60.0},
+                                          logged=bolus_curve * (correction_dose / delivered_dose))
                         s.last_correction_idx = time_idx
 
                 elif (trend < TREND_LOW_RATE_THRESHOLD and
@@ -2199,6 +2215,7 @@ class T1DMSimulator:
             curve = event_data['curve']
             label = event_data.get('label', '')
             event = event_data.get('event')
+            logged = event_data.get('logged')
 
             # BG-aware meal-bolus gating. A scheduled pre-bolus is the dominant
             # sawtooth driver: patient corrects a hypo, climbs briefly above 70,
@@ -2213,6 +2230,8 @@ class T1DMSimulator:
                     elif bg < p.hypo_threshold + BOLUS_REDUCE_MARGIN:
                         scale = BOLUS_REDUCE_FACTOR_BASE + 0.3 * p.dosing_competence
                         curve = curve * scale
+                        if logged is not None:
+                            logged = logged * scale
                         label = f"{label} (low-BG reduced ×{scale:.2f})"
                         if event is not None:
                             event = event | {'dose': event['dose'] * scale}
@@ -2228,7 +2247,7 @@ class T1DMSimulator:
                     continue
 
             self.inject_curve(curve, event_time, event_type, label=label, event=event,
-                              logged=event_data.get('logged'))
+                              logged=logged)
             # Schedule post-exercise IS sensitivity boost
             if event_type == 'exercise':
                 ex_dur = event_data.get('duration_min', EXERCISE_DURATION_MEAN_MIN)
@@ -2263,6 +2282,10 @@ class T1DMSimulator:
             s.post_hypo_basal_suspend_windows = still_active
             basal_step *= 1.0 - (1.0 - not_suspended) * (1.0 - POST_HYPO_BASAL_SUSPEND_FACTOR)
         total_insulin = basal_step + bolus_step
+        logged_basal = (float(self._logged_basal_totals[idx])
+                        if idx < len(self._logged_basal_totals) else 0.0)
+        logged_bolus = (float(self._logged_bolus_totals[idx])
+                        if idx < len(self._logged_bolus_totals) else 0.0)
         total_exercise = float(self._exercise_totals[idx]) if idx < len(self._exercise_totals) else 0.0
 
         # Per-step absorption noise via AR(1) (smooth, correlated — gut motility
@@ -2467,9 +2490,12 @@ class T1DMSimulator:
             'bg_delta': bg_delta,
             'total_carb': logged_carb,
             'total_carb_true': total_carb,
-            'total_insulin': total_insulin,
-            'basal_insulin': basal_step,
-            'bolus_insulin': bolus_step,
+            'total_insulin': logged_basal + logged_bolus,
+            'basal_insulin': logged_basal,
+            'bolus_insulin': logged_bolus,
+            'total_insulin_true': total_insulin,
+            'basal_insulin_true': basal_step,
+            'bolus_insulin_true': bolus_step,
             'total_exercise': total_exercise,
             'insulin_resistance': insulin_resistance_factor,
             'hgo': hgo_value,
@@ -2491,7 +2517,8 @@ class T1DMSimulator:
             'index': [], 'time_hours': [], 'day': [], 'hour_of_day': [],
             'bg': [], 'bg_observed': [], 'bg_delta': [],
             'total_carb': [], 'total_carb_true': [], 'total_insulin': [], 'basal_insulin': [],
-            'bolus_insulin': [], 'total_exercise': [],
+            'bolus_insulin': [], 'total_insulin_true': [], 'basal_insulin_true': [],
+            'bolus_insulin_true': [], 'total_exercise': [],
             'insulin_resistance': [], 'hgo': [], 'glucose_in': [], 'glucose_out': [],
             'is_sick': [], 'is_rare_day': [], 'is_weekend': [], 'is_holiday': [],
             'alcohol_hgo_factor': [],

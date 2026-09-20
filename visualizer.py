@@ -127,9 +127,9 @@ STEPS_PER_DAY = 24 * 60 // DT_MINUTES  # 288
 CURVES = [
     {'key': 'bg_observed', 'name': 'Blood Glucose',     'color': COLOR_BG_OBS,  'unit': 'mg/dL', 'y_min': BG_CLAMP_MIN, 'y_max': BG_CLAMP_MAX, 'toggle_key': pygame.K_1},
     {'key': 'total_carb',  'name': 'Carbs (logged)',    'color': COLOR_CARB,    'unit': 'g/step','y_min': 0,   'y_max': 20,   'toggle_key': pygame.K_2, 'shadow': 'total_carb_true'},
-    {'key': 'total_insulin','name': 'Insulin (total)',  'color': COLOR_INSULIN, 'unit': 'U/step','y_min': 0,   'y_max': 2,   'toggle_key': pygame.K_3},
-    {'key': 'basal_insulin','name': 'Basal',             'color': (120, 235, 255), 'unit': 'U/step','y_min': 0, 'y_max': 0.5, 'toggle_key': pygame.K_4},
-    {'key': 'bolus_insulin','name': 'Bolus',             'color': (60, 180, 255),  'unit': 'U/step','y_min': 0, 'y_max': 2,   'toggle_key': pygame.K_5},
+    {'key': 'total_insulin','name': 'Insulin (logged)', 'color': COLOR_INSULIN, 'unit': 'U/step','y_min': 0,   'y_max': 2,   'toggle_key': pygame.K_3, 'shadow': 'total_insulin_true'},
+    {'key': 'basal_insulin','name': 'Basal (logged)',    'color': (120, 235, 255), 'unit': 'U/step','y_min': 0, 'y_max': 0.5, 'toggle_key': pygame.K_4, 'shadow': 'basal_insulin_true'},
+    {'key': 'bolus_insulin','name': 'Bolus (logged)',    'color': (60, 180, 255),  'unit': 'U/step','y_min': 0, 'y_max': 2,   'toggle_key': pygame.K_5, 'shadow': 'bolus_insulin_true'},
     {'key': 'insulin_resistance','name': 'Insulin Resistance','color': COLOR_IS,'unit': '×',  'y_min': 0,   'y_max': 3,   'toggle_key': pygame.K_6},
     {'key': 'total_exercise','name': 'Exercise',        'color': COLOR_EXERCISE,'unit': 'g/step','y_min': 0,   'y_max': 10,   'toggle_key': pygame.K_7},
     {'key': 'bg_delta',    'name': 'BG Delta',          'color': COLOR_DELTA,   'unit': 'mg/dL', 'y_min': -30, 'y_max': 45,  'toggle_key': pygame.K_8},
