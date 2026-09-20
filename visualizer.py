@@ -216,11 +216,8 @@ class Visualizer:
         # Initial zoom: fit DEFAULT_ZOOM_HOURS into the available chart width
         steps_per_hour = 60 // DT_MINUTES
         self.pixels_per_step = self._chart_rect().width / (DEFAULT_ZOOM_HOURS * steps_per_hour)
-        # One visibility flag per entry in CURVES, in the same order. Defaults to
-        # the three channels the model actually consumes — BG (1), carbs (2),
-        # total insulin (3). The rest are hidden but toggleable via the digit keys
-        # bound in each CURVES entry's `toggle_key` field.
-        self.curve_visible = [True, True, True, False, False, False, False, False, False, False]
+        # One flag per CURVES entry, in order; the three the model consumes start visible.
+        self.curve_visible = [i < 3 for i in range(len(CURVES))]
         self.hovered_step = None     # Step under mouse cursor
 
         # Transient "screenshot saved" modal: path string + epoch deadline.
@@ -415,7 +412,7 @@ class Visualizer:
         # handler does (otherwise inserting a curve in the middle of CURVES
         # would silently drift labels off of the bindings).
         y += self._s(15)
-        draw_text(self.buffer, self.font_md, "— Curves (0-9) —", x, y, TEXT_DIM)
+        draw_text(self.buffer, self.font_md, "— Curves (1-9) —", x, y, TEXT_DIM)
         y += line_md + self._s(4)
 
         for i, curve in enumerate(CURVES):
@@ -434,7 +431,7 @@ class Visualizer:
         controls = [
             "SPACE  Generate +24h",
             "R      Random reseed",
-            "0-9    Toggle curves",
+            "1-9    Toggle curves",
             "←→     Scroll time",
             "+−     Zoom",
             "HOME   Jump to start",
@@ -863,9 +860,8 @@ class Visualizer:
                     elif event.key == pygame.K_r:
                         self._reseed(np.random.randint(0, 100000))
 
-                    elif event.key in range(pygame.K_0, pygame.K_9 + 1):
-                        # Toggle the CURVES entry whose toggle_key matches.
-                        # Keys not bound to any curve fall through (no-op).
+                    elif event.key in range(pygame.K_1, pygame.K_9 + 1):
+                        # Toggle the CURVES entry whose toggle_key matches; unbound digits no-op.
                         for i, c in enumerate(CURVES):
                             if c.get('toggle_key') == event.key:
                                 self.curve_visible[i] = not self.curve_visible[i]
