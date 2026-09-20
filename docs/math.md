@@ -374,6 +374,22 @@ With per-day probability `RARE_EVENT_PROBABILITY`, three of the four skills — 
     s_i(today)    = max(s_i - skill_penalty, 0.05)   for i in {1, 3, 4}
 
 
+## Counterfactual tails
+
+`cache_simulator.py` cuts every cached row at a boundary and continues it four ways: no dose, a bolus, carbohydrate, both. The contract — geometry, arm order, dose distributions, array names — is `../T1DMCOMMON/SPEC/cache.md`. What follows is the mechanism inside the simulator.
+
+Setting `T1DMSimulator.behaviour_enabled = False` suppresses exactly three things in `generate()`: planning the day's events, activating pending ones, and `_check_and_correct`. Everything else runs unchanged — `_plan_day`, every curve already injected, HGO, the Sg pull toward `E(t)`, the guardrails, the CGM lag and its noise. The day still rolls over, so `_today_wake_idx` and `_today_sleep_idx` shift by `STEPS_PER_DAY` instead of being re-drawn.
+
+Each arm is a `copy.deepcopy` of the simulator taken at the boundary, so all four start from one RNG state. No physiologic draw is conditioned on blood glucose, so the arms stay in lockstep and differ only by the curve injected at tail step 0:
+
+    delivered_bolus = gamma_curve(intended_units * site_factor, bolus_pk_for_dose(intended_units))
+    logged_bolus    = delivered_bolus / site_factor
+    true_carb       = gamma_curve(grams, gi_gamma_params(GI))
+    logged_carb     = gamma_curve(guessed_grams, gi_gamma_params(guessed_GI))
+
+`inject_bolus` and `inject_carbs` consume no randomness. The site factor comes from `_site_quality` and the carb guess from `_logged_carb`, both taken once on the parent before the copies, so the two bolus arms share one factor and the two carbohydrate arms share one guess.
+
+
 ## Unit Conventions
 
 All curve values are in "amount per step" units:
