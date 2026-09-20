@@ -592,16 +592,12 @@ def azt1d_event_summary(events_by_subject):
         n_correction_events += int(is_corr_only.sum())
         carbs = ubdf.loc[is_meal, "CarbSize"].dropna().to_numpy()
         all_carbs.extend(carbs.tolist())
-        # Device mode minutes, 5 per row; typos and numeric placeholders fold into regular.
-        dm = df["DeviceMode"].fillna("regular").astype(str).str.strip().str.lower()
-        dm = dm.replace({"": "regular", "nan": "regular", "0": "regular",
+        # Device mode minutes, 5 per row; sleep is its own bucket, every other mode is "other".
+        dm = df["DeviceMode"].fillna("other").astype(str).str.strip().str.lower()
+        dm = dm.replace({"": "other", "nan": "other", "0": "other",
                          "sleepsleep": "sleep"})
         for mode, cnt in dm.value_counts().items():
-            key = str(mode)
-            if "sleep" in key:
-                key = "sleep"
-            else:
-                key = "regular"
+            key = "sleep" if "sleep" in str(mode) else "other"
             device_mode_minutes[key] += int(cnt) * 5
         # Per-subject summary — basal arr was already capped above; bolus
         # counts here are the *user-initiated* subset (AID auto-boluses
@@ -787,10 +783,9 @@ def fig_azt1d_events(az_stats, sim_stats, path):
     # (4) AZT1D device-mode time share
     ax = axes[1, 1]
     dm_pct = az_pool.get("device_mode_pct", {})
-    # Collapse anything that isn't sleep into "regular".
-    dm_norm = {"regular": 0.0, "sleep": 0.0}
+    dm_norm = {"other": 0.0, "sleep": 0.0}
     for k, v in dm_pct.items():
-        dm_norm["sleep" if k == "sleep" else "regular"] += v
+        dm_norm["sleep" if k == "sleep" else "other"] += v
     labels = list(dm_norm.keys())
     vals = list(dm_norm.values())
     cs = ["#86C893", "#5B8DB8"]
@@ -2161,6 +2156,8 @@ def write_report_md(cohorts, distances, pooled_moments, pooled_percentiles,
 {rec_table}
 
 ### 6.3 Unexplained excursions
+
+A rise counts as explained when a logged meal precedes it, a fall when a logged insulin dose does.
 
 {unexpl_section}
 
