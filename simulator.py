@@ -290,9 +290,7 @@ HYPO_PANIC_FACTOR_BASE = 1.0  # How much extra is eaten, scaled by 1/s3
 HYPO_DETECTION_AWAKE_MINUTES = 5.0  # Detection delay awake
 HYPO_DETECTION_ASLEEP_LAMBDA = 30.0  # Exponential mean for detection delay asleep (severe hypo bypasses this)
 
-# Hepatic glucose output (insulin-suppressed via Hill function)
-# At zero insulin, HGO runs near UNSUPPRESSED; as plasma insulin rises it saturates toward the
-# SUPPRESSED floor. Liver output sets the basal share of daily insulin: ~47% at these values.
+# HGO is Hill-suppressed by insulin and sets the basal share of daily insulin, ~51% at these values.
 HGO_BASE_GRAMS_PER_HOUR = 4.95  # balanced reference rate for basal sizing (ideal_basal = HGO_BASE * 24 * weight/75 * is / ICR)
 HGO_UNSUPPRESSED_GRAMS_PER_HOUR = 10.8  # Rate with no insulin (DKA-like)
 HGO_SUPPRESSED_FLOOR_GRAMS_PER_HOUR = 3.6  # Maximum suppression
@@ -529,13 +527,8 @@ RARE_EVENT_SKILL_REDUCTION = 0.3  # Even skilled people have bad days sometimes
 # as the patient eats to recover. Real patients respond by reducing or
 # suspending basal coverage — for pump users a temp basal / pump suspend,
 # for MDI users skipping the next basal injection — not by stacking carbs.
-HYPO_CORRECTION_REFRACTORY_MIN = 22.0# Min minutes between hypo corrections (moderate hypo 55-70).
-SEVERE_HYPO_REFRACTORY_MIN = 15.0      # Shorter refractory for severe hypo (<55). Rule-of-15 spirit:
-                                       # symptomatic patient still rage-eats, but waits ~10 min between
-                                       # doses so the first rescue's carbs can act. Without this gap,
-                                       # the CGM-check bypass let the patient eat every 5 min, stacking
-                                       # 3-5 rage doses (60+ g) and producing visible sawtooth as BG
-                                       # bounced between severe hypo and post-overcorrection peaks.
+HYPO_CORRECTION_REFRACTORY_MIN = 22.0  # min between hypo corrections above SEVERE_HYPO_THRESHOLD
+SEVERE_HYPO_REFRACTORY_MIN = 15.0      # min between rescues below SEVERE_HYPO_THRESHOLD (25 mg/dL)
 POST_HYPO_BASAL_SUSPEND_DURATION_HOURS = 6.0  # Scale-down window after any hypo correction. The sin² envelope below has max slope π/window, so a 6h window with depth 0.35 caps the worst single-envelope 10-min change at ~3%, and even at multi-envelope crossover points the per-10-min change stays under ~6%. Widened from the legacy 2h trapezoidal window after the user observed ~56% 10-min drops in total_insulin.
 POST_HYPO_BASAL_SUSPEND_FACTOR = 0.65          # Basal contribution multiplier at the peak of the suspend window. Shallower than the legacy 0.35 — the integrated suspend stays close to the original (0.35 × 0.5 × 360 ≈ 63 unit-minutes vs legacy ~65) but spread over a wider window so per-step changes are gentle.
 POST_HYPO_BASAL_SUSPEND_RAMP_MIN = 20.0        # Legacy constant from the previous smootherstep-plus-plateau implementation. The active envelope is now a single sin² profile over the full duration window (no separate ramp/plateau), so this constant is unused — kept only for backward compatibility with anything that imports it.
@@ -1897,25 +1890,13 @@ class T1DMSimulator:
         # before acting. Mild offsets — large offsets caused skilled patients to
         # over-correct frequently and rebound into hypo.
         skill_avg = (p.attentiveness + p.dosing_competence) / 2.0
-        # Effective thresholds. The low-side skill multiplier (18) is chosen
-        # so attentive patients catch BG drops *before* crossing 70 rather
-        # than reactively after. For skill_avg=0.7 the trigger lands at 73 —
-        # still below the TIR midpoint, but enough to
-        # cover the ~1-step lag between detection and rescue carb.
+        # The low side is the per-patient hypo_threshold; skill only pulls the high side in.
         eff_low_thresh = p.hypo_threshold
         eff_high_thresh = BG_HIGH_THRESHOLD - 25.0 * skill_avg
 
         # --- Handle hypoglycemia ---
         if s.bg_observed < eff_low_thresh:
-            # Refractory: in moderate hypo (55-70) a second correction within
-            # 20 min just stacks carbs on top of carbs that haven't acted yet.
-            # Severe hypo (<55) uses a SHORTER refractory (10 min) rather than
-            # bypassing entirely — symptomatic patients still rage-eat multiple
-            # times if BG stays low, but rule-of-15 says wait between doses so
-            # the first rescue's carbs can start acting. Without the gap the
-            # CGM-check bypass let the patient stack 3-5 rage doses in 10-15 min,
-            # then overshoot to 140-180 (visible sawtooth). A full bypass also
-            # broke TBR2 when stacked carbs produced post-correction crashes.
+            # Rule-of-15: a rescue inside the refractory would stack carbs on carbs not yet acting.
             refractory_min = SEVERE_HYPO_REFRACTORY_MIN if severe_hypo else HYPO_CORRECTION_REFRACTORY_MIN
             refractory_steps = int(refractory_min / DT_MINUTES)
             if time_idx - s.last_hypo_correction_idx < refractory_steps:
@@ -1995,10 +1976,7 @@ class T1DMSimulator:
         # --- Handle hyperglycemia ---
         elif s.bg_observed > eff_high_thresh:
             steps_since_correction = time_idx - s.last_correction_idx
-            # Urgency now ramps from BG_HIGH_THRESHOLD (180) up. At 180 → 1.0
-            # (full patience), at 230 → 2.0 (half), at 280 → 3.0 (third). Without
-            # this, sustained 200-250 BG sat for the full 2h patience window and
-            # produced the heavy >250 tail (TAR2 15% vs Ohio 9%).
+            # Urgency divides patience: 1.0 at BG_HIGH_THRESHOLD (200), 2.0 at 250, 3.0 at 300.
             urgency = min(3.0, 1.0 + max(0.0, (s.bg_observed - BG_HIGH_THRESHOLD) / 50.0))
             patience_steps = int(p.patience_time_min / (DT_MINUTES * urgency))
 
