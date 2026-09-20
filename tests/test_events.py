@@ -51,8 +51,11 @@ def test_event_totals_track_the_curve_totals():
     carb_ev, carb_cv = data['carb_g'][:cut].sum(), data['total_carb'][:cut].sum()
     assert carb_ev > 0 and carb_cv == pytest.approx(carb_ev, rel=0.1)
     assert data['bolus_u'].sum() > 0 and data['basal_u'].sum() > 0
-    for dose, descriptors in (('carb_g', ('carb_gi',)),
-                              ('bolus_u', ('bolus_peak_min', 'bolus_dur_h')),
+    for dose, descriptors in (('bolus_u', ('bolus_peak_min', 'bolus_dur_h')),
                               ('basal_u', ('basal_peak_min', 'basal_dur_h'))):
         for d in descriptors:
             assert np.array_equal(data[d] > 0, data[dose] > 0)
+    # A guessed GI clips at 0, so carb_gi is positive on all but a few carb steps.
+    carb, gi = data['carb_g'] > 0, data['carb_gi'] > 0
+    assert not (gi & ~carb).any()
+    assert gi.sum() > 0.95 * carb.sum()
