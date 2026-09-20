@@ -1,14 +1,8 @@
-"""
-Compatibility test for the flat top-level meta.json keys the T1DMAI loader
-requires.
+"""Compatibility test for the flat top-level meta.json keys the T1DMAI loader reads.
 
-T1DMAI's T1DMDataset._load_cache (data.py) reads a set of FLAT top-level keys
-off meta.json and validates each. cache_simulator.py stores the same values
-nested under report['params'] for DATASET.md, but _finalize_report also mirrors
-them flat at the root so the ML-side loader can consume this cache unchanged.
-This test builds a tiny cache and asserts the on-disk meta.json carries those
-flat keys with the exact values the loader checks for.
-"""
+T1DMAI's T1DMDataset._load_cache validates a set of FLAT top-level keys, which
+_finalize_report mirrors out of report['params']. The geometry keys are what a
+consumer gates on in place of a simulated-hours scalar."""
 
 import json
 import os
@@ -27,7 +21,7 @@ def test_meta_carries_flat_compat_keys(tmp_path):
     cs.build_cache(
         out_dir=out_dir,
         pool_size=6,
-        sim_hours=55.5,
+        context_steps=666,
         warmup_hours=48.0,
         n_jobs=1,
         dataset_md='',
@@ -41,6 +35,7 @@ def test_meta_carries_flat_compat_keys(tmp_path):
     required = (
         'pool_size', 'n_timesteps', 'sim_hours', 'simulator_warmup_hours',
         'patient_uniform_sample_prob', 'dt_minutes', 'channels', 'cache_format',
+        'context_steps', 'tail_steps', 'tail_arms', 'tail_channels',
     )
     for key in required:
         assert key in meta, f"meta.json missing flat key {key!r}"
@@ -52,4 +47,20 @@ def test_meta_carries_flat_compat_keys(tmp_path):
     assert meta['patient_uniform_sample_prob'] == 0.0
     assert meta['dt_minutes'] == 5
     assert tuple(meta['channels']) == cs.CHANNEL_NAMES
-    assert meta['cache_format'] == 'blosc2-ndarray-v2'
+    assert meta['cache_format'] == 'blosc2-ndarray-v3'
+
+    # The context alone is n_timesteps; the tails are their own arrays.
+    assert meta['context_steps'] == 666
+    assert meta['tail_steps'] == cs.DEFAULT_TAIL_STEPS
+    assert tuple(meta['tail_arms']) == cs.TAIL_ARMS
+    assert tuple(meta['tail_channels']) == cs.TAIL_CHANNEL_NAMES
+
+
+def test_contract_geometry_is_the_default():
+    # SPEC/cache.md fixes both; a cache built to other arithmetic cannot train.
+    assert cs.DEFAULT_CONTEXT_STEPS == cs.MAX_CONTEXT_PATCHES * cs.PATCH_SIZE == 2016
+    assert cs.DEFAULT_TAIL_STEPS == cs.PREDICTION_PATCHES * cs.PATCH_SIZE == 24
+    assert cs.DEFAULT_WARMUP_OFFSET_STEPS == 288
+    assert cs.TAIL_ARMS == ('none', 'bolus', 'carbs', 'bolus_carbs')
+    assert cs.SKILL_NAMES == ('dietary_discipline', 'attentiveness',
+                              'dosing_competence', 'lifestyle_consistency')

@@ -162,10 +162,11 @@ def test_cache_channel_carries_the_logged_carbs():
     pytest.importorskip('blosc2')
     import cache_simulator as cs
     cfg = cs.RowConfig(
-        warmup_steps=0, keep_steps=3 * STEPS_PER_DAY, max_attempts=1,
+        warmup_steps=0, context_steps=3 * STEPS_PER_DAY, max_attempts=1,
         rail_high=1e9, rail_low=-1e9, hypo_prob=0.0, hypo_min_frac=0.0,
-        hypo_threshold=70.0, seed_salt=0, event_refractory_steps=6, events=True)
-    channels, _ = cs._simulate_patient(7, cfg)
+        hypo_threshold=70.0, seed_salt=0, event_refractory_steps=6, events=True,
+        warmup_offset_steps=1)  # pin the offset to 0 so the plain run below lines up
+    channels, _ = cs.simulate_row(7, cfg)
     d = _run(7, steps=3 * STEPS_PER_DAY)
     assert np.array_equal(channels['total_carb'], d['total_carb'].astype(np.float32))
     assert np.array_equal(channels['carb_g'], d['carb_g'].astype(np.float32))

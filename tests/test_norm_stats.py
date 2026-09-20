@@ -68,9 +68,9 @@ def test_finalize_norm_stats_sample_std():
 @pytest.fixture(scope="module")
 def built_cache(tmp_path_factory):
     out = tmp_path_factory.mktemp("caches") / "normcache"
-    # 48 h, not 10: a sparse channel with no event in the window fits std = 0, refused.
+    # 576 steps (48 h), not 120: a sparse channel with no event fits std = 0, refused.
     cs.build_cache(
-        out_dir=str(out), pool_size=8, sim_hours=48.0, warmup_hours=5.0,
+        out_dir=str(out), pool_size=8, context_steps=576, warmup_hours=5.0,
         n_jobs=1, dataset_md="", baseline_stats=None, seed_salt=13,
     )
     return str(out)
@@ -89,17 +89,21 @@ def test_norm_stats_file_schema(built_cache):
 
 
 def test_norm_stats_match_direct_recompute(built_cache):
+    # Fitted over the context AND all four tails, so the recompute reads both.
     with open(os.path.join(built_cache, cs.NORM_STATS_FILE)) as f:
         stats = json.load(f)
     for cache_name, norm_name in cs.NORM_CHANNEL_SOURCES.items():
-        arr = np.asarray(blosc2.open(os.path.join(built_cache, f"{cache_name}.b2nd"), mode="r"))
-        tv = cs._norm_forward(cache_name, arr)  # same forward transform the builder uses
+        parts = []
+        for name in (cache_name, f"tail_{cache_name}"):
+            arr = np.asarray(blosc2.open(os.path.join(built_cache, f"{name}.b2nd"), mode="r"))
+            parts.append(cs._norm_forward(name, arr))  # the builder's own transform
+        tv = np.concatenate(parts)
         assert stats[norm_name]["mean"] == pytest.approx(float(tv.mean()), rel=1e-6, abs=1e-6)
         assert stats[norm_name]["std"] == pytest.approx(float(np.std(tv, ddof=1)), rel=1e-6, abs=1e-6)
 
 
 def test_norm_stats_deterministic(tmp_path):
-    kw = dict(pool_size=8, sim_hours=48.0, warmup_hours=5.0, n_jobs=1,
+    kw = dict(pool_size=8, context_steps=576, warmup_hours=5.0, n_jobs=1,
               dataset_md="", baseline_stats=None, seed_salt=21)
     cs.build_cache(out_dir=str(tmp_path / "a"), **kw)
     cs.build_cache(out_dir=str(tmp_path / "b"), **kw)
