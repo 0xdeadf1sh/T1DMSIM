@@ -523,8 +523,9 @@ glucose_out = insulin × ICR / sensitivity
       <div class="bar"><span class="lbl">Ohio ↔ AZT1D</span><span class="track"><span class="fill" style="width:67.3%"></span></span><span class="v">18.1</span></div>
       <div class="bar"><span class="lbl">Shanghai ↔ AZT1D</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="v">26.9</span></div>
     </div>
-    <p class="tiny" style="margin-top:.9rem">Published corpus, pooled: mean 160.3 mg/dL vs Ohio 162.1 · SD 59.2 vs 60.9 · CV 36.9 %
-    vs 37.6 % · GMI 7.14 vs 7.19 · LBGI 0.82 vs 0.86 · HBGI 7.19 vs 7.60.</p>
+    <p class="tiny" style="margin-top:.9rem"><code>cache_balanced</code>, pooled: mean 160.3 mg/dL vs Ohio 162.1 · SD 59.2 vs 60.9 · CV 36.9 %
+    vs 37.6 % · GMI 7.14 vs 7.19 · LBGI 0.82 vs 0.86 · HBGI 7.19 vs 7.60. Every figure and number in this
+    section measures the published corpora; the generator in the repository has its own population.</p>
 
     <figure class="fig feature">
       <img src="diff/figures/gap_score.png" alt="Bar chart of standardised gap scores for twenty metrics, every one within one standard deviation of the mean across the three real cohorts." loading="lazy">
@@ -563,7 +564,8 @@ glucose_out = insulin × ICR / sensitivity
     <div class="trio">
       <div><span class="n">13.7 <small>vs 30.0</small></span><span class="k">W₁ to real CGM — T1DMSIM vs UVA/Padova, against an 18.4 floor</span></div>
     </div>
-    <p class="tiny" style="margin-top:.9rem">T1DMSIM was calibrated against Ohio. Read every gap accordingly.
+    <p class="tiny" style="margin-top:.9rem">The population is tuned against one real CGM record held outside the
+    repository, not against these three cohorts, so every gap here is a measurement rather than a fit.
     <a href="https://github.com/0xdeadf1sh/T1DMSIM/blob/main/uva_padova/REALISM.md">Method →</a></p>
 
     <p class="btns">
