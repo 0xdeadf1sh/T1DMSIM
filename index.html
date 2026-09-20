@@ -33,7 +33,7 @@
   --carb: #ff9614;          /* COLOR_CARB — neon amber */
   --ins: #28d2ff;           /* COLOR_INSULIN — neon cyan */
   --is: #c864ff;            /* COLOR_IS — neon magenta */
-  --ex: #ff3782;            /* COLOR_EXERCISE — hot pink */
+  --ex: #ff3782;            /* COLOR_CONSISTENCY — hot pink */
   --lo: #ff465a;            /* hypo marker */
   --hi: #ffd228;            /* hyper marker */
   --ir: #aaff3c;            /* in range — the hero trace's own lime */
@@ -226,7 +226,7 @@ footer a { color: var(--muted); }
     <span class="kicker">Synthetic CGM at scale · <b>MIT</b> · numpy only</span>
     <h1>Model the patient,<br><span class="g">not the pancreas.</span></h1>
     <p class="lede">A seed-deterministic simulator for Type&nbsp;1 Diabetes. Behaviour — meals, dosing,
-    corrections, exercise, chaos — drives the glucose, and one integer reproduces the whole life.</p>
+    corrections, chaos — drives the glucose, and one integer reproduces the whole life.</p>
     <div class="btns">
       <a class="btn" href="#data">Download the data</a>
       <a class="btn ghost" href="paper/main.pdf">Read the paper</a>
@@ -461,7 +461,7 @@ footer a { color: var(--muted); }
       <div class="pillar s1"><b>s₁ dietary discipline</b><span>Meal size, count, timing, fast-vs-slow carbs</span></div>
       <div class="pillar s2"><b>s₂ attentiveness</b><span>Check frequency, reaction latency, trend response</span></div>
       <div class="pillar s3"><b>s₃ dosing competence</b><span>Carb counting, pre-bolus, insulin-on-board awareness</span></div>
-      <div class="pillar s4"><b>s₄ lifestyle consistency</b><span>Sleep, exercise, alcohol, site rotation</span></div>
+      <div class="pillar s4"><b>s₄ lifestyle consistency</b><span>Sleep, alcohol, site rotation, routine</span></div>
     </div>
   </div>
 </section>
@@ -478,7 +478,7 @@ footer a { color: var(--muted); }
     </figure>
     <div class="two">
       <div>
-<pre><code>glucose_in  = carbs + hepatic_output − exercise
+<pre><code>glucose_in  = carbs + hepatic_output
 glucose_out = insulin × ICR / sensitivity
 <span class="kw">delta_BG</span>    = α × (glucose_in − glucose_out)</code></pre>
         <p class="tiny" style="margin-top:.9rem">Hepatic output is insulin-suppressed through a Hill function
@@ -625,7 +625,6 @@ glucose_out = insulin × ICR / sensitivity
       <span class="chip"><b>total_insulin</b> U/step</span>
       <span class="chip"><b>insulin_resistance</b> ×</span>
       <span class="chip"><b>hgo</b> g/step</span>
-      <span class="chip"><b>total_exercise</b> g/step</span>
       <span class="chip"><b>hour_of_day</b></span>
       <span class="chip"><b>day</b></span>
       <span class="chip"><b>icr</b> g/U</span>

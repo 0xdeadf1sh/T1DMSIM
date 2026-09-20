@@ -7,12 +7,12 @@ Reference for the T1DM simulator's model: curve generation, the BG delta pipelin
 
 ```mermaid
 flowchart TD
-    CARB["carb curves<br/>meals · hypo corrections · follow-up snacks"] --> GIN["glucose_in = carb + HGO − exercise"]
+    CARB["carb curves<br/>meals · hypo corrections · follow-up snacks"] --> GIN["glucose_in = carb + HGO"]
     CARB -.->|"guessed grams and GI"| LOG["logged carb curve<br/>exported as total_carb; drives nothing"]
-    EX["exercise curves"] -->|subtracted| GIN
     HGO["HGO<br/>Hill insulin suppression × glycogen gate × alcohol<br/>+ dawn/night term + delayed-meal rebound"] --> GIN
     INS["insulin curves<br/>basal · bolus · corrections<br/>× injection-site quality"] --> GOUT["glucose_out = insulin × ICR / IS"]
-    IS["IS(t)<br/>diurnal × daily drift × illness × exercise × stress<br/>× glucotoxicity × postprandial IR × fast noise"] --> GOUT
+    INS -.->|"intended dose"| INSLOG["logged insulin curve<br/>exported as total_insulin; drives nothing"]
+    IS["IS(t)<br/>diurnal × daily drift × illness × stress<br/>× glucotoxicity × postprandial IR × fast noise"] --> GOUT
     GIN --> DELTA["delta_BG = BG_SCALE_FACTOR × (glucose_in − glucose_out)<br/>+ Sg × (E(t) − BG), the OU equilibrium pull"]
     GOUT --> DELTA
     DELTA --> GUARD["guardrails<br/>renal clearance · counter-regulatory · glucagon dump"]
@@ -40,7 +40,7 @@ Every carbohydrate curve is a gamma whose shape comes from a glycaemic index (`g
     C[n] = A * w[n] * mean{ t^(k - 1) * exp(-t / theta) : t in [n*dt, (n+1)*dt) }
            A s.t. sum_n C[n] = carb_grams
 
-Averaging the density across the step is what sizes the leading edge: the first step of a `k = 2, theta = 15` rescue curve carries 37% of the peak and a `k = 3, theta = 25` bolus 2%, so a curve rises through its onset. `w[n]` is 1 except over the last `CURVE_TAIL_CLIP_FRACTION` (1/6) of the steps, where a smootherstep takes it to exactly 0, so no curve ends on a cliff. The same construction applies to every gamma curve — meals, rescue and follow-up carbs, exercise, and every bolus.
+Averaging the density across the step is what sizes the leading edge: the first step of a `k = 2, theta = 15` rescue curve carries 37% of the peak and a `k = 3, theta = 25` bolus 2%, so a curve rises through its onset. `w[n]` is 1 except over the last `CURVE_TAIL_CLIP_FRACTION` (1/6) of the steps, where a smootherstep takes it to exactly 0, so no curve ends on a cliff. The same construction applies to every gamma curve — meals, rescue and follow-up carbs, and every bolus.
 
     g        = clip(GI, 0, 100) / 100
     k        = 4.5 + (2.0 - 4.5) * g
@@ -93,6 +93,12 @@ Every dose (basal, meal bolus, hyper correction, trend correction) is multiplied
     site_quality   = clip(site_quality, SITE_QUALITY_MIN, SITE_QUALITY_MAX)
     delivered_dose = intended_dose * site_quality
 
+A basal dose contracts its factor toward 1.0 by `BASAL_SITE_QUALITY_DAMPING`, since long-acting depots absorb more consistently than rapid-acting ones.
+
+### Logged insulin
+
+The patient records the dose they injected, not the dose that reached the blood. Each insulin curve is accompanied by a logged curve scaled back to the intended amount, `delivered_curve * (intended_dose / delivered_dose)`, and by an event row carrying `intended_dose`. Only the delivered curve enters `glucose_out` and the HGO Hill function. The step dict exports the log as `total_insulin`, `basal_insulin` and `bolus_insulin`, the delivered amounts as `total_insulin_true`, `basal_insulin_true` and `bolus_insulin_true`, and the `bolus_u` / `basal_u` point events carry the intended dose.
+
 
 ## Insulin Sensitivity
 
@@ -103,7 +109,7 @@ Diurnal pattern (`phase_shift` and `daily_drift` smooth-step-blend across midnig
     diurnal = 1.0 + morning + night
 
     IS(t)   = IS_base * diurnal * (1 + daily_drift) * illness_factor
-              * exercise_envelope * stress_envelope
+              * stress_envelope
               * glucotox_factor * postprandial_ir
               * (1 + fast_noise)
 
@@ -111,9 +117,9 @@ Diurnal pattern (`phase_shift` and `daily_drift` smooth-step-blend across midnig
 | --- | --- | --- |
 | `daily_drift` | `N(0, IS_DAILY_DRIFT_SIGMA * (1.5 - s4))` — consistent-lifestyle patients swing less day-to-day | once per day, blended across midnight |
 | `phase_shift` | `N(0, IS_DAWN_PHASE_DAILY_SIGMA)` | once per day, blended across midnight |
-| `fast_noise` | `N(0, IS_FAST_NOISE_SIGMA)` | every step |
+| `fast_noise` | AR(1) at `NOISE_AR1_RHO_METABOLIC` about `N(0, IS_FAST_NOISE_SIGMA)`; that sigma is 0, so the term is identically 0 | every step |
 | `illness_factor` | ramps toward `illness_is_target` at `ILLNESS_IS_RAMP_RATE` per day; rests at 1.0 when healthy | always applied |
-| `exercise_envelope`, `stress_envelope` | trapezoidal `envelope_intensity()` blending the raw factor against 1.0 | per event |
+| `stress_envelope` | trapezoidal `envelope_intensity()` blending the raw factor against 1.0 | per event |
 
 ### Glucotoxicity
 
@@ -136,7 +142,7 @@ In T1DM the incretin / GLP-1 axis is blunted and there is no endogenous insulin 
 
 ## BG Delta Computation
 
-    glucose_in  = total_carb_true + HGO - exercise
+    glucose_in  = total_carb_true + HGO
     glucose_out = total_insulin * ICR / IS(t)
     delta_BG    = BG_SCALE_FACTOR * (glucose_in - glucose_out)
     delta_BG   += Sg * (E(t) - BG)     # glucose-effectiveness restoring pull (see below)
@@ -155,11 +161,11 @@ Carbs enter as the true absorption curve; the logged curve the patient wrote dow
 
     BG(t+1) = clamp(BG(t) + delta_BG, BG_CLAMP_MIN, BG_CLAMP_MAX)
 
-`BG_CLAMP_MIN` is 10 mg/dL. It is not a device floor — a real CGM stops reporting near 40 but the patient keeps falling, and clamping the dynamics at the reporting floor made a descent taper out there. 10 mg/dL is below survivable, so it never binds physiologically; it exists to keep the Kovatchev log transform defined. The counter-regulatory and glucagon-dump terms plus the soft-bound headroom cap normally arrest a fall well above it.
+`BG_CLAMP_MIN` is 1 mg/dL. It is not a device floor — a real CGM stops reporting near 40 but the patient keeps falling, and clamping the dynamics at the reporting floor made a descent taper out there. 1 mg/dL is far below survivable, so it never binds physiologically; it exists to keep the Kovatchev log transform defined. The counter-regulatory and glucagon-dump terms plus the soft-bound headroom cap normally arrest a fall well above it.
 
 ### Glucose effectiveness (Bergman Sg) equilibrium
 
-`Sg = glucose_effectiveness` is the per-patient Bergman minimal-model glucose effectiveness (a per-step reversion fraction), sampled lognormally around `GE_RATE = 0.015` and clipped to `[GE_RATE_MIN, GE_RATE_MAX] = [0.004, 0.150]` (~2–3× inter-individual spread; the floor prevents a pure integrator). `GE_RATE` is the MEDIAN of that lognormal, not its mean, so the median patient's reversion time constant is `1 / GE_RATE` ≈ 67 steps ≈ 5.6 h — longer than the 4 h bolus duration of action at the 5 U reference (`BOLUS_DIA_BASE_HOURS`, scaling as √dose), so the pull leaves insulin's sustained effect intact. The pull supplies the within-band mean reversion the renal / counter-regulatory guardrails do not: inside 70–180 net flux is otherwise integrated with an over-long autocorrelation.
+`Sg = glucose_effectiveness` is the per-patient Bergman minimal-model glucose effectiveness (a per-step reversion fraction), sampled lognormally around `GE_RATE = 0.068` and clipped to `[GE_RATE_MIN, GE_RATE_MAX] = [0.004, 0.150]` (~2–3× inter-individual spread; the floor prevents a pure integrator). `GE_RATE` is the MEDIAN of that lognormal, not its mean, so the median patient's reversion time constant is `1 / GE_RATE` ≈ 14.7 steps ≈ 74 min, which is what sets the 1–4 h BG autocorrelation. It is shorter than the 4 h bolus duration of action at the 5 U reference (`BOLUS_DIA_BASE_HOURS`, scaling as √dose), so the spring high-passes part of a bolus's sustained effect — raising `GE_RATE` further cancels more of it. The pull supplies the within-band mean reversion the renal / counter-regulatory guardrails do not: inside 70–180 net flux is otherwise integrated with an over-long autocorrelation.
 
 `E(t)` is an Ornstein–Uhlenbeck process. With `rho = exp(-DT_MINUTES / (GE_EQ_TAU_HOURS * 60))`:
 
@@ -167,7 +173,7 @@ Carbs enter as the true absorption curve; the logged curve the patient wrote dow
     E  = mu + rho * (E_prev - mu) + sqrt(1 - rho^2) * GE_EQ_SIGMA * ge_sigma_mult * N(0, 1)
     E  = max(E, GE_EQ_FLOOR)
 
-The `sqrt(1 - rho^2)` factor makes the stationary std equal `GE_EQ_SIGMA * ge_sigma_mult`. `E`'s own timescale, not the strength of the Sg pull, is what keeps the 8h ACF near zero: `E` wanders enough to supply the distributional spread but decorrelates within hours, decoupling spread from the autocorrelation. Sg itself is deliberately weak, because a strong spring high-passes any input slower than its own time constant — insulin included. `GE_EQ_FLOOR = 64` sits above `SEVERE_HYPO_THRESHOLD = 55`, so the pull is always upward in a severe low (it aids, never opposes, the rescue). `ge_diurnal_profile(hour)` is a mean-zero wrapped-Gaussian dawn-phenomenon rhythm peaking at `GE_DAWN_PEAK_HOUR = 8` with width `GE_DAWN_WIDTH_HOURS = 5.5`, mean-subtracted over the 24h day so it adds rhythm without shifting the pooled mean; its per-patient amplitude `ge_dawn_amplitude` scales with the same dawn trait as the HGO surge.
+The `sqrt(1 - rho^2)` factor makes the stationary std equal `GE_EQ_SIGMA * ge_sigma_mult`. `E`'s own timescale, not the strength of the Sg pull, is what keeps the 8h ACF near zero: `E` wanders enough to supply the distributional spread but decorrelates within hours, decoupling spread from the autocorrelation. Sg itself is deliberately weak, because a strong spring high-passes any input slower than its own time constant — insulin included. `GE_EQ_FLOOR = 40` sits above `SEVERE_HYPO_THRESHOLD = 25`, so the pull is always upward in a severe low (it aids, never opposes, the rescue). `ge_diurnal_profile(hour)` is a mean-zero wrapped-Gaussian dawn-phenomenon rhythm peaking at `GE_DAWN_PEAK_HOUR = 9` with width `GE_DAWN_WIDTH_HOURS = 5.5`, mean-subtracted over the 24h day so it adds rhythm without shifting the pooled mean; its per-patient amplitude `ge_dawn_amplitude` scales with the same dawn trait as the HGO surge.
 
 Per-patient heterogeneity, sampled once in `generate_patient`:
 
@@ -179,7 +185,7 @@ Per-patient heterogeneity, sampled once in `generate_patient`:
 | --- | --- | --- |
 | `IR_LOGNORMAL_SIGMA` | 0.26 | lognormal sigma of `ir` |
 | `IR_FACTOR_MIN` / `IR_FACTOR_MAX` | 0.4 / 2.0 | clip on `ir` |
-| `GE_EQ_ANCHOR_MEAN` | 138 | population-mean anchor (mg/dL) |
+| `GE_EQ_ANCHOR_MEAN` | 109 | population-mean anchor (mg/dL), before the clip to [110, 210] |
 | `GE_ANCHOR_IR_COUPLING` | 30 | mg/dL per unit `ir - 1` |
 | `GE_EQ_ANCHOR_SIGMA` | 15 | between-patient anchor spread |
 | `GE_SIGMA_REL_SIGMA` | 0.16 | lognormal sigma of `ge_sigma_mult` |
@@ -215,7 +221,7 @@ Insulin-suppressed via a Hill function on EMA-smoothed insulin (proxies plasma i
     meal_rebound  = sum over active meal_hgo_effects of (magnitude * envelope_intensity) * (DT_MINUTES / 60)
     HGO(t)        = HGO_baseline + meal_rebound
 
-- `HGO_INSULIN_HALF_MAX` is tuned so a typical basal level (~0.052 U/step) yields 4.95 g/hr = `HGO_BASE_GRAMS_PER_HOUR`, the balanced reference rate. This preserves basal sizing — `ideal_basal = HGO_BASE_GRAMS_PER_HOUR * 24 * (body_weight_kg / BODY_WEIGHT_MEAN_KG) * is_base / ICR` gives near-zero net delta. The weight factor mirrors the per-step HGO scaling; `is_base` keeps the invariant across baseline insulin needs.
+- `HGO_INSULIN_HALF_MAX` is tuned so the anchor basal level (0.0516 U/step, the per-step basal of an ICR-8 patient) yields 4.95 g/hr = `HGO_BASE_GRAMS_PER_HOUR`, the balanced reference rate. `ICR_MEAN` is 5.6, so the population's typical basal per step sits above that anchor and its HGO a little below the reference. This preserves basal sizing — `ideal_basal = HGO_BASE_GRAMS_PER_HOUR * 24 * (body_weight_kg / BODY_WEIGHT_MEAN_KG) * is_base / ICR` gives near-zero net delta. The weight factor mirrors the per-step HGO scaling; `is_base` keeps the invariant across baseline insulin needs.
 - At zero insulin, HGO climbs toward `HGO_UNSUPPRESSED_GRAMS_PER_HOUR` (DKA-like).
 - `(dawn_g_per_hr - night_dip_g_per_hr)` is a cortisol-driven dawn surge (Gaussian peaking at `DAWN_HGO_PEAK_HOUR`) minus a deep-sleep trough (Gaussian at `NIGHT_HGO_DIP_HOUR`), added in g/hr rather than as a multiplier so the Hill suppression does not cancel it — this produces the dawn phenomenon.
 - `alcohol_factor` (trapezoidal envelope around 1.0) suppresses HGO on top of insulin's suppression; `glycogen_gate` ramps HGO down when the reservoir is depleted.
@@ -265,7 +271,7 @@ Hypo correction (BG_observed < hypo_threshold):
     correction_grams  = max(HYPO_RESCUE_MIN_GRAMS, deficit / BG_SCALE_FACTOR
                             * (HYPO_RESCUE_DEFICIT_GAIN + panic_factor * HYPO_RESCUE_PANIC_GAIN))
 
-The trigger is the per-patient `hypo_threshold`, sampled once in `generate_patient` from that patient's own `skill_avg`: attentive/competent patients act on the drop earlier. The gain is piecewise about `HYPO_THRESHOLD_SKILL_MID = 0.5` because `SKILL_MIN` and `SKILL_MAX` (0.15 / 0.98) are not symmetric around it, so the population spans `HYPO_THRESHOLD_MEDIAN ± HYPO_THRESHOLD_SKILL_SPAN` — 70 to 90 mg/dL, median 80 — with median skill landing on the median threshold. The same value defines "low" everywhere else the patient acts on it. A meal bolus is gated on the patient glancing at the CGM first — probability `BOLUS_BG_CHECK_BASE_PROB + 0.05 * attentiveness`, so 0.95 to 0.999 and not a certainty — and on that glance the bolus is skipped below the threshold and scaled by `BOLUS_REDUCE_FACTOR_BASE + 0.3 * dosing_competence` within `BOLUS_REDUCE_MARGIN` (30 mg/dL) above it; and a planned exercise session is abandoned below `hypo_threshold + EXERCISE_HYPO_MARGIN` (20 mg/dL — a higher bar than eating, since guidance is to top up with carbs before activity below ~90 mg/dL).
+The trigger is the per-patient `hypo_threshold`, sampled once in `generate_patient` from that patient's own `skill_avg`: attentive/competent patients act on the drop earlier. The gain is piecewise about `HYPO_THRESHOLD_SKILL_MID = 0.5` because `SKILL_MIN` and `SKILL_MAX` (0.15 / 0.98) are not symmetric around it, so the population spans `HYPO_THRESHOLD_MEDIAN ± HYPO_THRESHOLD_SKILL_SPAN` — 58 to 78 mg/dL, median 68 — with median skill landing on the median threshold. The same value defines "low" everywhere else the patient acts on it. A meal bolus is gated on the patient glancing at the CGM first — probability `BOLUS_BG_CHECK_BASE_PROB + 0.05 * attentiveness`, so 0.95 to 0.999 and not a certainty — and on that glance the bolus is skipped below the threshold and scaled by `BOLUS_REDUCE_FACTOR_BASE + 0.3 * dosing_competence` within `BOLUS_REDUCE_MARGIN` (15 mg/dL) above it.
 
 The deficit is measured against `projected_bg`, not the current reading: this is the recheck half of the rule of 15, so rescue glucose already swallowed and still absorbing is counted before more is eaten, and half the drop the bolus insulin still acting will cause is subtracted. One rescue covers the whole projected deficit, so a deep low is not treated in small, frequent doses. Only correction carbs are counted (tracked separately from meal carbs, which arrive with a bolus attached), `BG_SCALE_FACTOR` converts grams to the mg/dL they will raise, and `awareness` = `COB_AWARENESS_BASE + COB_AWARENESS_SKILL * dosing_competence` rises to 0.89 at the `SKILL_MAX` ceiling of 0.98, approaching but never reaching its 0.90 limit. When `projected_bg >= hypo_threshold` the patient waits instead of eating. With probability `RAGE_EAT_PROBABILITY_BASE * (1 - dosing_competence)` the arithmetic is discarded (`cob_consideration = 0`) and the patient treats on the raw reading.
 
@@ -280,7 +286,7 @@ Hyper correction (BG_observed > eff_high_thresh):
     urgency           = min(3, 1 + max(0, (BG_observed - BG_HIGH_THRESHOLD) / 50))
     patience          = patience_time / urgency
 
-Subtracting the insulin-on-board term before sizing stops patients from stacking corrections. Urgency saturates at 3 (reached at BG = 275), shortening the patience window for sustained highs.
+Subtracting the insulin-on-board term before sizing stops patients from stacking corrections. Urgency saturates at 3 (reached at BG = 300), shortening the patience window for sustained highs.
 
 Above `RAGE_BOLUS_BG_THRESHOLD` rage bolusing may occur, with probability proportional to `(1.2 - dosing_competence)`.
 
@@ -319,23 +325,16 @@ Ahead of the hard clamp, each step's `delta_BG` is capped to a fraction of the h
         headroom = max(0, BG_CLAMP_MAX - BG(t))
         delta_BG = min(delta_BG,  SOFT_APPROACH_FRACTION * headroom)
 
-The hard clamp still runs as a backstop after this cap. `BG_SOFT_FLOOR` is 20 mg/dL and `BG_SOFT_CEILING` 385 — a short runway inside the hard `[BG_CLAMP_MIN, BG_CLAMP_MAX] = [10, 400]` bounds, so the damping shapes only the final approach to a bound and leaves a descent through physiological range untouched.
+The hard clamp still runs as a backstop after this cap. `BG_SOFT_FLOOR` is 0 mg/dL and `BG_SOFT_CEILING` 500, both outside the hard `[BG_CLAMP_MIN, BG_CLAMP_MAX] = [1, 400]` bounds, so the cap engages only for a step that would overshoot the clamp outright: the ceiling cap needs a single step past 500 and the floor cap one past 0. Everywhere inside the bounds the raw delta passes through undamped.
 
 ### Per-step absorption noise
 
-Multiplicative noise on the per-step contributions read from the accumulation arrays, modelling moment-to-moment absorption variation the smooth gamma curves cannot capture. Active only when the underlying curve is non-zero:
+An AR(1) multiplicative term on the per-step contributions read from the accumulation arrays, modelling moment-to-moment absorption variation the smooth gamma curves cannot capture. Active only when the underlying curve is non-zero, and both sigmas are currently 0, so the term is identically 0:
 
-    total_carb_true *= max(0, 1 + N(0, CARB_ABSORPTION_NOISE_SIGMA))    if total_carb_true > 0
-    total_insulin   *= max(0, 1 + N(0, INSULIN_ABSORPTION_NOISE_SIGMA)) if total_insulin > 0
+    total_carb_true *= max(0, 1 + ar_carb)      if total_carb_true > 0    ar_carb ~ AR(1) of N(0, CARB_ABSORPTION_NOISE_SIGMA)
+    total_insulin   *= max(0, 1 + ar_insulin)   if total_insulin > 0      ar_insulin ~ AR(1) of N(0, INSULIN_ABSORPTION_NOISE_SIGMA)
 
 The logged carb curve is read straight from its accumulator; absorption noise is physiology, not a property of the record.
-
-### Exercise post-effect IS envelope
-
-A session is planned hours ahead but starts only if `BG_observed >= hypo_threshold + EXERCISE_HYPO_MARGIN` at its scheduled time (see Correction Behavior); a session that does not start schedules no envelope. After an exercise event ends, IS is reduced (more sensitive) for `EXERCISE_IS_DURATION_HOURS` (6h), shaped by `envelope_intensity()` with `EXERCISE_IS_RAMP_HOURS` ramps:
-
-    reduction            = min(0.30, EXERCISE_IS_REDUCTION * (exercise_duration / EXERCISE_DURATION_MEAN_MIN))
-    exercise_envelope(t) = 1 - reduction * envelope_intensity(t; start, start+6h, ramp=1h)
 
 ### Stress IS envelope
 
@@ -384,6 +383,5 @@ All curve values are in "amount per step" units:
 | Carb curves (true, and logged) | grams per step | sum of curve = total grams |
 | Insulin curves | units per step | sum of curve = total units |
 | HGO | grams per step | rate g/hr converted via `DT_MINUTES / 60` |
-| Exercise | grams-equivalent per step | — |
 
 Both `gamma_curve` and `basal_curve` normalize so that `sum(values) = total_amount`; `gamma_curve` reaches that per-step meaning by integrating the gamma across each step (see Carbohydrate Absorption Curves). There is no `flat_curve` — `basal_curve` (Bateman PK, smooth onset/peak/decline) replaced it. Never pass a rate where `total_amount` is expected.

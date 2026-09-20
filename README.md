@@ -1,6 +1,6 @@
 # T1DM Patient Behavior Simulator
 
-A seed-driven simulator for generating synthetic Type 1 Diabetes blood glucose data. Unlike traditional glucose-insulin simulators (e.g., UVA/Padova), it models patient *behavior* as the primary driver of blood sugar outcomes: factor curves -- carbohydrate intake, insulin action, insulin sensitivity, and exercise -- are generated, and blood sugar emerges from their interactions.
+A seed-driven simulator for generating synthetic Type 1 Diabetes blood glucose data. Unlike traditional glucose-insulin simulators (e.g., UVA/Padova), it models patient *behavior* as the primary driver of blood sugar outcomes: factor curves -- carbohydrate intake, insulin action, insulin sensitivity -- are generated, and blood sugar emerges from their interactions.
 
 Designed by a T1DM patient, informed by lived experience.
 
@@ -33,7 +33,7 @@ Designed by a T1DM patient, informed by lived experience.
 
 Most T1DM simulators model physiology: glucose kinetics, insulin pharmacokinetics, compartmental models. They produce accurate BG traces but need dozens of physiological parameters that are hard to measure and vary between patients.
 
-This one models the *person*, not the pancreas. Most real-world blood sugar variance comes from behavioral decisions -- what the patient eats, when they bolus, how they correct, whether they exercise -- not from subtle physiological differences. Generating diverse behavioral patterns and computing BG as a consequence yields training data whose target is what patients *do*, with blood sugar as the outcome: a near-unlimited stream of synthetic factor curves for pretraining personalized blood sugar prediction models, with real patient data reserved for fine-tuning.
+This one models the *person*, not the pancreas. Most real-world blood sugar variance comes from behavioral decisions -- what the patient eats, when they bolus, how they correct -- not from subtle physiological differences. Generating diverse behavioral patterns and computing BG as a consequence yields training data whose target is what patients *do*, with blood sugar as the outcome: a near-unlimited stream of synthetic factor curves for pretraining personalized blood sugar prediction models, with real patient data reserved for fine-tuning.
 
 
 ## Design Principles
@@ -44,9 +44,9 @@ This one models the *person*, not the pancreas. Most real-world blood sugar vari
 
 3. **The liver is an insulin-suppressed feeding session.** Hepatic glucose output (HGO) is a steady stream of "food" entering the bloodstream, throttled down by a Hill function of EMA-smoothed plasma insulin. A finite hepatic glycogen reservoir gates the glycogenolysis fraction, and large meals schedule a delayed HGO rebound 3.5-5.5h later — the mechanism behind nocturnal hyperglycemia after a big dinner. Basal insulin exists to counteract baseline HGO.
 
-4. **Exercise is negative food.** Aerobic exercise pulls glucose out of the bloodstream into muscle cells, modeled as a negative carb-equivalent curve plus a lasting insulin-sensitivity boost.
+4. **The patient's log is not the truth.** Carbohydrate is exported as the grams and glycaemic index the patient wrote down, insulin as the dose they meant to inject. Blood glucose runs on the true curves, exported separately.
 
-5. **Everything is seed-driven.** A single integer fixes the patient's personality, physiology, daily schedule, meal choices, insulin doses, exercise patterns, illness events, and random noise. Same seed, same simulation, always.
+5. **Everything is seed-driven.** A single integer fixes the patient's personality, physiology, daily schedule, meal choices, insulin doses, illness events, and random noise. Same seed, same simulation, always.
 
 
 ## Architecture
@@ -65,7 +65,7 @@ A seed fixes the virtual patient. A day planner turns that patient's latent skil
 At each 5-minute time step, the BG delta is computed as:
 
 ```
-glucose_in  = carbs + hepatic_output - exercise
+glucose_in  = carbs + hepatic_output
 glucose_out = insulin_units * ICR / insulin_sensitivity
 delta_BG    = alpha * (glucose_in - glucose_out) + S_g * (E(t) - BG)
 ```
@@ -76,11 +76,11 @@ delta_BG    = alpha * (glucose_in - glucose_out) + S_g * (E(t) - BG)
 
 Three physiological guardrails are then applied to the delta:
 
-- Renal clearance: above 180 mg/dL, the kidneys excrete glucose proportionally to the excess.
-- Counter-regulatory response: below 70 mg/dL, glucagon and cortisol force the liver to dump extra sugar.
-- Severe-hypo glucagon dump: below `SEVERE_HYPO_THRESHOLD`, an additional emergency release adds glucose proportionally to severity.
+- Renal clearance: above `RENAL_THRESHOLD` (250 mg/dL), the kidneys excrete glucose proportionally to the excess.
+- Counter-regulatory response: below `COUNTER_REGULATORY_THRESHOLD` (50 mg/dL), glucagon and cortisol force the liver to dump extra sugar.
+- Severe-hypo glucagon dump: below `SEVERE_HYPO_THRESHOLD` (25 mg/dL), an additional emergency release adds glucose proportionally to severity.
 
-Soft delta-damping near the floor and ceiling shapes the tails; a hard clamp at 10-400 mg/dL acts as a backstop. The floor is deliberately below the CGM reporting floor of 40 mg/dL: a sensor that stops reporting does not stop the patient falling, and clamping the dynamics at the reporting floor makes every descent taper out there. The full algebra for every curve, envelope, and guardrail is in [`docs/math.md`](docs/math.md).
+A hard clamp at 1-400 mg/dL bounds the trace; the soft delta-damping sits outside it and engages only on a step that would overshoot the clamp in one move. The floor is deliberately below the CGM reporting floor of 40 mg/dL: a sensor that stops reporting does not stop the patient falling, and clamping the dynamics at the reporting floor makes every descent taper out there. The full algebra for every curve, envelope, and guardrail is in [`docs/math.md`](docs/math.md).
 
 
 ## Patient Model
@@ -92,9 +92,9 @@ Each virtual patient is defined by four skill dimensions sampled from a multivar
 | Dietary discipline (s1) | Carb amount per meal, number of meals/snacks, meal glycaemic index, meal-timing regularity. Low s1 patients eat higher-GI meals, more erratically. |
 | Attentiveness (s2) | CGM check frequency, response speed to highs and lows, whether overnight alarms are noticed, trend-based anticipatory corrections. |
 | Dosing competence (s3) | Carb-counting accuracy, bolus timing (pre- vs post-meal), IOB awareness before correcting, correction-dose appropriateness, probability of rage bolusing. |
-| Lifestyle consistency (s4) | Regularity of wake/sleep times, exercise frequency, meal-schedule stability, alcohol frequency, overall routine predictability. |
+| Lifestyle consistency (s4) | Regularity of wake/sleep times, meal-schedule stability, alcohol frequency, injection-site rotation, overall routine predictability. |
 
-Skills are mapped through a sigmoid and clipped to a configurable range (default 0.15-0.98); every behavioral parameter — meal sizes, timing jitter, bolus accuracy, correction behavior, exercise habits — is derived from them.
+Skills are mapped through a sigmoid and clipped to a configurable range (default 0.15-0.98); every behavioral parameter — meal sizes, timing jitter, bolus accuracy, correction behavior, dose-skip rates — is derived from them.
 
 | Trait | Sampled | Governs |
 |---|---|---|
@@ -113,11 +113,11 @@ These traits are sampled independently of skill and give the population its betw
 
 ## Insulin Sensitivity Model
 
-Insulin sensitivity follows a diurnal pattern modeled as a sum of Gaussian bumps: a morning resistance peak around 7 AM (the dawn phenomenon, source of the classic morning BG rise) and a nighttime sensitivity dip around 2 AM that can cause nocturnal lows. The morning peak's timing shifts day-to-day (configurable sigma); a daily drift and per-step noise add further variability. During illness the IS factor ramps gradually toward a target and back down during recovery.
+Insulin sensitivity follows a diurnal pattern modeled as a sum of Gaussian bumps: a morning resistance peak around 7 AM (the dawn phenomenon, source of the classic morning BG rise) and a nighttime sensitivity dip around 2 AM that can cause nocturnal lows. The morning peak's timing shifts day-to-day (configurable sigma) and a daily drift adds further variability; the per-step AR(1) noise term is present but its sigma is zero. During illness the IS factor ramps gradually toward a target and back down during recovery.
 
 Modifiers applied on top of the diurnal pattern:
 
-- **Post-exercise sensitivity boost**: IS is reduced by `EXERCISE_IS_REDUCTION` (10%) for `EXERCISE_IS_DURATION_HOURS` (6h) after aerobic exercise — the effect behind nocturnal hypos in active patients.
+- **Stress**: a transient resistance multiplier over a bounded window, blended in and out by a trapezoidal envelope.
 - **Glucotoxicity**: a slow 3h EMA of true BG drives transient insulin resistance when chronically elevated, closing a positive feedback loop on hyperglycemia (high BG → more IR → harder to bring down).
 - **Postprandial insulin resistance**: while carbs are absorbing, the insulin-resistance factor is multiplied by `(1 + penalty)`, where `penalty` saturates with active carb load. In T1DM the incretin / GLP-1 sensitivity boost non-diabetics get with a meal is blunted or absent, so the absorbing-carb state is if anything mildly insulin-*resistant*.
 - **Injection site quality (lipohypertrophy)**: every dose (basal, meal bolus, corrections) is multiplied by a per-dose `site_quality` factor from `N(1.0, σ)` with σ scaling as `1/s4` — poor lifestyle consistency means poor site rotation and higher dose-to-dose variance.
@@ -127,15 +127,13 @@ Modifiers applied on top of the diurnal pattern:
 
 - **Meals**: number, timing, and carb amount are all skill-dependent, and each meal is one gamma absorption curve shaped by a glycaemic index drawn around the patient's `meal_gi_mean`. The curve sums to the meal's grams.
 
-- **The carbohydrate log**: the patient is a meticulous logger — every carb event is written down at the moment it happens — but the grams and the glycaemic index are guesses. A meal logs the same carb count its bolus is dosed from; a rescue, a follow-up snack or a trend snack each carry their own error, drawn from the patient's carb-counting sigma. The logged glycaemic index sits around the truth with a spread that narrows with dosing competence. A guess of 0 g logs nothing. The exported carbohydrate is this log, not the truth: a second gamma curve built from the guessed grams and GI, laid at the true onset time, driving nothing. Blood glucose runs on the true curve, exported separately as `total_carb_true`. Insulin and exercise are exact.
+- **The carbohydrate log**: the patient is a meticulous logger — every carb event is written down at the moment it happens — but the grams and the glycaemic index are guesses. A meal logs the same carb count its bolus is dosed from; a rescue, a follow-up snack or a trend snack each carry their own error, drawn from the patient's carb-counting sigma. The logged glycaemic index sits around the truth with a spread that narrows with dosing competence. A guess of 0 g logs nothing. The exported carbohydrate is this log, not the truth: a second gamma curve built from the guessed grams and GI, laid at the true onset time, driving nothing. Blood glucose runs on the true curve, exported separately as `total_carb_true`. Insulin is logged the same way: `total_insulin`, `basal_insulin` and `bolus_insulin` carry the dose the patient meant to inject, and the `*_true` channels carry what the injection site actually absorbed.
 
 - **Basal insulin**: one long-acting injection per day, anchored to `HGO_base × 24h × (body_weight_kg / BODY_WEIGHT_MEAN_KG) × is_base / ICR` and absorbed through a Bateman one-compartment PK curve `f(t) = exp(-ke·t) − exp(-ka·t)` whose rates and action window are the patient's assigned analogue: glargine U100 (73h), glargine U300 (101h) or degludec (133h).
 
-- **Bolus insulin**: dosed per meal from a carb count carrying skill-dependent error, with competent patients pre-bolusing and duration of action scaling as `√dose` about a 5U reference, so larger doses act longer and peak slightly later. Almost every dose is preceded by a glance at the CGM: below the patient's own hypo threshold the bolus is skipped and the meal carbs go untreated, and within 30 mg/dL above it the dose is cut.
+- **Bolus insulin**: dosed per meal from a carb count carrying skill-dependent error, with competent patients pre-bolusing and duration of action scaling as `√dose` about a 5U reference, so larger doses act longer and peak slightly later. Almost every dose is preceded by a glance at the CGM: below the patient's own hypo threshold the bolus is skipped and the meal carbs go untreated, and within `BOLUS_REDUCE_MARGIN` (15 mg/dL) above it the dose is cut. A main meal's bolus is forgotten outright with probability `MEAL_BOLUS_SKIP_BASE_PROB` (0.15) × (1 − s3); an extra snack's with `SNACK_BOLUS_SKIP_BASE` (0.1) × (1 − 0.5·s3), and the mid-afternoon slot's with `AFTERNOON_SNACK_BOLUS_SKIP_BASE` (0.45) × (1 − 0.5·s3).
 
-- **Corrections**: the CGM is checked at skill-dependent intervals, high-competence patients subtracting insulin-on-board before correcting and attentive ones acting on BG *trends* preemptively, while extremes above 300 mg/dL or below the 55 mg/dL severe-hypo threshold can trigger rage bolusing or reflexive rescue eating. What counts as low is one number per patient — a `hypo_threshold` spanning 70-90 mg/dL across the skill range, higher for the attentive and competent — and that single value fires the rescue, gates every bolus, and sets the bar for exercise. Before eating again the patient nets off the rescue carbohydrate still absorbing, in a competence-scaled fraction, so one low is treated once rather than every few minutes; a rage-eat roll, likelier the less competent the patient, drops that arithmetic and treats on the reading alone.
-
-- **Exercise**: skill-dependent probability, reduced on weekends, modelled as a negative carb-equivalent gamma curve plus the post-exercise IS boost above. A planned session starts only if BG sits at least 20 mg/dL above the patient's hypo threshold — exercise is negative food, so setting out already low drives BG straight down — and a session that never starts leaves no sensitivity tail behind it.
+- **Corrections**: the CGM is checked at skill-dependent intervals, high-competence patients subtracting insulin-on-board before correcting and attentive ones acting on BG *trends* preemptively, while BG above `RAGE_BOLUS_BG_THRESHOLD` (300 mg/dL) can trigger rage bolusing. Below `SEVERE_HYPO_THRESHOLD` (25 mg/dL) the rescue bypasses the check interval altogether. What counts as low is one number per patient — a `hypo_threshold` spanning 58-78 mg/dL across the skill range, higher for the attentive and competent — and that single value fires the rescue and gates every bolus. Before eating again the patient nets off the rescue carbohydrate still absorbing, in a competence-scaled fraction, so one low is treated once rather than every few minutes; a rage-eat roll, likelier the less competent the patient, drops that arithmetic and treats on the reading alone. Every rescue queues a six-hour basal stand-down envelope, so the forward basal pipeline does not clear glucose while the patient is recovering.
 
 - **Alcohol**: more likely on weekends, holidays, and rare event days, it suppresses HGO by 30–70% for 4–8 hours starting 1–2 hours after drinking — on top of insulin's own suppression — causing the delayed nocturnal lows common in real T1DM patients.
 
@@ -198,16 +196,16 @@ sim.inject_curve(curve, sim.state.current_idx, 'carb', 'Custom meal',
 ```
 
 Every step's dict carries the curves (`total_carb`, `total_carb_true`,
-`total_insulin`, `total_exercise`) and, beside them, the point events of
-`EVENT_CHANNELS`: the grams, units or session minutes of each dose at the step it
-was taken, with its glycaemic index or its minutes-to-peak and hours of action.
-Doses sharing a step are summed and their descriptors dose-weighted.
+`total_insulin`, `total_insulin_true`) and, beside them, the point events of
+`EVENT_CHANNELS`: the grams or units of each dose at the step it was taken, with
+its glycaemic index or its minutes-to-peak and hours of action. Doses sharing a
+step are summed and their descriptors dose-weighted.
 
 `total_carb` and the `carb_g` / `carb_gi` events are the patient's log — guessed
-grams and GI at the true onset step. `total_carb_true` is the absorption curve
-blood glucose actually runs on. Insulin, exercise and every other channel are
-exact. A carb curve injected without `logged=` moves blood glucose and appears in
-no log.
+grams and GI at the true onset step; `total_insulin` and the `bolus_u` / `basal_u`
+events are the dose the patient meant to inject. The `*_true` channels are what
+blood glucose actually runs on. A carb curve injected without `logged=` moves
+blood glucose and appears in no log.
 
 Trajectory cache (needs `blosc2`):
 
@@ -230,7 +228,7 @@ statistics are the log's.
 ```
 SPACE       Generate next 24 hours
 R           Random reseed
-1-9, 0      Toggle curve visibility
+1-9         Toggle curve visibility
 A           Toggle all curves
 F           Cycle text size (small / medium / large)
 Left/Right  Scroll timeline
@@ -241,12 +239,12 @@ S           Screenshot (PNG)
 Q/ESC       Quit
 ```
 
-Curves: (1) Blood Glucose, (2) Carbs (logged) — the true absorption curve trails it dimmed, and the hover box gives its value, (3) Insulin (total), (4) Basal, (5) Bolus, (6) Insulin Resistance (multiplier; >1 = resistant), (7) Exercise, (8) BG Delta, (9) Hepatic Output, (0) Glucose In.
+Curves: (1) Blood Glucose, (2) Carbs (logged) — the true absorption curve trails it dimmed, and the hover box gives its value, (3) Insulin (total, logged), (4) Basal (logged), (5) Bolus (logged), (6) Insulin Resistance (multiplier; >1 = resistant), (7) BG Delta, (8) Hepatic Output, (9) Glucose In.
 
 
 ## Comparison Against Real-World Datasets
 
-[`diff/README.md`](diff/README.md) scores the simulator against three real CGM corpora — OhioT1DM, ShanghaiT1DM, and AZT1D — across distributional, variability, temporal, and episode metrics.
+[`diff/README.md`](diff/README.md) scores the simulator against three real CGM corpora — OhioT1DM, ShanghaiT1DM, and AZT1D — across distributional, variability, temporal, and episode metrics. The population is tuned against a separate record, so the report is a measurement of the distance to those cohorts, not a fit to them.
 
 
 ## Comparison Against the UVA/Padova Simulator
@@ -271,7 +269,7 @@ The comparison report in [`diff/README.md`](diff/README.md) benchmarks the simul
 
 - **ShanghaiT1DM** — Zhao, Q., Zhu, J., Shen, X., Lin, C., Zhang, Y., Liang, Y., Cao, B., Li, J., Liu, X., Rao, W., and Wang, C. *Chinese Diabetes Datasets for Data-Driven Machine Learning.* Scientific Data 10, 35 (2023). doi:10.1038/s41597-023-01940-7. The T1DM portion contains 12 patients / 16 records of paired CGM, insulin, and dietary data.
 
-- **AZT1D** — Khamesian, S., Arefeen, A., Thompson, B. M., Grando, M. A., and Ghasemzadeh, H. *AZT1D: A Real-World Dataset for Type 1 Diabetes.* Dataset of 25 individuals with T1D on Automated Insulin Delivery (Tandem t:slim X2 Control-IQ) collected at Mayo Clinic Arizona over 6–8 weeks per patient, including CGM, basal/bolus insulin (with correction-specific amounts and bolus types), carbohydrate intake, and device-mode annotations (regular / sleep / exercise). See the accompanying manuscript (Mayo Clinic / Arizona State University, 2025) for full study design and IRB protocol (#23-003065).
+- **AZT1D** — Khamesian, S., Arefeen, A., Thompson, B. M., Grando, M. A., and Ghasemzadeh, H. *AZT1D: A Real-World Dataset for Type 1 Diabetes.* Dataset of 25 individuals with T1D on Automated Insulin Delivery (Tandem t:slim X2 Control-IQ) collected at Mayo Clinic Arizona over 6–8 weeks per patient, including CGM, basal/bolus insulin (with correction-specific amounts and bolus types), carbohydrate intake, and device-mode annotations. See the accompanying manuscript (Mayo Clinic / Arizona State University, 2025) for full study design and IRB protocol (#23-003065).
 
 The in-silico comparison in [`uva_padova/README.md`](uva_padova/README.md) benchmarks the simulator against the UVA/Padova model, run through the open-source `simglucose` engine.
 
