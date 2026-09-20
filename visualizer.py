@@ -1,31 +1,7 @@
-"""
-T1DM Simulator — Interactive Visualizer (Pygame)
-==================================================
-Controls:
-  SPACE       — Generate next 24 hours
-  R           — Reseed with random seed
-  LEFT/RIGHT  — Scroll timeline
-  HOME        — Jump to start
-  END         — Jump to end
-  +/-         — Zoom in/out on time axis
-  1-9, 0      — Toggle individual curve visibility
-  A           — Toggle all curves on/off
-  F           — Cycle text size (small / medium / large)
-  S           — Screenshot (saves PNG)
-  Q / ESC     — Quit
+"""Interactive pygame visualizer for the simulator.
 
-Curves (toggle with number keys):
-  1 — Blood Glucose (observed)
-  2 — Carb intake curve
-  3 — Insulin (total)
-  4 — Basal insulin
-  5 — Bolus insulin
-  6 — Insulin Resistance (multiplier; >1 = resistant, <1 = sensitive)
-  7 — Exercise curve
-  8 — BG Delta
-  9 — Hepatic Glucose Output
-  0 — Glucose In
-"""
+Keys 1-9 toggle the CURVES entries below, in order; the rest of the bindings are
+listed under "Visualizer Controls" in README.md."""
 
 import sys
 import os
@@ -83,7 +59,7 @@ COLOR_BG_OBS     = (170, 255, 60)    # Electric lime for CGM reading
 COLOR_CARB       = (255, 150, 20)    # Neon amber for carbs (Tron contrast)
 COLOR_INSULIN    = (40, 210, 255)    # Neon cyan for insulin
 COLOR_IS         = (200, 100, 255)   # Neon magenta for IS
-COLOR_EXERCISE   = (255, 55, 130)    # Hot pink for exercise
+COLOR_CONSISTENCY = (255, 55, 130)   # Hot pink for the lifestyle-consistency bar
 COLOR_DELTA      = (90, 255, 220)    # Aqua-lime for delta
 
 # BG zone colors (for background shading)
@@ -131,10 +107,9 @@ CURVES = [
     {'key': 'basal_insulin','name': 'Basal (logged)',    'color': (120, 235, 255), 'unit': 'U/step','y_min': 0, 'y_max': 0.5, 'toggle_key': pygame.K_4, 'shadow': 'basal_insulin_true'},
     {'key': 'bolus_insulin','name': 'Bolus (logged)',    'color': (60, 180, 255),  'unit': 'U/step','y_min': 0, 'y_max': 2,   'toggle_key': pygame.K_5, 'shadow': 'bolus_insulin_true'},
     {'key': 'insulin_resistance','name': 'Insulin Resistance','color': COLOR_IS,'unit': '×',  'y_min': 0,   'y_max': 3,   'toggle_key': pygame.K_6},
-    {'key': 'total_exercise','name': 'Exercise',        'color': COLOR_EXERCISE,'unit': 'g/step','y_min': 0,   'y_max': 10,   'toggle_key': pygame.K_7},
-    {'key': 'bg_delta',    'name': 'BG Delta',          'color': COLOR_DELTA,   'unit': 'mg/dL', 'y_min': -30, 'y_max': 45,  'toggle_key': pygame.K_8},
-    {'key': 'hgo',          'name': 'Hepatic Output',   'color': (230, 240, 70), 'unit': 'g/step', 'y_min': 0, 'y_max': 1.5, 'toggle_key': pygame.K_9},
-    {'key': 'glucose_in', 'name': 'Glucose In',         'color': (255, 90, 90), 'unit': 'g/step', 'y_min': -10, 'y_max': 20, 'toggle_key': pygame.K_0},
+    {'key': 'bg_delta',    'name': 'BG Delta',          'color': COLOR_DELTA,   'unit': 'mg/dL', 'y_min': -30, 'y_max': 45,  'toggle_key': pygame.K_7},
+    {'key': 'hgo',          'name': 'Hepatic Output',   'color': (230, 240, 70), 'unit': 'g/step', 'y_min': 0, 'y_max': 1.5, 'toggle_key': pygame.K_8},
+    {'key': 'glucose_in', 'name': 'Glucose In',         'color': (255, 90, 90), 'unit': 'g/step', 'y_min': -10, 'y_max': 20, 'toggle_key': pygame.K_9},
 ]
 
 
@@ -362,7 +337,7 @@ class Visualizer:
             ("Diet Discipline", p.dietary_discipline, COLOR_CARB),
             ("Attentiveness",   p.attentiveness,      COLOR_INSULIN),
             ("Dose Competence", p.dosing_competence,   COLOR_IS),
-            ("Consistency",     p.lifestyle_consistency, COLOR_EXERCISE),
+            ("Consistency",     p.lifestyle_consistency, COLOR_CONSISTENCY),
         ]
         bar_w = self._s(100)
         bar_h = self._s(10)
@@ -383,11 +358,11 @@ class Visualizer:
         summary = self.sim.get_patient_summary()
         param_keys = ['is_base', 'icr', 'correction_factor', 'basal_dose',
                       'basal_duration', 'cgm_check_interval', 'patience_time',
-                      'exercise_prob', 'basal_miss_prob', 'meal_gi_mean',
+                      'basal_miss_prob', 'meal_gi_mean',
                       'panic_factor']
         param_labels = ['IS Base', 'ICR', 'Correction Factor', 'Basal Dose',
                         'Basal Duration', 'CGM Check Interval', 'Patience Time',
-                        'Exercise Prob', 'Basal Miss Prob', 'Meal GI Mean',
+                        'Basal Miss Prob', 'Meal GI Mean',
                         'Panic Factor']
 
         param_col_x = x + self._s(150)
