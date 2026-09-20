@@ -1,13 +1,8 @@
-"""
-Tests for the normalization_stats.json the cache builder emits for T1DMAI.
+"""Tests for the normalization_stats.json the cache builder emits for T1DMAI.
 
-cache_simulator.py writes, alongside the .b2nd channels + meta.json + DATASET.md,
-a normalization_stats.json holding the 4-channel {mean, std} the downstream
-T1DMAI model consumes: bg_absolute fit in Kovatchev risk space, carb_intake /
-insulin_combined fit in log1p space, pooled over all rows x timesteps during the
-transcode pass. These tests verify the file's schema and that its streaming
-power-sum stats match a direct recompute from the stored .b2nd arrays.
-"""
+It holds the 3-channel {mean, std} the model consumes: bg_absolute in Kovatchev risk
+space, carb_intake / insulin_combined in log1p space, pooled over all rows x timesteps.
+These tests pin its schema and check the stats against a recompute from the .b2nd."""
 
 import json
 import os
@@ -23,11 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cache_simulator as cs  # noqa: E402
 
 
-# Every normalized SIGNAL channel T1DMAI reads — its ``normalization.CHANNEL_NAMES``,
-# whose count is pinned at 4 there. Emitting a subset does not fail loudly at either
-# end: the cache builds, the loader accepts it, and the missing channel simply has no
-# scale until someone notices. That is what this set exists to stop.
-NORM_KEYS = ("bg_absolute", "carb_intake", "insulin_combined", "exercise_equiv")
+# Every normalized SIGNAL channel T1DMAI reads; a subset is accepted silently, unscaled.
+NORM_KEYS = ("bg_absolute", "carb_intake", "insulin_combined")
 
 
 # ---------------------------------------------------------------------------
@@ -76,10 +68,7 @@ def test_finalize_norm_stats_sample_std():
 @pytest.fixture(scope="module")
 def built_cache(tmp_path_factory):
     out = tmp_path_factory.mktemp("caches") / "normcache"
-    # 48 h, not 10: exercise is sparse enough that an 8x10 h window holds no
-    # session at all, and a channel with no events fits std = 0 -- which the
-    # builder now refuses to write and T1DMAI refuses to load. The fixture has to
-    # be big enough to exercise the channel it asserts on.
+    # 48 h, not 10: a sparse channel with no event in the window fits std = 0, refused.
     cs.build_cache(
         out_dir=str(out), pool_size=8, sim_hours=48.0, warmup_hours=5.0,
         n_jobs=1, dataset_md="", baseline_stats=None, seed_salt=13,
@@ -92,7 +81,7 @@ def test_norm_stats_file_schema(built_cache):
     assert os.path.exists(path), "normalization_stats.json must be emitted"
     with open(path) as f:
         stats = json.load(f)
-    assert set(stats.keys()) == set(NORM_KEYS), "exactly the 4 T1DMAI channels"
+    assert set(stats.keys()) == set(NORM_KEYS), "exactly the 3 T1DMAI channels"
     for name in NORM_KEYS:
         mean, std = stats[name]["mean"], stats[name]["std"]
         assert np.isfinite(mean) and np.isfinite(std)

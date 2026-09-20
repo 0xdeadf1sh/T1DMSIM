@@ -1,105 +1,8 @@
-"""
-cache_simulator.py -- pre-generate a pool of simulator trajectories to disk.
-============================================================================
+"""Pre-generate a pool of post-warmup simulator trajectories to disk.
 
-``T1DMSimulator.generate()`` is a stateful Python step loop; running it inside
-every training DataLoader worker starves a fast GPU. This tool generates a pool
-of ``N`` post-warmup trajectories once, compresses them to disk, and emits a
-full statistical summary (``DATASET.md``) describing the corpus. Downstream
-training then memory-maps the cache and never runs the simulator.
-
-The script is deliberately dependency-light: ``numpy`` for numerics and
-``blosc2`` for the compressed on-disk arrays. It never imports or mutates the
-simulator's internals -- it only drives the public ``generate()`` API.
-
-Layout
-------
-The output directory holds one compressed ``.b2nd`` (blosc2 NDArray) file per
-channel, a raw ``icr.npy``, a ``normalization_stats.json``, and a ``meta.json``
-sentinel::
-
-    <out_dir>/
-        bg_observed.b2nd        (N, T) float32   shuffle + zstd
-        total_carb.b2nd         (N, T) float32   shuffle + zstd
-        total_insulin.b2nd      (N, T) float32   shuffle + zstd
-        insulin_resistance.b2nd (N, T) float32   shuffle + zstd
-        hgo.b2nd                (N, T) float32   shuffle + zstd
-        total_exercise.b2nd     (N, T) float32   shuffle + zstd
-        hour_of_day.b2nd        (N, T) float32   shuffle + zstd
-        day.b2nd                (N, T) int32     shuffle + zstd
-        icr.npy                 (N,)   float32   raw (tiny)
-        normalization_stats.json  4-channel {mean, std} the T1DMAI model consumes
-        meta.json               generation params + aggregate statistics
-
-``normalization_stats.json`` is the ``{bg_absolute, carb_intake,
-insulin_combined, exercise_equiv}: {mean, std}`` contract the downstream T1DMAI
-model reads -- all four of ``T1DMAI/normalization.CHANNEL_NAMES``, which pins its
-count at 4 and refuses a stats file missing one: the bg mean/std are fit in
-Kovatchev risk space, carb/insulin/exercise in log1p space (the same forward
-transforms the model applies before its z-score), pooled over all rows x
-timesteps during the transcode pass. It is written durably before the
-meta.json sentinel so a completed cache always carries valid stats.
-
-``DATASET.md`` (path from ``--dataset-md``, default ``./DATASET.md``) is a
-human-readable render of the same statistics.
-
-Performance
------------
-Single-threaded: each patient calls ``generate()`` exactly ``warmup + keep``
-times; the warmup steps are advanced and discarded, and only the eight cached
-channels (plus the basal/bolus split used for statistics) are pulled out of the
-per-step dict straight into pre-allocated arrays -- avoiding the 21-list build
-that ``generate_hours`` performs.
-
-Multi-threaded: the simulator is pure-Python and GIL-bound, so parallelism is
-via processes (``fork`` on Linux -- the already-imported simulator module is
-inherited, so there is no per-worker re-import). Each worker simulates one row
-and writes it *directly* into a shared per-channel ``.npy`` staging memmap at
-its own row offset; only a tiny per-patient statistics dict is returned over the
-IPC boundary, never the (T,)-length channel arrays. Disjoint-row writes into a
-``MAP_SHARED`` file-backed mapping are safe across processes, and the pool join
-happens-before the transcode read.
-
-After the worker fan-out, a single transcode pass converts each staging channel
-to a compressed ``.b2nd`` (byte-shuffle + zstd), deleting the ``.npy`` as soon
-as its channel finishes so peak disk stays near ``max(raw, compressed)`` rather
-than their sum. Every file and the staging directory are fsync'd before
-``meta.json`` (the sentinel) is written and the directory is atomically renamed
-into place, so neither a process crash nor a power loss can surface a
-sentinel-present, data-truncated cache.
-
-blosc2 parallelizes compression across the blocks *within* a chunk, so transcode
-throughput scales with ``--rows-per-chunk`` (a small chunk is one block and
-transcodes single-threaded); that same value is the random-row read granularity,
-so it trades one-time build speed against per-read decompression waste.
-
-Window validity filter
-----------------------
-Any trajectory whose ``bg_observed`` touches the clamp rails -- a reading
-``>= --rail-high`` or ``<= --rail-low``, both derived from BG_CLAMP_MAX/MIN --
-is discarded and a fresh seed is drawn for that row. This keeps rows pinned flat
-against a clamp out of the training pool. The low rail tracks the dynamics floor,
-not the CGM reporting floor: it must never discard a trajectory merely for
-reaching a severe low, which is a population the pool exists to carry.
-
-Hypo oversampling
------------------
-With ``--hypo-oversample P``, a deterministic fraction ``P`` of rows are
-"hypo-designated": for those rows the seed is re-rolled until the trajectory
-spends at least ``--hypo-min-frac`` of its time below 70 mg/dL (or the attempt
-cap is hit, in which case the hypo-richest attempt is kept). Every row -- hypo
-or not -- still respects the rail filter, and each stored row is one whole,
-physiologically-consistent patient. Rejection sampling is per-row and keyed on
-``(seed_salt, cache_idx, attempt)``, so the pool is fully reproducible and the
-work parallelizes without coordination.
-
-Usage
------
-::
-
-    python cache_simulator.py --out-dir simulator_cache --pool-size 50000
-    python cache_simulator.py --pool-size 20000 --hypo-oversample 0.25 --jobs 30
-"""
+One compressed .b2nd per CHANNEL_NAMES channel, plus icr.npy, NORM_STATS_FILE,
+NORM_STATS_EVENTS_FILE, a meta.json sentinel and a DATASET.md render. A row touching a
+BG rail is re-seeded; --hypo-oversample re-seeds a fixed fraction until hypo-rich."""
 
 from __future__ import annotations
 
@@ -138,7 +41,6 @@ CHANNEL_NAMES = (
     'total_insulin',
     'insulin_resistance',
     'hgo',
-    'total_exercise',
     'hour_of_day',
     'day',
 )
@@ -148,7 +50,6 @@ CHANNEL_DTYPES: dict[str, Any] = {
     'total_insulin': np.float32,
     'insulin_resistance': np.float32,
     'hgo': np.float32,
-    'total_exercise': np.float32,
     'hour_of_day': np.float32,
     'day': np.int32,
 } | {c: np.float32 for c in EVENT_CHANNELS}
@@ -242,26 +143,18 @@ NORM_BG_RISK_SCALE = 2.2211457449985317
 NORM_BG_RISK_POWER = 1.084
 NORM_BG_RISK_OFFSET = 5.540076976170212
 
-# File name of the emitted 4-channel {mean, std} stats the T1DMAI model reads.
+# File name of the emitted 3-channel {mean, std} stats the T1DMAI model reads.
 NORM_STATS_FILE = 'normalization_stats.json'
 
-# Cache channel -> T1DMAI normalization channel name. bg_absolute is fit in
-# Kovatchev risk space, carb_intake / insulin_combined in log1p space (see
-# _norm_forward); the T1DMAI model applies the same forward transform before its
-# z-score, so the fitted mean/std live in those spaces.
-# All four of T1DMAI's normalized SIGNAL channels. Omitting exercise here does
-# not fail loudly: the cache still builds and still loads, and the model simply
-# has no scale for feat 3 until someone notices the key is absent and fits it by
-# hand. Keep this map complete against T1DMAI/normalization.CHANNEL_NAMES.
+# Every signal channel T1DMAI normalizes; _norm_forward gives the space each is fit in.
 NORM_CHANNEL_SOURCES: dict[str, str] = {
     'bg_observed': 'bg_absolute',
     'total_carb': 'carb_intake',
     'total_insulin': 'insulin_combined',
-    'total_exercise': 'exercise_equiv',
 }
-# The events layout's fitted channels: bg plus the four doses, log1p like the curves.
+# The events layout's fitted channels: bg plus the three doses, log1p like the curves.
 NORM_STATS_EVENTS_FILE = 'normalization_stats_events.json'
-NORM_EVENT_DOSES = ('carb_g', 'bolus_u', 'basal_u', 'exercise_min')
+NORM_EVENT_DOSES = ('carb_g', 'bolus_u', 'basal_u')
 # A point dose is far sparser than a curve; this caps its largest value at 12 sigma.
 NORM_EVENT_Z_MAX = 12.0
 
@@ -284,11 +177,9 @@ def _norm_bg_risk(bg: np.ndarray) -> np.ndarray:
 def _norm_forward(cache_name: str, block: np.ndarray) -> np.ndarray:
     """Forward transform for the normalization-stats fit of ``cache_name``.
 
-    ``bg_observed`` -> Kovatchev risk space; ``total_carb`` / ``total_insulin`` /
-    ``total_exercise`` -> ``log1p(max(x, 0))``, mirroring
-    ``T1DMAI/normalization.SPARSE_LOG1P_CHANNELS``. Returns the flattened float64
-    transformed values.
-    """
+    ``bg_observed`` -> Kovatchev risk space; every other channel ->
+    ``log1p(max(x, 0))``, mirroring ``T1DMAI/normalization.SPARSE_LOG1P_CHANNELS``.
+    Returns the flattened float64 transformed values."""
     v = np.asarray(block, dtype=np.float64).reshape(-1)
     if cache_name == 'bg_observed':
         return _norm_bg_risk(v)
@@ -320,13 +211,7 @@ def _finalize_norm_stats(
         std = float(np.sqrt(max(m2, 0.0) / max(n - 1, 1)))
         if name in NORM_EVENT_DOSES:
             std = max(std, (a['max'] - mean) / NORM_EVENT_Z_MAX)
-        # A zero std is not a small number, it is an ABSENT channel: the window
-        # held no event at all, which happens to the sparse channels (exercise
-        # above all) when the pool is small or the kept window short.
-        # T1DMAI/normalization.load_normalization_stats REFUSES such a file --
-        # normalize divides by std + 1e-8 and would scale that channel by ~1e8 --
-        # so writing it produces a pool nothing can train on. Fail here, at the
-        # point of cause, rather than at someone's next training run.
+        # A zero std is an ABSENT channel, and T1DMAI refuses such a stats file.
         if not (std > 0.0):
             raise ValueError(
                 f"normalization channel {name!r} fitted std={std!r} over n={n} "
@@ -435,7 +320,6 @@ def _simulate_patient(
     ins = np.empty(T, np.float32)
     ir = np.empty(T, np.float32)
     hgo = np.empty(T, np.float32)
-    exer = np.empty(T, np.float32)
     hod = np.empty(T, np.float32)
     day = np.empty(T, np.int32)
     basal = np.empty(T, np.float32)   # not cached; only for the basal:bolus split
@@ -451,7 +335,6 @@ def _simulate_patient(
         ins[i] = s['total_insulin']
         ir[i] = s['insulin_resistance']
         hgo[i] = s['hgo']
-        exer[i] = s['total_exercise']
         hod[i] = s['hour_of_day']
         day[i] = s['day']
         basal[i] = s['basal_insulin']
@@ -463,7 +346,6 @@ def _simulate_patient(
         'total_insulin': ins,
         'insulin_resistance': ir,
         'hgo': hgo,
-        'total_exercise': exer,
         'hour_of_day': hod,
         'day': day,
         **events,
@@ -492,8 +374,6 @@ def _simulate_patient(
         'above250': above250,
         'n_meals': _count_crossings(carb, MEAL_CARB_THRESHOLD_G, ref),
         'n_boluses': _count_crossings(bolus, BOLUS_EVENT_THRESHOLD_U, ref),
-        'n_ex_sessions': _count_crossings(exer, 0.0, ref),
-        'ex_active_steps': int((exer > 0.0).sum()),
         # Fraction of time below the configurable hypo cutoff, used only for the
         # oversampling criterion (the class ratios below always use the fixed 70).
         'frac_below_hypo': float((bg_obs < cfg.hypo_threshold).mean()),
@@ -604,7 +484,7 @@ class StatAccumulator:
     _SUM_KEYS = (
         'sum_carb', 'sum_insulin', 'sum_basal', 'sum_bolus', 'sum_bg',
         'below54', 'below70', 'in_range', 'above180', 'above250',
-        'n_meals', 'n_boluses', 'n_ex_sessions', 'ex_active_steps',
+        'n_meals', 'n_boluses',
     )
 
     def __init__(self) -> None:
@@ -686,20 +566,11 @@ def _transcode_to_blosc2(
     partial_dir: str, pool_size: int, n_timesteps: int,
     rows_per_chunk: int, clevel: int, nthreads: int, events: bool = False,
 ) -> tuple[dict[str, dict[str, int]], dict[str, Any], dict[str, dict[str, float]]]:
-    """
-    Convert each staging ``.npy`` to a compressed ``.b2nd`` and delete the source.
+    """Convert each staging ``.npy`` to a compressed ``.b2nd`` and delete the source.
 
-    Returns ``(inventory, bg_dist, norm_acc)``: a per-channel
-    ``{raw_bytes, compressed_bytes}`` inventory; the pooled ``bg_observed``
-    distribution aggregates (histogram, power sums, Kovatchev numerators); and the
-    per-channel ``{sum, sum_sq, n}`` power sums of the T1DMAI forward-transformed
-    bg/carb/insulin/exercise channels (risk space for bg, log1p for the rest) for the
-    ``normalization_stats.json`` fit. All are accumulated block-by-block as each
-    channel is read for compression -- so pooled percentiles / std / skew / LBGI /
-    HBGI and the normalization stats cost no extra I/O and never materialise a
-    whole channel in RAM. Round-trips the first and last row of each channel to
-    catch chunk-edge corruption.
-    """
+    Returns ``(inventory, bg_dist, norm_acc)``: per-channel byte counts, the pooled
+    ``bg_observed`` aggregates, and the power sums of the forward-transformed
+    NORM_CHANNEL_SOURCES channels, accumulated block-by-block during the read."""
     bg_hist = np.zeros(len(BG_HIST_EDGES) - 1, dtype=np.float64)
     bg_dist = {'sum': 0.0, 'sum_sq': 0.0, 'sum_cube': 0.0,
                'sum_rl': 0.0, 'sum_rh': 0.0, 'n': 0}
@@ -946,8 +817,6 @@ def _finalize_report(
             'bolus_frac': total_bolus_u / total_insulin_u if total_insulin_u else 0.0,
             'boluses_total': int(sums['n_boluses']),
             'boluses_per_day': (sums['n_boluses'] / n / days_per_patient) if n else 0.0,
-            'exercise_active_frac': frac(sums['ex_active_steps']),
-            'exercise_sessions_per_patient': sums['n_ex_sessions'] / n if n else 0.0,
         },
         'glycemia': {
             'bg_mean': acc.sums['sum_bg'] / total_steps if total_steps else 0.0,
@@ -1099,7 +968,6 @@ def _render_dataset_md(report: dict[str, Any]) -> str:
     lines.append(f'| **Insulin delivered** | **{cons["insulin_total_u"]:,.0f} U** (≈ {_fmt_vol_l(cons["insulin_total_litres_u100"])} of U-100) | integral of delivery ({cons["insulin_per_patient_u"]:.1f} U/patient, {cons["insulin_per_day_u"]:.1f} U/day) |')
     lines.append(f'| └ basal : bolus split | {pct(cons["basal_frac"])} : {pct(cons["bolus_frac"])} | exact (separate channels summed) |')
     lines.append(f'| Boluses | {cons["boluses_total"]:,} ({cons["boluses_per_day"]:.2f}/day) | threshold-crossings (merges overlapping PK tails) |')
-    lines.append(f'| Exercise | active {pct(cons["exercise_active_frac"])} of time; {cons["exercise_sessions_per_patient"]:.2f} sessions/patient | exact |')
     lines.append(f'| BG mean | {gly["bg_mean"]:.1f} mg/dL | exact |')
     lines.append(f'| Time-in-range 70–180 | {pct(gly["frac_in_range"])} | exact |')
     lines.append(f'| Time <70 / <54 (hypo) | {pct(gly["frac_below70"])} / {pct(gly["frac_below54"])} | exact |')
@@ -1328,10 +1196,7 @@ def build_cache(
             'baseline_stats': baseline['source'] if baseline else None,
         }
         report = _finalize_report(acc, params, inventory, icr_bytes, bg_dist, baseline)
-        # normalization_stats.json (the 4-channel {mean, std} the T1DMAI model
-        # consumes) is written BEFORE the meta.json sentinel and fsync'd inside
-        # the same atomic flow, so the sentinel never surfaces a cache missing
-        # valid stats.
+        # The stats files land before the meta.json sentinel, fsync'd in the same flow.
         curves_acc, events_acc = _split_norm_acc(norm_acc)
         for fname, acc_part in ((NORM_STATS_FILE, curves_acc),
                                 (NORM_STATS_EVENTS_FILE, events_acc)):
