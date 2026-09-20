@@ -55,7 +55,7 @@ def test_event_totals_track_the_curve_totals():
                               ('basal_u', ('basal_peak_min', 'basal_dur_h'))):
         for d in descriptors:
             assert np.array_equal(data[d] > 0, data[dose] > 0)
-    # A guessed GI clips at 0, so carb_gi is positive on all but a few carb steps.
+    # A guessed GI clips at 0, so carb_gi is positive on every carb step but the clipped ones.
     carb, gi = data['carb_g'] > 0, data['carb_gi'] > 0
     assert not (gi & ~carb).any()
-    assert gi.sum() > 0.95 * carb.sum()
+    assert (carb & ~gi).sum() <= 1
