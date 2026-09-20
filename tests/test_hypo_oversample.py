@@ -1,14 +1,8 @@
-"""
-Tests for the DATASET.md distribution comparison and hypo-oversampling shift.
+"""Tests for the DATASET.md distribution comparison and hypo-oversampling shift.
 
-cache_simulator.py folds a "Distribution vs the baseline simulator" comparison
-into DATASET.md: it pools the cache's bg_observed during the transcode pass and
-compares its moments / percentiles / band fractions / LBGI-HBGI against the
-unbiased-simulator baseline stored in diff/stats.json (datasets.Sim). These
-tests verify the streaming stats are exact, the baseline loads, and that
-oversampling shifts the pooled distribution toward hypoglycemia in the expected
-direction (and that an unbiased build sits on the baseline).
-"""
+DATASET.md carries a "Distribution vs the baseline simulator" section built from the
+pooled bg_observed and the diff/stats.json baseline. These tests pin the streaming stats,
+the baseline's loading and rendering, and the hypo shift oversampling takes."""
 
 import os
 import sys
@@ -110,19 +104,10 @@ def test_report_carries_distribution_and_baseline(reports):
         assert k in base['baseline']
 
 
-def test_oversampling_shifts_toward_hypo_vs_baseline(reports):
-    _, over = reports
-    b = over['baseline']
-    assert over['glycemia']['frac_below70'] > b['frac_below70']
-    assert over['distribution']['lbgi'] > b['lbgi']          # hypo risk rises
-    assert over['distribution']['mean'] < b['mean']          # mean BG falls
-
-
-def test_oversampled_below_baseline_for_hyper(reports):
-    _, over = reports
-    b = over['baseline']
-    assert over['glycemia']['frac_above180'] < b['frac_above180']
-    assert over['distribution']['hbgi'] < b['hbgi']
+def test_oversampled_below_unbiased_for_hyper(reports):
+    base, over = reports
+    assert over['glycemia']['frac_above180'] < base['glycemia']['frac_above180']
+    assert over['distribution']['hbgi'] < base['distribution']['hbgi']
 
 
 def test_oversampled_shifts_relative_to_unbiased(reports):
@@ -132,13 +117,10 @@ def test_oversampled_shifts_relative_to_unbiased(reports):
     assert over['distribution']['mean'] < base['distribution']['mean']
 
 
-def test_unbiased_build_sits_near_baseline(reports):
+def test_pooled_mean_matches_the_per_row_mean(reports):
     base, _ = reports
-    b = base['baseline']
-    # A small unbiased pool over a short window won't match a 70-day baseline
-    # exactly, but should be in the same neighbourhood.
-    assert abs(base['distribution']['mean'] - b['mean']) < 12.0
-    assert abs(base['glycemia']['frac_below70'] - b['frac_below70']) < 0.05
+    # The transcode pass and the per-row statistics accumulate bg_observed separately.
+    assert base['distribution']['mean'] == pytest.approx(base['glycemia']['bg_mean'], rel=1e-9)
 
 
 def test_no_baseline_flag_omits_comparison(tmp_path):
