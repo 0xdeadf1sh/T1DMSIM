@@ -50,7 +50,7 @@ SLEEP_DURATION_SIGMA_HOURS = 2.0  # [HIVAR 2x] 1.0→2.0 — sleep-length scatte
 
 # Meals
 MEALS_BASE = 4  # [GE-FIX] 3→4 — added a mid-afternoon eating occasion (see MEAL_TIME_OFFSETS_HOURS) to fill the lunch->dinner gap that left the afternoon BG sagging ~15 mg/dL below Ohio; heavy meal-timing jitter keeps it aperiodic (real forcing, not a deterministic daily bump)
-MEALS_EXTRA_LAMBDA = 3.5  # Extra meals Poisson lambda, scaled by (1 - s1). High value provides sub-day stochastic shocks that decorrelate the BG trace at mid-range lags.
+MEALS_EXTRA_LAMBDA = 4.6 # Extra meals Poisson lambda, scaled by (1 - s1)
 MEAL_TIME_OFFSETS_HOURS = [0.5, 5.0, 8.5, 12.0]  # Breakfast, lunch, afternoon snack, dinner (offset from wake); the wake+8.5 (~16:00) slot fills the old lunch->dinner gap.
                                              # Dinner at wake+12 = 19:30 for the 7:30 wake
                                              # population — the physiologic norm. Earlier
@@ -77,14 +77,14 @@ MEAL_CARB_DISCIPLINE_SCALE = 0.7  # How much s1 reduces carb intake
 # ACF-relevant meal shocks are untouched.
 MEAL_APPETITE_LOG_SIGMA = 0.45  # [OHIO-CARB] between-patient appetite spread (lognormal sigma) — tuned so pooled carbs/day sd ~90 g matches Ohio
 MEAL_APPETITE_CLIP = (0.45, 2.05)  # [OHIO-CARB] clip the lognormal tails (smallest/largest eaters ~90 / ~370+ g/day)
-MEAL_CARB_SCALE = 1.08  # [OHIO-CARB] global fine-tune on all meal carb amounts to land the population mean on Ohio (~194 g/day)
-SNACK_CARB_MEAN = 20.0
+MEAL_CARB_SCALE = 1.0  # global trim on all meal carb amounts
+SNACK_CARB_MEAN = 19.0
 SNACK_CARB_SIGMA = 20.0  # [HIVAR 2x] 10.0→20.0 — unused by generation
 
 # Every carb curve is the SPEC/invariants.md §5 GI gamma (gi_gamma_params).
 # Per-patient mean meal GI falls with s1 from MAX to MAX - SPAN; each meal draws around it.
 MEAL_GI_MEAN_MAX = 70.0
-MEAL_GI_DISCIPLINE_SPAN = 20.0
+MEAL_GI_DISCIPLINE_SPAN = 11.0
 MEAL_GI_SIGMA = 12.0
 RESCUE_CARB_GI = 100.0  # glucose tablets / juice
 
@@ -206,12 +206,7 @@ BOLUS_DIA_DOSE_SCALE = 0.6  # hours per unit of sqrt(dose) - sqrt(5)
 BOLUS_DIA_MIN_HOURS = 2.0
 BOLUS_DIA_MAX_HOURS = 7.5
 BOLUS_THETA_DOSE_SLOPE = 0.06  # theta multiplier per unit of sqrt(dose) - sqrt(5)
-ICR_MEAN = 8.0   # Insulin-to-carb ratio (1 unit per X grams). Lowered from 11.0 → 8.0 to
-                 # raise TDD into the clinical 0.5-0.7 U/kg/day band. At 11 the sim ran at
-                 # 0.45 U/kg/day with a 55/45 basal:bolus split; 8 brings it to ~0.65 U/kg
-                 # with a ~50/50 split that matches AZT1D's pump-log totals. ICR also enters
-                 # `ideal_basal = HGO*24*is/ICR`, so lowering it raises both bolus and basal
-                 # symmetrically while preserving the HGO-balances-basal invariant.
+ICR_MEAN = 5.6   # g per U; also sizes basal through ideal_basal = HGO*24*is/ICR
 ICR_SIGMA = 2.0
 BOLUS_TIMING_COMPETENT_MEAN = -15.0 # Minutes before meal (negative = before). Deepened from -5
                                      # to -15 so the bolus is already active when breakfast
@@ -236,7 +231,7 @@ BASAL_DOSE_INTERVAL_HOURS = 24.0  # Both analogues are injected once daily.
 # Carb counting error — relative SD around the true carb amount. A high
 # sigma is the dominant source of meal-bolus crashes that push TBR1 well
 # above the real-cohort band, so this is kept modest.
-CARB_COUNT_ERROR_SIGMA_BASE = 0.60  # [HIVAR] 0.30→0.60 — wider carb-count error (drives more post-meal excursions both ways).
+CARB_COUNT_ERROR_SIGMA_BASE = 0.23  # relative carb-count error before the skill shape
 
 # Asymmetric carb-count bias. Real T1D patients err on the side of under-bolusing
 # because they fear hypos more than mild post-meal hypers (the classic "round
@@ -256,23 +251,20 @@ CARB_LOG_SEED_STREAM = 1000003  # keyed with the sim seed: a guess never draws f
 
 # Insulin stacking
 CGM_CHECK_INTERVAL_ATTENTIVE = 20  # Minutes between checks for attentive patient
-CGM_CHECK_INTERVAL_INATTENTIVE = 240  # Minutes for inattentive patient
-PATIENCE_TIME_COMPETENT = 120  # Minutes before re-correcting (competent). IOB-aware correction
-                               # sizing keeps rebound bounded; real T1D pump users typically correct
-                               # every ~2 h when high. Longer patience drops correction frequency
-                               # well below the real-cohort rate.
-PATIENCE_TIME_INCOMPETENT = 60  # Minutes before re-correcting (incompetent)
+CGM_CHECK_INTERVAL_INATTENTIVE = 65  # Minutes for inattentive patient
+PATIENCE_TIME_COMPETENT = 240 # Minutes before re-correcting (competent)
+PATIENCE_TIME_INCOMPETENT = 80 # Minutes before re-correcting (incompetent)
 CORRECTION_FACTOR_MEAN = 40.0  # mg/dL drop per unit of insulin
 CORRECTION_FACTOR_SIGMA = 20.0  # [HIVAR 2x] 10.0→20.0 — correction-factor scatter
 BG_TARGET = 120.0  # Target BG for corrections. Aims near the real-cohort median (155–157) — corrections targeting lower routinely overshoot into hypo because absorbed insulin keeps acting after BG arrives at target. Sits well above the ATTD ideal (~110) — sim correction
                    # kinetics + delivery lag tend to overshoot, so a higher target keeps median BG
                    # near the real OhioT1DM ~157 and TBR1 near real's ~3% rather than runaway hypo.
-BG_HIGH_THRESHOLD = 175.0  # Threshold to trigger correction. Paired with `BG_TARGET=158`, corrections fire moderately above target.
+BG_HIGH_THRESHOLD = 200.0 # mg/dL, threshold to trigger a correction
 BG_LOW_THRESHOLD = 40.0  # Floor of the hypo band; the acting trigger is the per-patient PatientProfile.hypo_threshold below.
 # [CF] Per-patient "what I treat as low", centred on HYPO_THRESHOLD_MEDIAN and
 # spread across the skill range: attentive, competent patients act earlier (higher
 # BG). This one value drives the rescue AND blocks every bolus beneath it.
-HYPO_THRESHOLD_MEDIAN = 60.0      # threshold of a median-skill patient (mg/dL)
+HYPO_THRESHOLD_MEDIAN = 68.0    # threshold of a median-skill patient (mg/dL)
 HYPO_THRESHOLD_SKILL_SPAN = 10.0  # mg/dL deviation at each end of the skill range, so the population spans MEDIAN +/- this
 HYPO_THRESHOLD_SKILL_MID = 0.5    # population-median skill_avg; the gain is applied piecewise about it because SKILL_MIN/MAX are NOT symmetric around it (0.15 vs 0.98), so one linear gain cannot hit +/-SPAN at both ends and hold the median
 
@@ -287,17 +279,18 @@ HYPO_THRESHOLD_SKILL_MID = 0.5    # population-median skill_avg; the gain is app
 # cautious patient who treats at 78 still take their meal bolus, and a stoic one
 # who treats at 63 skip a dose they would in fact have given. One definition of
 # "low" per patient, governing the rescue and every bolus alike.
-BOLUS_REDUCE_MARGIN = 30.0         # Band above hypo_threshold in which the bolus is reduced rather than skipped (was the gap between the old global 75 and 105).
+BOLUS_REDUCE_MARGIN = 15.0  # mg/dL band above hypo_threshold where a bolus is reduced
 BOLUS_REDUCE_FACTOR_BASE = 0.3     # Reduction floor — multiplied by (1 + 0.3*dosing_competence). When the BG-aware gate engages near borderline-low, the bolus is halved (or more) rather than scaled down marginally.
 BOLUS_BG_CHECK_BASE_PROB = 0.95    # Probability a patient checks CGM before bolusing; +0.05*attentiveness. Essentially every bolus is gated.
-MEAL_BOLUS_SKIP_BASE_PROB = 0.08   # 0.25->0.08 — the high skip rate was a pre-OU ACF trick (un-bolused meals as decorrelating shocks). The Ornstein-Uhlenbeck glucose-effectiveness equilibrium now carries the ACF, so the heavy skipping is vestigial: restoring most meal bolusing lifts the (too-low) bolus share and sharpens the diurnal amplitude toward Ohio WITHOUT raising the 8h ACF (verified: acf8h ~0.02 either way). Still weighted by (1 - s3) for realistic occasional misses.
-AFTERNOON_SNACK_SLOT = 2            # [GE-FIX] index into MEAL_TIME_OFFSETS_HOURS of the mid-afternoon eating occasion
-AFTERNOON_SNACK_BOLUS_SKIP_BASE = 0.15  # 0.55->0.15 — likewise vestigial now the OU carries the ACF/afternoon shape; a modest residual keeps some real grazing un-bolused. Weighted by (1 - 0.5*s3).
+MEAL_BOLUS_SKIP_BASE_PROB = 0.15   # main meals; x (1 - s3)
+SNACK_BOLUS_SKIP_BASE = 0.1  # meals beyond MEALS_BASE; x (1 - 0.5 * s3)
+AFTERNOON_SNACK_SLOT = 2            # index into MEAL_TIME_OFFSETS_HOURS of the mid-afternoon meal
+AFTERNOON_SNACK_BOLUS_SKIP_BASE = 0.45  # x (1 - 0.5 * s3)
 
 # Hypo correction
 # One rescue sized to the whole projected deficit, so a deep low is not treated in small, frequent doses.
-HYPO_RESCUE_TARGET_MARGIN = 40.0  # mg/dL above the patient's threshold a rescue aims for
-HYPO_RESCUE_MIN_GRAMS = 20.0  # smallest rescue, g
+HYPO_RESCUE_TARGET_MARGIN = 32.0 # mg/dL above the patient's threshold a rescue aims for
+HYPO_RESCUE_MIN_GRAMS = 19.0 # smallest rescue, g
 HYPO_RESCUE_DEFICIT_GAIN = 1.0  # grams per gram needed to close the deficit at BG_SCALE_FACTOR
 HYPO_RESCUE_PANIC_GAIN = 0.5  # extra gain per unit panic_factor
 HYPO_RESCUE_IOB_WEIGHT = 0.5  # share of the bolus insulin still acting (x correction_factor) the projection subtracts
@@ -306,8 +299,8 @@ HYPO_DETECTION_AWAKE_MINUTES = 5.0  # Detection delay awake
 HYPO_DETECTION_ASLEEP_LAMBDA = 30.0  # Exponential mean for detection delay asleep (severe hypo bypasses this)
 
 # Exercise
-EXERCISE_PROBABILITY_BASE = 0.3  # Base daily probability
-EXERCISE_SKILL_BONUS = 0.4  # Added probability from s4
+EXERCISE_PROBABILITY_BASE = 0.0  # Base daily probability
+EXERCISE_SKILL_BONUS = 0.0  # Added probability from s4
 EXERCISE_TIME_MEAN_OFFSET_HOURS = 11.0  # Typical time: wake + 11h. For the 7:30 wake population this lands the
                                         # average session around 18:30 (after-work / pre-dinner). Earlier values
                                         # (9.0 → ~16:30) clustered with the old 16:30 dinner; with dinner now at
@@ -367,24 +360,11 @@ DAWN_HGO_SIGMA_HOURS = 2.5           # Gaussian width. Narrowed back from 3.5 �
                                      # midnight-to-6am overnight rise that Ohio and Shanghai
                                      # both show. Per-patient amplitude noise is unchanged
                                      # so individual variability is preserved.
-DAWN_HGO_AMPLITUDE_MEAN = 6.0        # [GE-FIX] 8.5→6.0 — trimmed so the morning BG peak (~186 like Ohio, was ~193) doesn't overshoot and inflate the daily amplitude. Mean peak HGO surge in g/hr (additive). 9 → 11 → 8.5:
-                                     # to drive the overnight BG rise that real cohorts show
-                                     # (Ohio: +24 mg/dL from midnight to 6am; sim used to be
-                                     # −33 over the same window). Combined with the wider
-                                     # sigma and earlier peak, the daily HGO integral grows
-                                     # from ~40 to ~96 g/day. Compensated by smaller meals
-                                     # (MEAL_CARB_MEANS trimmed) so net daily glucose budget
-                                     # is roughly preserved.
+DAWN_HGO_AMPLITUDE_MEAN = 2.5        # g/hr, mean peak of the dawn HGO surge (additive)
 DAWN_HGO_AMPLITUDE_SIGMA = 4.0  # [HIVAR 2x] 2.0→4.0 — dawn-surge spread
 NIGHT_HGO_DIP_HOUR = 2.0             # Hour of deep-sleep HGO trough
 NIGHT_HGO_DIP_SIGMA_HOURS = 2.5      # Narrower so it ends before dawn surge starts
-NIGHT_HGO_DIP_AMPLITUDE_MEAN = 3.5   # [DIURNAL] 0.3 -> 3.5. Mean deep-sleep HGO reduction in g/hr. A
-                                     # strong overnight HGO trough (deep sleep + fasting genuinely
-                                     # suppress hepatic output) is what pulls the overnight window BELOW
-                                     # the daytime, giving Ohio's real day>night diurnal — the small 0.3
-                                     # left the sim inverted (night>day) under the delayed-HGO dinner
-                                     # rebound. The larger dip only mildly raises TBR (2.6->2.8) here
-                                     # because the GE floor + basal feedback keep the overnight lows bounded.
+NIGHT_HGO_DIP_AMPLITUDE_MEAN = 2.75  # g/hr, mean deep-sleep HGO reduction
 NIGHT_HGO_DIP_AMPLITUDE_SIGMA = 0.5  # [HIVAR 2x] 0.25→0.5 — night-dip spread
 # Daily-integrated contribution (Gaussian: A * sigma * √(2π)):
 #   dawn ≈ 9.0 * 1.8 * √(2π) ≈ 40.6 g/day extra
@@ -430,7 +410,7 @@ POSTPRANDIAL_IR_PENALTY_HALF = 1.5  # g/step active carb at half-max penalty
 # Injection site quality (lipohypertrophy) — per-dose multiplier on the
 # delivered insulin. Sigma scales inversely with lifestyle_consistency (poor
 # rotation discipline → more variance and occasional poor sites).
-SITE_QUALITY_SIGMA_BASE = 0.2  # [HIVAR 2x] 0.1→0.2 — per-dose absorption scatter
+SITE_QUALITY_SIGMA_BASE = 0.13  # per-dose absorption scatter
 SITE_QUALITY_MIN = 0.35  # [HIVAR 2x] 0.5→0.35 — malabsorption floor
 SITE_QUALITY_MAX = 1.65  # [HIVAR 2x] 1.4→1.65 — absorption-surge ceiling
 
@@ -453,7 +433,7 @@ CARB_ABSORPTION_NOISE_SIGMA = 0.0  # [MINNOISE] step-to-step carb-absorption noi
 INSULIN_ABSORPTION_NOISE_SIGMA = 0.0  # [MINNOISE] per-step insulin-absorption noise removed — basal/bolus curves were sawtoothing
 
 # BG computation
-BG_SCALE_FACTOR = 3.5  # [GE-FIX] 1.5→3.5 — restored toward the pre-DAMP scale now that glucose effectiveness (below) supplies the in-band restoring force. The prior 1.5 damped every flux term including the patient's own correction insulin, slowing the correction loop and lengthening the BG memory (long-lag ACF). With Sg bounding excursions, alpha can carry realistic 5-min delta scale and faster correction dynamics again.
+BG_SCALE_FACTOR = 3.65  # mg/dL per net gram of flux; co-tuned with GE_RATE
 BG_CLAMP_MIN = 1.0  # [CF] 40→10 — the 40 floor was the real CGM device floor, but a device that stops REPORTING at 40 does not stop the patient falling. Pinning the dynamics there taught every downstream model that a descent tapers out near 40 and that a dangerous low is unreachable. 10 mg/dL is below survivable, so it never binds physiologically; it exists only to keep the Kovatchev log transform defined (f is -inf at 0, NaN below 1). Risk space is now asymmetric, f(10) = -6.82 vs f(400) = +3.16, which correctly prices a deep low above a high.
 BG_CLAMP_MAX = 400.0  # [HIVAR] 500→400 — match real CGM device ceiling (Ohio/AZT1D max = 400).
 BG_INITIAL_MEAN = 120.0
@@ -473,7 +453,7 @@ SOFT_APPROACH_FRACTION = 0.15  # [DAMP] 0.3→0.15 — stronger delta-damping as
 RENAL_THRESHOLD = 250.0  # Kidneys start excreting glucose above this
 RENAL_CLEARANCE_RATE = 0.015  # [DAMP] 0.005→0.015 — arrest hyper excursions faster (shorter/shallower highs).
 COUNTER_REGULATORY_THRESHOLD = 50.0  # Body releases glucagon below this
-COUNTER_REGULATORY_RATE = 1.5  # [DAMP] 0.8→1.5 — arrest hypo excursions faster.
+COUNTER_REGULATORY_RATE = 2.2 # mg/dL per step at BG 0, linear from the threshold
 SEVERE_HYPO_THRESHOLD = 25.0  # Below this, glucagon dump kicks in
 SEVERE_HYPO_GLUCAGON_RATE = 2.0  # Extra mg/dL per step at severity=1.0
 
@@ -505,11 +485,11 @@ SEVERE_HYPO_GLUCAGON_RATE = 2.0  # Extra mg/dL per step at severity=1.0
 # Sg pull *upward* in a low (aiding, never opposing, the severe-hypo rescue) and
 # simultaneously anchors the pooled mean/low-tail onto the real cohorts. See
 # ge_day_weight for the diurnal lift and the OU update in generate().
-GE_RATE = 0.015            # [CF] 0.060→0.015 — the spring was installed to pull acf(8h) down, but E's own 3h OU timescale carries that: two independent measurements (24 x 30 d and 64 x 30 d) put acf(8h) at +0.03..0.05 before and +0.05..0.06 after, so the spring was never what held it near zero — E's own timescale is. What the spring cost was causality. Time constant 1/0.060 = 83 min high-passes any input slower than itself; insulin acts over 3-5 h, so against a Sg=0 reference of -31.1 mg/dL a 2 U bolus retained only ~20% of its 240-min effect (-6.3). At 0.015 it retains ~87% (-27.0). Price paid, same protocol: acf(2h) 0.49 -> 0.55 — note it was ALREADY on Ohio's 0.483 and moves past it toward Shanghai's 0.606, so the ACF is a cost here, not a justification — acf(24h) 0.09 -> 0.16, and time<55 0.65% -> 1.53% mean / 2.42% -> 4.05% worst patient (invariant: mean<=2%, max<=6%).
-GE_EQ_ANCHOR_MEAN = 138.0  # [GE-OU] population-mean equilibrium anchor (co-tuned with GE_EQ_SIGMA / GE_EQ_FLOOR to land the pooled mean ~162 on Ohio; with a large sigma the floor-clipping largely sets the mean, so the anchor is a fine trim)
+GE_RATE = 0.068            # per step; 74 min time constant, sets the 1-4 h BG autocorrelation
+GE_EQ_ANCHOR_MEAN = 109.0# mg/dL, population-mean equilibrium anchor
 GE_EQ_ANCHOR_SIGMA = 15.0  # [GE-OU][HET] between-patient spread of the anchor (per-patient mean heterogeneity). Raised 12->15 to widen the too-narrow between-patient mean-BG spread (sim was the narrowest of the four cohorts, ~13.6 vs Ohio/AZT1D ~16). The anchor sigma alone SATURATES near ~14 mg/dL sd because GE_EQ_FLOOR compresses low-anchor patients upward; the remaining spread comes from the IR coupling below (high-side, floor-immune).
 GE_ANCHOR_IR_COUPLING = 30.0  # [GE-OU][HET] how much a patient's insulin resistance lifts its equilibrium anchor (mg/dL per unit ir-1). Raised 12->30 (with IR_LOGNORMAL_SIGMA 0.16->0.26) so the between-patient mean spread is carried physiologically by the resistance axis — resistant patients run higher — rather than by low-anchor patients the floor would both compress and crash into hypo.
-GE_EQ_SIGMA = 95.0                # [GE-OU][OHIO-CARB][DAWN] stationary std of the equilibrium's APERIODIC wandering. Was 105; lowered to 95 when the structured dawn rhythm (GE_EQ_DAWN_AMPLITUDE) took over part of the equilibrium's variance — the point of the dawn work is to trade opaque aperiodic wander for day-to-day-consistent, learnable variance while holding the pooled BG spread (std ~61) on Ohio. Now scaled PER PATIENT by ge_sigma_mult (below) so patients differ in within-patient variability.
+GE_EQ_SIGMA = 48.0 # mg/dL, stationary std of the equilibrium's wander, x ge_sigma_mult
 # [HET] Per-patient multiplier on GE_EQ_SIGMA (lognormal), so different virtual
 # patients wander with different amplitudes. Without it every patient shared the
 # one global GE_EQ_SIGMA, making the between-patient spread of WITHIN-patient
@@ -517,7 +497,7 @@ GE_EQ_SIGMA = 95.0                # [GE-OU][OHIO-CARB][DAWN] stationary std of t
 # the mean within-variance, so GE_EQ_SIGMA base is co-trimmed to hold pooled std.
 GE_SIGMA_REL_SIGMA = 0.16  # lognormal sigma of the per-patient GE_EQ_SIGMA multiplier. Tamed 0.25->0.22->0.16: the wider IR axis (for the mean spread) already stretches insulin sensitivity, so a large wander multiplier on top re-deepens rare over-bolus crashes; at 0.16 the between-patient within-variability spread still lands in the real range (wstd sd ~7.8, Ohio 7.2) while the 300x70d severe-hypo tail is no worse than baseline (>2h=0 vs baseline 1).
 GE_SIGMA_MULT_CLIP = (0.68, 1.38)  # clip the multiplier's tails
-GE_EQ_TAU_HOURS = 3.0      # [GE-OU][TEXTURE] OU timescale. 2.0 -> 3.0: a slightly longer correlation time smooths the equilibrium's step-to-step wander, cutting the excess signal complexity / hyper-episode fragmentation (SampEn ~1.07 -> ~0.9, hyper/day 3.0 -> 2.8 toward the real cohorts) AND raising the mid-lag autocorrelation (2h/4h) toward Ohio, which the too-short 2h timescale left below the real values. Still << 8h, so the 8h ACF stays ~0 (no long-lag memory).
+GE_EQ_TAU_HOURS = 2.0      # OU timescale of the equilibrium
 GE_EQ_DAY_BOOST = 10.0     # [GE-OU] legacy flat daytime lift — SUPERSEDED by the dawn-phenomenon profile below (kept as a constant for backward-compat); the OU step now uses ge_diurnal_profile instead.
 # [DAWN] Structured dawn-phenomenon rhythm on the OU equilibrium. Replaces the flat
 # day boost with a per-patient daily profile (peaks post-dawn), tied to each patient's
@@ -526,8 +506,8 @@ GE_EQ_DAY_BOOST = 10.0     # [GE-OU] legacy flat daytime lift — SUPERSEDED by 
 # behaviour->BG model (a real dawn rise it can predict), which pure OU noise is not.
 # Co-tuned DOWN against GE_EQ_SIGMA so total spread stays on Ohio while the day-to-day-
 # consistent (periodic) share of the variance rises -> higher acf24h and diurnal amplitude.
-GE_EQ_DAWN_AMPLITUDE_MEAN = 35.0   # [DAWN] population-mean amplitude of the equilibrium's daily rhythm (mg/dL); per-patient value scales with the dawn trait
-GE_DAWN_PEAK_HOUR = 8.0            # [DAWN] hour of the equilibrium's daily peak (Ohio's diurnal peak is h8 / post-waking cortisol rise)
+GE_EQ_DAWN_AMPLITUDE_MEAN = 18.0   # mg/dL, mean daily-rhythm amplitude; scales with the dawn trait
+GE_DAWN_PEAK_HOUR = 9.0            # hour of the equilibrium's daily peak
 GE_DAWN_WIDTH_HOURS = 5.5          # [DAWN] Gaussian width of the daily profile — broad, so daytime stays elevated and only the small hours dip
 GE_DAY_START_HOUR = 7.0    # setpoint ramps up around wake
 GE_DAY_END_HOUR = 22.0     # ramps back down in the late evening
@@ -535,7 +515,7 @@ GE_DAY_RAMP_HOURS = 3.0    # smootherstep ramp width for the day/night setpoint 
 GE_REL_SIGMA = 0.30        # per-patient lognormal spread of Sg around GE_RATE (~2x inter-individual range)
 GE_RATE_MIN = 0.004        # floor so no patient is a pure (undamped) integrator
 GE_RATE_MAX = 0.150        # [GE-OU] raised so the strong per-patient Sg (lognormal around GE_RATE) is not clipped
-GE_EQ_FLOOR = 64.0         # [GE-OU][OHIO-CARB][DIURNAL] floor on the wandering equilibrium, kept above the severe-hypo threshold (SEVERE_HYPO_THRESHOLD=55) so the Sg pull stays upward across a severe low (aids, never opposes, the rescue). Journey 75->60 (OU/carb co-tune) then 60->64 (diurnal fix): the strengthened deep-sleep HGO dip that gives the real day>night shape also removes overnight glucose, so a slightly higher floor lifts the low tail back onto Ohio's mean AND strengthens the overnight rescue pull (TBR 3.3->3.1), while severe episodes stay bounded (>2h = 0).
+GE_EQ_FLOOR = 40.0  # mg/dL; above SEVERE_HYPO_THRESHOLD so the pull lifts a severe low
 
 # CGM noise
 # CGM interstitial lag. The sensor sits in interstitial fluid, which trails
@@ -556,7 +536,7 @@ GE_EQ_FLOOR = 64.0         # [GE-OU][OHIO-CARB][DIURNAL] floor on the wandering 
 CGM_LAG_MEAN_MINUTES = 8.0    # population mean; below the raw physiological 15 because firmware compensates
 CGM_LAG_SIGMA_MINUTES = 4.0   # between-patient spread over sensor generation and individual physiology
 CGM_LAG_CLIP = (0.0, 20.0)    # 0 = fully compensated (sensor reports plasma), 20 = uncompensated and slow
-CGM_NOISE_FRACTION = 0.060  # [GE-FIX] 0.120→0.060 — reverted the HIVAR 2x back to the value calibrated for the ~5.8 mg/dL Δ5min-std target; the true-BG delta scale is now carried by BG_SCALE_FACTOR, and observed acf(8h) stays ~true (~0.03) since sensor noise no longer dilutes it.
+CGM_NOISE_FRACTION = 0.10  # sensor noise as a fraction of BG
                             # (~9 mg/dL drift around BG=150). Bumped from 0.018 to compensate
                             # for the AR(1) step-to-step variance reduction; preserves the
                             # 5.81 mg/dL Δ5min std target while producing the smooth,
@@ -584,7 +564,7 @@ RARE_EVENT_SKILL_REDUCTION = 0.3  # Even skilled people have bad days sometimes
 # as the patient eats to recover. Real patients respond by reducing or
 # suspending basal coverage — for pump users a temp basal / pump suspend,
 # for MDI users skipping the next basal injection — not by stacking carbs.
-HYPO_CORRECTION_REFRACTORY_MIN = 30.0  # Min minutes between hypo corrections (moderate hypo 55-70).
+HYPO_CORRECTION_REFRACTORY_MIN = 22.0# Min minutes between hypo corrections (moderate hypo 55-70).
 SEVERE_HYPO_REFRACTORY_MIN = 15.0      # Shorter refractory for severe hypo (<55). Rule-of-15 spirit:
                                        # symptomatic patient still rage-eats, but waits ~10 min between
                                        # doses so the first rescue's carbs can act. Without this gap,
@@ -646,18 +626,15 @@ EXERCISE_IS_RAMP_HOURS = 1.0           # Trapezoidal ramp up/down for the IS boo
 # ============================================================================
 
 TREND_CORRECTION_WINDOW_STEPS = 6      # BG history window for trend (6 steps = 30 min)
-TREND_HIGH_RATE_THRESHOLD = 5.0        # mg/dL/step rising trend to trigger preemptive correction.
-                                       # Modest threshold — flatter sustained climbs into the 200–250
-                                       # zone need to trip the trend gate to keep hyper p90 / TAR2
-                                       # bounded.
+TREND_HIGH_RATE_THRESHOLD = 6.2        # mg/dL/step rising trend to trigger preemptive correction
 TREND_HIGH_BG_MIN = 145.0              # BG must exceed this for trend-based high correction.
                                        # `eff_high_thresh = 180 - 25*skill_avg` lands at 160 for
                                        # high-skill patients, so this threshold must sit below 160 or
                                        # the trend window collapses to empty for skilled patients. At
                                        # 145, the window is 145–160 for high-skill and 145–170 for
                                        # low-skill, allowing preemptive corrections on dinner climbs.
-TREND_LOW_RATE_THRESHOLD = -5.0        # mg/dL/step falling trend to trigger preemptive carb
-TREND_LOW_BG_MAX = 110.0               # BG must be below this for trend-based low correction. Attentive patients catch falling trends *well* before 70 — they eat preemptive carbs when BG is dropping through the 90–110 band.
+TREND_LOW_RATE_THRESHOLD = -6.1       # mg/dL/step falling trend to trigger preemptive carb
+TREND_LOW_BG_MAX = 106.0  # mg/dL; a trend-based low correction needs BG below this
 
 # ============================================================================
 # ALCOHOL MODELING
@@ -1738,7 +1715,7 @@ class T1DMSimulator:
             if i == AFTERNOON_SNACK_SLOT:
                 bolus_skip_prob = AFTERNOON_SNACK_BOLUS_SKIP_BASE * (1 - 0.5 * eff_s3)
             elif i >= MEALS_BASE:
-                bolus_skip_prob = 0.1 * (1 - eff_s3)
+                bolus_skip_prob = SNACK_BOLUS_SKIP_BASE * (1 - 0.5 * eff_s3)
             else:
                 bolus_skip_prob = MEAL_BOLUS_SKIP_BASE_PROB * (1 - eff_s3)
 
