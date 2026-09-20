@@ -40,7 +40,7 @@ Every carbohydrate curve is a gamma whose shape comes from a glycaemic index (`g
     C[n] = A * w[n] * mean{ t^(k - 1) * exp(-t / theta) : t in [n*dt, (n+1)*dt) }
            A s.t. sum_n C[n] = carb_grams
 
-Averaging the density across the step is what sizes the leading edge: the first step of a `k = 2, theta = 15` rescue curve carries 37% of the peak and a `k = 3, theta = 25` bolus 2%, so a curve rises through its onset. `w[n]` is 1 except over the last `CURVE_TAIL_CLIP_FRACTION` (1/6) of the steps, where a smootherstep takes it to exactly 0, so no curve ends on a cliff. The same construction applies to every gamma curve — meals, rescue and follow-up carbs, and every bolus.
+Averaging the density across the step is what sizes the leading edge: the first step of a `k = 2, theta = 15` rescue curve carries 37% of the peak and a `k = 3, theta = 30` bolus 1.5%, so a curve rises through its onset. `w[n]` is 1 except over the last `CURVE_TAIL_CLIP_FRACTION` (1/6) of the steps, where a smootherstep takes it to exactly 0, so no curve ends on a cliff. The same construction applies to every gamma curve — meals, rescue and follow-up carbs, and every bolus.
 
     g        = clip(GI, 0, 100) / 100
     k        = 4.5 + (2.0 - 4.5) * g
