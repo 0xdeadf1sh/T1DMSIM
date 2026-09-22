@@ -47,7 +47,7 @@ def test_meta_carries_flat_compat_keys(tmp_path):
     assert meta['patient_uniform_sample_prob'] == 0.0
     assert meta['dt_minutes'] == 5
     assert tuple(meta['channels']) == cs.CHANNEL_NAMES
-    assert meta['cache_format'] == 'blosc2-ndarray-v3'
+    assert meta['cache_format'] == 'blosc2-ndarray-v4'
 
     # The context alone is n_timesteps; the tails are their own arrays.
     assert meta['context_steps'] == 666
@@ -71,7 +71,7 @@ def test_rerender_refuses_a_foreign_cache_format(tmp_path, monkeypatch, capsys):
 def test_contract_geometry_is_the_default():
     # SPEC/cache.md fixes both; a cache built to other arithmetic cannot train.
     assert cs.DEFAULT_CONTEXT_STEPS == cs.MAX_CONTEXT_PATCHES * cs.PATCH_SIZE == 2016
-    assert cs.DEFAULT_TAIL_STEPS == cs.PREDICTION_PATCHES * cs.PATCH_SIZE == 24
+    assert cs.DEFAULT_TAIL_STEPS == (cs.PREDICTION_PATCHES + cs.TAIL_VISIBLE_PATCHES) * cs.PATCH_SIZE == 48
     assert cs.DEFAULT_WARMUP_OFFSET_STEPS == 288
     assert cs.TAIL_ARMS == ('none', 'bolus', 'carbs', 'bolus_carbs')
     assert cs.SKILL_NAMES == ('dietary_discipline', 'attentiveness',

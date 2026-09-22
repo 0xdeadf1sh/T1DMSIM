@@ -87,7 +87,8 @@ PATCH_SIZE = 6                                              # inference.md §11
 MAX_CONTEXT_PATCHES = 336                                   # 7 d of context
 PREDICTION_PATCHES = 4                                      # 2 h of forecast
 DEFAULT_CONTEXT_STEPS = MAX_CONTEXT_PATCHES * PATCH_SIZE    # 2016
-DEFAULT_TAIL_STEPS = PREDICTION_PATCHES * PATCH_SIZE        # 24
+TAIL_VISIBLE_PATCHES = 4                                    # visible past the forecast span
+DEFAULT_TAIL_STEPS = (PREDICTION_PATCHES + TAIL_VISIBLE_PATCHES) * PATCH_SIZE  # 48
 DEFAULT_WARMUP_OFFSET_STEPS = STEPS_PER_DAY  # drawn per row: a uniform boundary hour
 
 # The index IS the arm's identity; a 2x2 factorial over the two boundary doses.
@@ -114,7 +115,7 @@ TAIL_REPORT_OFFSETS_MIN = (30, 60, 90, 120)
 # CACHE / COMPRESSION PARAMETERS
 # ============================================================================
 
-CACHE_FORMAT_VERSION = 'blosc2-ndarray-v3'
+CACHE_FORMAT_VERSION = 'blosc2-ndarray-v4'
 DEFAULT_ROWS_PER_CHUNK = 32
 DEFAULT_ZSTD_CLEVEL = 5
 # blosc2 chunks must fit a signed 32-bit byte count (the C-extension ceiling).
