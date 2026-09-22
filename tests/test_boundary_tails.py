@@ -117,15 +117,9 @@ def test_arms_differ_only_through_the_injected_dose():
     logged_bolus = delivered / dose.site_factor
     logged_carb = gamma_curve(dose.logged_carb_g, *gi_gamma_params(dose.logged_carb_gi))
 
-    def over_tail(curve: np.ndarray) -> np.ndarray:
-        out = np.zeros(T)
-        n = min(T, len(curve))
-        out[:n] = curve[:n]
-        return out
-
     ins, carb = tails['bolus_insulin'], tails['total_carb']
-    assert np.allclose(ins[1] - ins[0], over_tail(logged_bolus), rtol=1e-4, atol=1e-6)
-    assert np.allclose(carb[2] - carb[0], over_tail(logged_carb), rtol=1e-4, atol=1e-6)
+    assert np.allclose(ins[1] - ins[0], logged_bolus[:T], rtol=1e-4, atol=1e-6)
+    assert np.allclose(carb[2] - carb[0], logged_carb[:T], rtol=1e-4, atol=1e-6)
     # An arm without a dose of a kind carries exactly arm 0's channel for it.
     assert np.array_equal(carb[1], carb[0])
     assert np.array_equal(ins[2], ins[0])
