@@ -2,7 +2,7 @@
 
 The geometry is SPEC/cache.md. These pin the lockstep between the arms, what the
 log carries versus what drives BG, that nothing is chopped at the boundary, and
-that a tail is never rejected."""
+that only ``tail_reject_below`` rejects a row for its tails."""
 
 import copy
 import json
@@ -198,12 +198,13 @@ def test_tail_step_zero_carries_the_context_forward():
     assert found, 'no seed had carbohydrate on board at the boundary'
 
 
-def test_no_tail_is_ever_rejected(tmp_path, monkeypatch):
+def test_tail_filter_off_keeps_every_tail(tmp_path, monkeypatch):
     monkeypatch.setattr(cs, 'TAIL_BOLUS_U_RANGE', (20.0, 20.0))
     out = str(tmp_path / 'railed')
     report = cs.build_cache(
         out_dir=out, pool_size=6, context_steps=576, warmup_hours=24.0, n_jobs=1,
         dataset_md='', baseline_stats=None, seed_salt=0, events=True,
+        tail_reject_below=0.0,
     )
     assert report['corpus']['n_patients'] == 6
     assert report['sampling']['n_fallback_rows'] == 0
@@ -216,6 +217,19 @@ def test_no_tail_is_ever_rejected(tmp_path, monkeypatch):
     assert tail_bg.min() >= BG_CLAMP_MIN, 'the clamp is the only floor under it'
     assert tail_bg[:, 1].min() <= rail_low and tail_bg[:, 3].min() <= rail_low
     assert tail_bg[:, 0].min() > rail_low, 'the dose is what took it there'
+
+
+def test_tail_filter_redraws_rows_below_the_floor(tmp_path, monkeypatch):
+    monkeypatch.setattr(cs, 'TAIL_BOLUS_U_RANGE', (8.0, 20.0))
+    out = str(tmp_path / 'floored')
+    report = cs.build_cache(
+        out_dir=out, pool_size=8, context_steps=576, warmup_hours=24.0, n_jobs=1,
+        dataset_md='', baseline_stats=None, seed_salt=0, events=True,
+    )
+    assert report['params']['tail_reject_below'] == cs.DEFAULT_TAIL_REJECT_BELOW
+    assert report['sampling']['total_simulations'] > 8, 'some row was re-drawn'
+    tail_bg = np.asarray(blosc2.open(os.path.join(out, 'tail_bg_observed.b2nd'), mode='r'))
+    assert tail_bg.min() >= cs.DEFAULT_TAIL_REJECT_BELOW
 
 
 def test_tail_dose_arrays_are_the_boundary_step(tmp_path):

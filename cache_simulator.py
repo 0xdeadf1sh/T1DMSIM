@@ -136,6 +136,7 @@ DEFAULT_MAX_ATTEMPTS = 50    # soft cap: budget for meeting the hypo target per 
 _VALIDITY_HARD_EXTRA = 250
 DEFAULT_HYPO_MIN_FRAC = 0.05 # min fraction of time < 70 mg/dL for a hypo-designated row
 DEFAULT_RAIL_HIGH = BG_CLAMP_MAX - 1.0  # discard a window with any bg_observed >= this
+DEFAULT_TAIL_REJECT_BELOW = 10.0  # re-draw a row whose any-arm tail bg_observed dips below; 0 = off
 DEFAULT_RAIL_LOW = BG_CLAMP_MIN + 1.0   # [CF] was a hardcoded 41, which discarded every trajectory reaching a severe low — precisely the population this corpus now exists to teach. Both rails are DERIVED so a future clamp change cannot desynchronise them; the filter only ever meant to drop rows pinned flat against a clamp.
 
 # Event-detection thresholds (mirrors the README's meal detector: upward
@@ -295,6 +296,7 @@ class RowConfig:
     events: bool = False
     tail_steps: int = DEFAULT_TAIL_STEPS
     warmup_offset_steps: int = DEFAULT_WARMUP_OFFSET_STEPS
+    tail_reject_below: float = DEFAULT_TAIL_REJECT_BELOW
 
 
 @dataclasses.dataclass(frozen=True)
@@ -564,11 +566,11 @@ def _finish(
 
 
 def _resolve_row(cache_idx: int, cfg: RowConfig) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    """Rejection-sample the row at ``cache_idx``; both gates read the CONTEXT alone.
+    """Rejection-sample the row at ``cache_idx``; validity reads the context and the tails.
 
-    A rail-hitting context is never stored; a hypo row prefers ``hypo_min_frac``
-    below ``hypo_threshold`` and past ``max_attempts`` keeps the hypo-richest valid
-    one (``accepted=False``). A tail is never rejected. No valid context: raise."""
+    Never stored: a rail-hitting context, or any tail below ``tail_reject_below`` (0 = off).
+    A hypo row prefers ``hypo_min_frac`` below ``hypo_threshold``, read off the context; past
+    ``max_attempts`` it keeps the hypo-richest valid one (``accepted=False``). None valid: raise."""
     is_hypo = _is_hypo_row(cache_idx, cfg.hypo_prob, cfg.seed_salt)
     hard_cap = cfg.max_attempts + _VALIDITY_HARD_EXTRA
     best_valid: tuple[dict[str, np.ndarray], dict[str, Any]] | None = None
@@ -582,6 +584,9 @@ def _resolve_row(cache_idx: int, cfg: RowConfig) -> tuple[dict[str, np.ndarray],
 
         if not (stats['bg_max'] < cfg.rail_high and stats['bg_min'] > cfg.rail_low):
             continue  # rail-hitting context: never a stored candidate
+        if (cfg.tail_reject_below > 0.0
+                and float(channels['tail_bg_observed'].min()) < cfg.tail_reject_below):
+            continue
 
         if not is_hypo:
             return _finish(channels, stats, cache_idx, n_sims, is_hypo, accepted=True)
@@ -601,9 +606,9 @@ def _resolve_row(cache_idx: int, cfg: RowConfig) -> tuple[dict[str, np.ndarray],
         ch, st = best_valid
         return _finish(ch, st, cache_idx, n_sims, is_hypo, accepted=False)
     raise RuntimeError(
-        f'row {cache_idx}: no rail-valid context (bg_observed in '
-        f'({cfg.rail_low}, {cfg.rail_high})) found in {hard_cap} attempts; '
-        f'check --rail-low / --rail-high.'
+        f'row {cache_idx}: no valid row (context bg_observed in '
+        f'({cfg.rail_low}, {cfg.rail_high}), tails >= {cfg.tail_reject_below}) found in '
+        f'{hard_cap} attempts; check --rail-low / --rail-high / --tail-reject-below.'
     )
 
 
@@ -1229,6 +1234,7 @@ def _render_dataset_md(report: dict[str, Any]) -> str:
     lines.append(f'| Warmup discarded | {p["warmup_hours"]:.1f} h + U{{0..{p["warmup_offset_steps"] - 1}}} steps |')
     lines.append(f'| Seed salt | {p["seed_salt"]} |')
     lines.append(f'| Rail filter | discard bg_observed ≥ {p["rail_high"]:.0f} or ≤ {p["rail_low"]:.0f} mg/dL |')
+    lines.append(f'| Tail filter | discard any tail bg_observed < {p.get("tail_reject_below", 0.0):g} mg/dL (0 = off) |')
     lines.append(f'| Hypo oversampling | prob {p["hypo_oversample"]:.3g}, ≥ {pct(p["hypo_min_frac"])} of time < {p["hypo_threshold"]:.0f} mg/dL |')
     lines.append(f'| Rejection cap | {p["max_attempts"]} attempts/row (soft) |')
     lines.append(f'| Compression | blosc2 zstd-{p["zstd_clevel"]} + byte-shuffle, {p["rows_per_chunk"]} rows/chunk |')
@@ -1265,6 +1271,7 @@ def build_cache(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     rail_high: float = DEFAULT_RAIL_HIGH,
     rail_low: float = DEFAULT_RAIL_LOW,
+    tail_reject_below: float = DEFAULT_TAIL_REJECT_BELOW,
     seed_salt: int = 0,
     dataset_md: str = 'DATASET.md',
     baseline_stats: str | None = DEFAULT_BASELINE_STATS,
@@ -1276,6 +1283,8 @@ def build_cache(
         raise ValueError(f'pool_size must be >= 1, got {pool_size}')
     if not rail_low < rail_high:
         raise ValueError(f'rail_low ({rail_low}) must be < rail_high ({rail_high})')
+    if tail_reject_below < 0.0:
+        raise ValueError(f'tail_reject_below must be >= 0, got {tail_reject_below}')
     if not 0.0 <= hypo_oversample <= 1.0:
         raise ValueError(f'hypo_oversample must be in [0, 1], got {hypo_oversample}')
     if not 0.0 <= hypo_min_frac <= 1.0:
@@ -1316,6 +1325,7 @@ def build_cache(
         events=events,
         tail_steps=tail_steps,
         warmup_offset_steps=warmup_offset_steps,
+        tail_reject_below=tail_reject_below,
     )
     specs = array_specs(cfg, pool_size)
 
@@ -1324,6 +1334,8 @@ def build_cache(
     print(f'Tails:              {N_TAIL_ARMS} arms x {tail_steps} steps ({", ".join(TAIL_ARMS)})')
     print(f'Warmup discarded:   {warmup_hours} h ({warmup_steps} steps) + U{{0..{warmup_offset_steps - 1}}}')
     print(f'Rail filter:        discard bg_observed >= {rail_high} or <= {rail_low} mg/dL')
+    print(f'Tail filter:        discard any tail bg_observed < {tail_reject_below:g} mg/dL'
+          + (' (off)' if tail_reject_below == 0.0 else ''))
     print(f'Hypo oversampling:  prob {hypo_oversample} (>= {hypo_min_frac} of time < {hypo_threshold:g} mg/dL)')
     print(f'Rejection cap:      {max_attempts} attempts/row (soft; hypo target)')
     print(f'Workers:            {n_jobs}')
@@ -1420,6 +1432,7 @@ def build_cache(
             'max_attempts': int(max_attempts),
             'rail_high': float(rail_high),
             'rail_low': float(rail_low),
+            'tail_reject_below': float(tail_reject_below),
             'seed_salt': int(seed_salt),
             'rows_per_chunk': int(effective_rpc),
             'zstd_clevel': int(zstd_clevel),
@@ -1524,6 +1537,9 @@ def main() -> int:
                         help='Discard a window with any bg_observed >= this (mg/dL).')
     parser.add_argument('--rail-low', type=float, default=DEFAULT_RAIL_LOW,
                         help='Discard a window with any bg_observed <= this (mg/dL).')
+    parser.add_argument('--tail-reject-below', type=float, default=DEFAULT_TAIL_REJECT_BELOW,
+                        help='Re-draw a row whose bg_observed in any tail arm dips below '
+                             'this (mg/dL); 0 disables.')
     parser.add_argument('--seed-salt', type=int, default=0,
                         help='Salt folded into every seed; change to draw an independent corpus.')
     parser.add_argument('--dataset-md', type=str, default='DATASET.md',
@@ -1576,6 +1592,7 @@ def main() -> int:
         max_attempts=args.max_attempts,
         rail_high=args.rail_high,
         rail_low=args.rail_low,
+        tail_reject_below=args.tail_reject_below,
         seed_salt=args.seed_salt,
         dataset_md=args.dataset_md,
         baseline_stats=None if args.no_baseline else args.baseline_stats,
